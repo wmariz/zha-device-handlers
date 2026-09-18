@@ -21,7 +21,6 @@ controller required.
 | C4-SW120277 | On/Off Wall Switch | Switch |
 | C4-KC120277 | 8-Button Scene Controller | 8 event entities (press, hold, release) |
 | loz-5s1-w | Dual Switched Outlet | 2 switches (one per outlet) |
-| loz-5d1-w | Dual Dimmer Outlet | 2 lights (dimmable, one per outlet) |
 | C4-Z2IO-ZP | Zigbee IO Module | 2 switches (relays), 5 binary sensors (contacts), temperature, humidity |
 | C4-SR260 | IR/Zigbee Remote (50 buttons + LCD) | 50 event entities (press, release), battery |
 
@@ -206,15 +205,6 @@ the LED Configuration section below.
 
 Exposes two independent switch entities, one per outlet. Each outlet can be
 toggled individually.
-
-### loz-5d1-w Dual Dimmer Outlet
-
-Dimming counterpart of the loz-5s1-w — same hardware family and endpoint
-layout, but exposes two independent dimmable light entities (one per
-outlet) instead of switches. Brightness is sent as a 0-100% value inside
-the same `c4.dm.tv`/`c4.dm.tc` frames the switch variant uses for on/off;
-this has not yet been verified against a packet capture of real LOZ-5D1-W
-traffic (see `control4_loz5d1w.py` docstring).
 
 ### C4-SR260 Remote
 
@@ -460,7 +450,6 @@ control4/
 ├── control4_switch.py           C4-SW120277 quirk
 ├── control4_scene_controller.py C4-KC120277 quirk
 ├── control4_outlet.py           loz-5s1-w quirk
-├── control4_loz5d1w.py          loz-5d1-w quirk (dimmer variant of the outlet)
 ├── control4_z2io_zp.py          C4-Z2IO-ZP quirk
 ├── control4_remote.py           C4-SR260 quirk
 ├── c4_z2io_zp.py                Z2IO-ZP state machine & protocol handler
