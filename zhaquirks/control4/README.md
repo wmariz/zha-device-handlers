@@ -21,16 +21,21 @@ controller required.
 | C4-SW120277 | On/Off Wall Switch | Switch |
 | C4-KC120277 | 8-Button Scene Controller | 8 event entities (press, hold, release) |
 | loz-5s1-w | Dual Switched Outlet | 2 switches (one per outlet) |
-| loz-5d1-w | Dual Dimming Outlet *(experimental — see note)* | 2 lights (dimmable, one per outlet) |
+| loz-5d1-w | Dimming Outlet *(experimental — see note)* | 1 light (dimmable, outlet 0) + 1 switch (outlet 1) |
 | C4-Z2IO-ZP | Zigbee IO Module | 2 switches (relays), 5 binary sensors (contacts), temperature, humidity |
 | C4-SR260 | IR/Zigbee Remote (50 buttons + LCD) | 50 event entities (press, release), battery |
 
 > **loz-5d1-w note:** this quirk (`control4_outlet_dimmer.py`) has not yet
-> been verified against a real device capture. The endpoint layout and the
-> 0–100 dim-level scale are inferred from the confirmed `loz-5s1-w` protocol.
-> On/off should work; intermediate brightness levels need field
-> confirmation. Please open an issue with a Wireshark capture or HA
-> diagnostics download if you have this hardware.
+> been verified against a real device capture. Two earlier approaches that
+> sent brightness as a graduated value over the outlet's c4.dm.tv text
+> command did not work on real hardware (the light reverted to off, or got
+> stuck at a fixed 75%). The current version instead sends real ZCL Level
+> Control frames on outlet 0 (EP1), the same way the confirmed C4-APD120
+> dimmer does — on/off works either way, but graduated brightness on
+> outlet 0 is still unconfirmed. Outlet 1 has no real endpoint of its own
+> and is exposed as a plain on/off switch, not a light. Please open an
+> issue with a Wireshark capture or HA diagnostics download if you have
+> this hardware.
 
 All Control4 Zigbee devices use a proprietary text-based serial protocol
 layered on top of ZigBee APS instead of standard ZCL clusters. These quirks
