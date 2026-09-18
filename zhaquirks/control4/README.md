@@ -21,8 +21,16 @@ controller required.
 | C4-SW120277 | On/Off Wall Switch | Switch |
 | C4-KC120277 | 8-Button Scene Controller | 8 event entities (press, hold, release) |
 | loz-5s1-w | Dual Switched Outlet | 2 switches (one per outlet) |
+| loz-5d1-w | Dual Dimming Outlet *(experimental — see note)* | 2 lights (dimmable, one per outlet) |
 | C4-Z2IO-ZP | Zigbee IO Module | 2 switches (relays), 5 binary sensors (contacts), temperature, humidity |
 | C4-SR260 | IR/Zigbee Remote (50 buttons + LCD) | 50 event entities (press, release), battery |
+
+> **loz-5d1-w note:** this quirk (`control4_outlet_dimmer.py`) has not yet
+> been verified against a real device capture. The endpoint layout and the
+> 0–100 dim-level scale are inferred from the confirmed `loz-5s1-w` protocol.
+> On/off should work; intermediate brightness levels need field
+> confirmation. Please open an issue with a Wireshark capture or HA
+> diagnostics download if you have this hardware.
 
 All Control4 Zigbee devices use a proprietary text-based serial protocol
 layered on top of ZigBee APS instead of standard ZCL clusters. These quirks

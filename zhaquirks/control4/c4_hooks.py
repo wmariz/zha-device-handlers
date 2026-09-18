@@ -548,6 +548,11 @@ except Exception as _e:
     _LOGGER.error("C4: failed to import control4_outlet - %s", _e)
 
 try:
+    import control4_outlet_dimmer    # registers "loz-5d1-w" (imports control4_dimmer + control4_outlet)
+except Exception as _e:
+    _LOGGER.error("C4: failed to import control4_outlet_dimmer - %s", _e)
+
+try:
     import control4_fan              # registers "C4-4SF120"
 except Exception as _e:
     _LOGGER.error("C4: failed to import control4_fan — %s", _e)
