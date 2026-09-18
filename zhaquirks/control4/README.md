@@ -21,7 +21,7 @@ controller required.
 | C4-SW120277 | On/Off Wall Switch | Switch |
 | C4-KC120277 | 8-Button Scene Controller | 8 event entities (press, hold, release) |
 | loz-5s1-w | Dual Switched Outlet | 2 switches (one per outlet) |
-| loz-5d1-w | Dual Dimming Outlet *(outlet 1 confirmed, outlet 2 unverified — see note)* | 2 lights (dimmable, one per outlet) |
+| loz-5d1-w | Dual Dimming Outlet *(outlet 1 confirmed, outlet 2 unresolved — see note)* | 2 lights (dimmable, one per outlet) |
 | C4-Z2IO-ZP | Zigbee IO Module | 2 switches (relays), 5 binary sensors (contacts), temperature, humidity |
 | C4-SR260 | IR/Zigbee Remote (50 buttons + LCD) | 50 event entities (press, release), battery |
 
@@ -30,15 +30,19 @@ controller required.
 > Level Control frames, the same way the confirmed C4-APD120 dimmer does —
 > **confirmed working on real hardware**, including dragging the
 > brightness slider while the light is on. Outlet 2 (synthetic EP11) has
-> no real Zigbee endpoint of its own, so it can't receive a real ZCL frame;
-> it sends a graduated level over the outlet's c4.dm.tv text command
-> instead, which is the original Control4 app's own transport for that
-> outlet — **not yet confirmed** against real hardware. (An earlier
-> version tried the c4.dm.tv approach for outlet 1 too, which didn't work;
-> that failure turned out to be specific to outlet 1 needing real ZCL, not
-> a sign that c4.dm.tv rejects graduated levels in general.) Please open an
-> issue with a Wireshark capture or HA diagnostics download if outlet 2
-> misbehaves.
+> no real Zigbee endpoint of its own, so it can't receive a real ZCL frame.
+> Two attempts to give it a graduated level over the outlet's c4.dm.tv text
+> command (confirmed working for plain on/off) both reverted the light to
+> off on real hardware, the same failure outlet 1 originally had. The
+> current version guesses that c4.dm.tv's fixed "00" field is actually a
+> parameter *index* (by analogy with `c4_ramp_cluster.py`'s use of the same
+> namespace) and tries a different index for brightness — **unconfirmed,
+> and may not work either**. See the module docstring's "History" section
+> before changing this further. If it still doesn't work, the reliable next
+> step is a Wireshark capture of a real Control4 controller dimming outlet
+> 2, to read the actual command instead of guessing it. Please open an
+> issue with that capture (or an HA diagnostics download) if you have this
+> hardware.
 
 All Control4 Zigbee devices use a proprietary text-based serial protocol
 layered on top of ZigBee APS instead of standard ZCL clusters. These quirks

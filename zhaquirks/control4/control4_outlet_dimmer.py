@@ -3,22 +3,22 @@
 CONFIRMED on real hardware: outlet 1 (EP1) dims correctly — turning on at
 an arbitrary brightness works, and dragging the brightness slider while
 the light is on updates the level in place (it does not revert to off).
-The Control4 controller's own app also shows outlet 2 as dimmable, so this
-version gives it graduated brightness too, using a different transport
-than outlet 1 (see below) since it has no real endpoint of its own.
 
-History — why the two outlets use two different transports:
+Outlet 2 (synthetic EP11) is STILL UNRESOLVED. The Control4 controller's
+own app shows it as dimmable in hardware, but every attempt at graduated
+brightness for it so far has reverted to off, same as outlet 1's original
+failure. See "History" below for what's been tried and ruled out — please
+read it before changing this file again, to avoid repeating a dead end.
+
+History:
 
   Attempts 1 and 2 (see git history: commit 438bb9a, and the commit that
   replaced it) translated LevelControl commands for BOTH outlets into the
-  outlet's c4.dm.tv text SET command with a graduated 0-100 level, exactly
-  like C4OutletOnOff does for on/off in control4_outlet.py. On real
-  hardware this made outlet 1 revert to (or stay) off for any level other
-  than 0x00/0x64, and a plain turn-on got stuck at C4_DEFAULT_ON_LEVEL
-  (191 -> 75%). At the time this looked like a protocol-wide dead end, but
-  it turned out to only be true for outlet 1: both outlets were sharing
-  the *same* broken assumption, and the failure was only ever demonstrated
-  against outlet 1.
+  outlet's c4.dm.tv text SET command (`c4.dm.tv <outlet> 00 <level>`) with
+  a graduated 0-100 level, exactly like C4OutletOnOff does for on/off in
+  control4_outlet.py. On real hardware this made outlet 1 revert to (or
+  stay) off for any level other than 0x00/0x64, and a plain turn-on got
+  stuck at C4_DEFAULT_ON_LEVEL (191 -> 75%).
 
   Attempt 3 fixed outlet 1 by re-reading C4DimmerOnOff's docstring in
   control4_dimmer.py ("C4 dimmers ignore standard On/Off (cluster 0x0006)
@@ -29,18 +29,39 @@ History — why the two outlets use two different transports:
   docstring: "clusters [Basic … OnOff Level Time]") that the switch quirk
   never wires up, because the switch doesn't dim. Outlet 1's dimming
   circuit turned out to behave like the APD120, and real ZCL passthrough
-  was confirmed working.
+  was confirmed working. This has NO equivalent for outlet 2: it is a
+  synthetic endpoint with no real Zigbee endpoint behind it (the device's
+  interview only ever shows EP1/2/196/197/198), so there is nowhere to
+  send a real ZCL frame — ZCL addressing has no field for "which physical
+  circuit" within one endpoint/cluster.
 
-  Outlet 2 has no such option: it is a synthetic endpoint (EP11) with no
-  real Zigbee endpoint behind it (the device's interview only ever shows
-  EP1/2/196/197/198), so there is nowhere to send a real ZCL frame — ZCL
-  addressing has no field for "which physical circuit" within one
-  endpoint/cluster. Since outlet 2 is confirmed dimmable in the original
-  Control4 app, and the only channel that can address it at all is the
-  outlet-index field in c4.dm.tv, this version gives outlet 2 back its
-  graduated c4.dm.tv level (identical to attempts 1/2's approach) on the
-  theory that it was never actually broken — only outlet 1 was, because it
-  was wrongly using this same transport instead of real ZCL.
+  Attempt 4 hypothesized that outlet 1's failure fully explained the
+  original attempt 1/2 result (i.e. that c4.dm.tv itself was fine and only
+  outlet 1 needed real ZCL), and restored the identical graduated
+  c4.dm.tv level for outlet 2 alone. Real-hardware testing showed the
+  exact same revert-to-off symptom on outlet 2, which disproves that
+  theory: c4.dm.tv's `<level>` field genuinely seems to reject anything
+  other than 0x00/0x64, independent of which outlet it targets.
+
+  Attempt 5 (this version) noticed that c4_ramp_cluster.py uses the same
+  c4.dm.tv namespace as `<channel> <index> <value>` for the APD120's ramp
+  parameters, where each index (0x01=fast, 0x02=on-ramp, 0x03=off-ramp,
+  ...) is an independently addressable parameter accepting a wide value
+  range (0-65535 ms) — not a fixed boolean-like pair. By that pattern, the
+  outlet SET command's fixed "00" may be an *index* (plausibly "on/off
+  state") rather than a filler byte, and graduated brightness may live at
+  a *different*, currently unknown index instead. This version guesses
+  index 0x01 for it — see C4Outlet2DimmerLevelControl's docstring. This is
+  an unconfirmed guess with no captured evidence behind the specific index
+  chosen. On/off itself no longer goes through a redirect for outlet 2 (see
+  Implementation) so it keeps using the confirmed index 0x00 unaffected by
+  this experiment.
+
+  If this attempt *also* fails, further index guessing has a large,
+  unconstrained search space and is unlikely to be productive — the
+  reliable next step is a Wireshark capture of a real Control4 controller
+  dimming outlet 2, to read the actual command off the wire instead of
+  guessing it.
 
 Implementation:
   • Outlet 1 (EP1) reuses C4DimmerOnOff / C4DimmerLevelControl UNCHANGED
@@ -48,19 +69,18 @@ Implementation:
     EP2/EP196 reuse the base C4ConfigCluster (not C4OutletConfigCluster),
     matching the APD120's raw 0-255 dim-level report path
     (_sync_ep1_level) instead of the outlet's on/off-flag interpretation.
-  • Outlet 2 (synthetic EP11) reuses C4DimmerOnOff UNCHANGED for the
-    on/off->level redirect, paired with C4Outlet2DimmerLevelControl (this
-    file), which sends c4.dm.tv <01> 00 <level> with a graduated 0-100
-    level instead of the fixed 0x64/0x00 used for plain on/off.
+  • Outlet 2 (synthetic EP11) uses C4Outlet1OnOff UNCHANGED from
+    control4_outlet.py for on/off (the confirmed direct c4.dm.tv boolean
+    transport — no LevelControl redirect, unlike outlet 1: that redirect
+    exists because the real APD120 ignores standard On/Off, and there's no
+    evidence this text-protocol outlet does), paired with
+    C4Outlet2DimmerLevelControl (this file) for brightness, which sends
+    c4.dm.tv <01> <guessed index> <level> with a graduated 0-100 level.
   • EP197's button/state cluster treats outlet-index-1 c4.dm.tc
     announcements as a graduated level for outlet 2, and defers everything
     else (including any outlet-index-0 announcements) to the base
     on/off-only sync, so outlet 1's current_level stays owned exclusively
     by the real-ZCL / EP2-EP196 path above.
-
-STILL UNVERIFIED — please re-test and report back specifically for outlet
-2: turn it on at an arbitrary brightness, then drag the slider while it's
-on, the same way outlet 1 was already confirmed.
 """
 
 import logging
@@ -113,10 +133,15 @@ from c4_button_cluster import C4DualOutletButtonCluster
 from c4_hooks import _C4_MODEL_QUIRK_MAP
 
 # Reused UNCHANGED for outlet 1: real-ZCL transport, same as the C4-APD120
-# (see module docstring). Also reused UNCHANGED for outlet 2's on/off->level
-# redirect — it doesn't care what class implements self.endpoint.level.
+# (see module docstring). C4DimmerLevelControl is also the base class for
+# C4Outlet2DimmerLevelControl below (local attribute-caching reuse only).
 from control4_dimmer import C4DimmerOnOff, C4DimmerLevelControl
-from control4_outlet import C4OutletStateCluster
+# Reused UNCHANGED for outlet 2's on/off: the confirmed direct c4.dm.tv
+# boolean transport, independent of LevelControl — see module docstring for
+# why outlet 2 does NOT use the OnOff->LevelControl redirect that outlet 1
+# needs (that redirect exists because the real APD120 ignores standard
+# On/Off; there's no evidence this text-protocol outlet does).
+from control4_outlet import C4Outlet1OnOff, C4OutletStateCluster
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -146,6 +171,25 @@ def _c4_pct_to_zcl_level(level_pct: int) -> int:
 class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
     """LevelControl for outlet 2 (synthetic EP11), via graduated c4.dm.tv.
 
+    UNVERIFIED GUESS, one specific thing being tested: the confirmed on/off
+    command for this outlet is `c4.dm.tv <outlet> 00 <level>`, where
+    <level> only ever accepts 0x00/0x64. c4_ramp_cluster.py shows the same
+    c4.dm.tv namespace is really `<channel> <index> <value>` for the
+    APD120's ramp parameters (index 0x01=fast, 0x02=on-ramp, 0x03=off-ramp,
+    etc., each an independently addressable parameter). By that pattern,
+    the outlet command's fixed "00" may be an *index* meaning "on/off
+    state" rather than a filler byte — in which case a graduated brightness
+    might live at a *different* index instead of being crammed into the
+    same one. This class guesses index 0x01 ("level", by analogy with
+    typical state=0/level=1 firmware conventions) for that purpose. There
+    is no captured evidence this index exists or means anything in
+    particular; if it doesn't work, the next step is a Wireshark capture
+    of a real Control4 controller dimming this outlet, not another guess.
+
+    On/off itself does NOT go through this class — see C4Outlet1OnOff in
+    control4_outlet.py, reused unchanged below, which keeps using the
+    confirmed index 0x00 with the fixed 0x64/0x00 values.
+
     Inherits C4DimmerLevelControl's local caching of on_level/transition-time
     attributes but overrides write_attributes (never forward to the device —
     this protocol has no ZCL WriteAttributes equivalent at all) and
@@ -154,6 +198,7 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
     """
 
     OUTLET_IDX = 1
+    _LEVEL_INDEX = 0x01  # guessed — see class docstring
 
     async def write_attributes(self, attributes, manufacturer=None):
         for attr, value in attributes.items():
@@ -171,7 +216,7 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
         """Send a C4 Get command to query outlet 2's current level."""
         device = self.endpoint.device
         seq = next_c4_seq(device)
-        cmd = f"0g{seq:04x} c4.dm.tv {self.OUTLET_IDX:02x} 00"
+        cmd = f"0g{seq:04x} c4.dm.tv {self.OUTLET_IDX:02x} {self._LEVEL_INDEX:02x}"
         data = _build_c4_frame(0, cmd)
 
         _LOGGER.debug("C4 Outlet2DimmerLevel: polling — %s", cmd)
@@ -188,10 +233,10 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
             _LOGGER.warning("C4 Outlet2DimmerLevel: poll failed: %s", exc)
 
     async def _send_c4_outlet_level(self, level_pct: int) -> None:
-        """Send c4.dm.tv 01 00 <level> with an arbitrary 0-100 level."""
+        """Send c4.dm.tv 01 01 <level> — guessed index, see class docstring."""
         device = self.endpoint.device
         seq = next_c4_seq(device)
-        cmd = f"0s{seq:04x} c4.dm.tv {self.OUTLET_IDX:02x} 00 {level_pct:02x}"
+        cmd = f"0s{seq:04x} c4.dm.tv {self.OUTLET_IDX:02x} {self._LEVEL_INDEX:02x} {level_pct:02x}"
         data = _build_c4_frame(0, cmd)
 
         _LOGGER.debug("C4 Outlet2DimmerLevel: sending %s", cmd)
@@ -413,7 +458,11 @@ class Control4LOZ5D1WDimmer(CustomDevice):
                 PROFILE_ID: zha.PROFILE_ID,
                 DEVICE_TYPE: 0x0101,   # Dimmable light — graduated c4.dm.tv
                 INPUT_CLUSTERS: [
-                    C4DimmerOnOff,
+                    # Confirmed direct on/off transport (index 0x00) — does
+                    # NOT redirect through LevelControl, unlike outlet 1.
+                    C4Outlet1OnOff,
+                    # Guessed index 0x01 for graduated brightness — see its
+                    # class docstring.
                     C4Outlet2DimmerLevelControl,
                 ],
                 OUTPUT_CLUSTERS: [],
