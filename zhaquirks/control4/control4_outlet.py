@@ -491,9 +491,7 @@ class Control4LOZ5S1WOutlet(CustomDevice):
 # Self-register with the get_device patch
 # ---------------------------------------------------------------------------
 _C4_MODEL_QUIRK_MAP["loz-5s1-w"] = Control4LOZ5S1WOutlet
-for _c4_alias in (
-    "LOZ-5D1-W", "C4-LOZ-5D1-W",
-):
-    _C4_MODEL_QUIRK_MAP[_c4_alias] = Control4LOZ5S1WOutlet
-_LOGGER.warning("C4 LOZ-5S1-W: registered aliases")
 _LOGGER.info("C4 LOZ-5S1-W: registered loz-5s1-w in _C4_MODEL_QUIRK_MAP")
+# LOZ-5D1-W is a dimmer variant of this hardware family — it has its own
+# quirk (control4_loz5d1w.py / Control4LOZ5D1WDimmer), not this switch-only
+# class. See that file's docstring for details.
