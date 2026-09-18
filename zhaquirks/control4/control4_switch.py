@@ -188,4 +188,14 @@ class Control4SW120Switch(CustomDevice):
 # Self-register with the get_device patch
 # ---------------------------------------------------------------------------
 _C4_MODEL_QUIRK_MAP["C4-SW120277"] = Control4SW120Switch
+# The LSZ-101 / LDZ-101 in-wall dimmers speak the same proprietary protocol as
+# the APD120 but report manufacturer code 0xABCD and expose the standard
+# cluster set on endpoint 1.  Dispatch is by model string, so registering the
+# aliases is sufficient - no separate signature is required.
+for _c4_alias in (
+    "LSZ-101", "LSZ-102",
+    "C4-LSZ-101", "C4-LSZ-102",
+):
+    _C4_MODEL_QUIRK_MAP[_c4_alias] = Control4SW120Switch
+_LOGGER.warning("C4 SW120277: registered LSZ-101 switch aliases")
 _LOGGER.info("C4 SW120277: registered C4-SW120277 in _C4_MODEL_QUIRK_MAP")
