@@ -32,34 +32,39 @@ controller required.
 > brightness slider while the light is on. Outlet 2 (synthetic EP11) has
 > no real Zigbee endpoint of its own, so it can't receive a real ZCL frame.
 >
-> Three earlier attempts at a graduated level for outlet 2 failed on real
+> Several earlier attempts at a graduated level for outlet 2 failed on real
 > hardware (all reverted the light to off): two tried the outlet's confirmed
 > on/off command (`c4.dm.tv`) with a graduated value or a different
-> parameter index, and a third guessed a `c4.dmx.lsc` verb by analogy with
-> the fan controller's protocol.
+> parameter index, a third guessed a `c4.dmx.lsc` verb by analogy with the
+> fan controller's protocol, and a fourth found the real `c4.dm.rtl`
+> ("Ramp To Level") verb inside the actual compiled Windows driver
+> (`outlet_ip_control4.c4w`, whose embedded command catalog confirms
+> `SET_LEVEL`/`RAMP_TO_LEVEL` as real commands and contains **zero**
+> `c4.dmx.*` strings — retroactively ruling out the third attempt's
+> namespace guess for this driver) but sent it as `<outlet> <time_ms>
+> <level>` and still got the same revert-to-off symptom.
 >
-> The current version instead comes from the actual compiled Control4
-> driver for this device (`outlet_ip_control4.c4w`, extracted from a local
-> Composer installation — `outlet_wireless_dimmer.c4i`'s `<control>` field
-> names it as this exact device's driver). Its embedded command catalog
-> confirms `SET_LEVEL`/`RAMP_TO_LEVEL` ("Ramp to Level INTEGER ... over TIME
-> STRING") as real commands, and its wire-verb table includes `c4.dm.rtl` —
-> matching "Ramp To Level" — alongside the already-confirmed `c4.dm.tv`/
-> `c4.dm.tc`/`c4.dm.on`/`c4.dm.of`. Notably, this binary contains **zero**
-> `c4.dmx.*` strings, which confirms the previous attempt's namespace guess
-> could never have worked for this driver. The verb name (`c4.dm.rtl`) is
-> now driver-confirmed; the exact argument order (this version sends
-> `<outlet> <time_ms> <level>`, reusing the ZCL transition_time HA already
-> provides) is still inferred by analogy with `c4_ramp_cluster.py`'s own
-> command shape, not read directly off a format string in the binary — so
-> it may need the level/time order swapped.
+> The current version keeps the verb but swaps the argument order, based on
+> the actual C++ implementation: an **unstripped ARM/Linux driver binary
+> pulled from a real HC-1000v2 controller's recovery partition**
+> (`control4/drivers/outlet_ip_control4.c4l`, the same driver the Windows
+> side names) still has its symbol table, including the mangled C++ name
+> `_ZN18outlet_ip_control415RampOutletLevelEN8OutletID4TypeEjj`, which
+> demangles to `outlet_ip_control4::RampOutletLevel(OutletID::Type,
+> unsigned int, unsigned int)`. Matched against the command description's
+> own word order ("Ramp to Level INTEGER ... over TIME STRING"), this reads
+> as level before time, so this version sends `c4.dm.rtl <outlet> <level>
+> <time_ms>` (reusing the ZCL transition_time HA already provides).
+>
+> This is a real function signature, not an analogy — stronger evidence
+> than any earlier attempt — but the serialization code itself was not
+> disassembled, so it is still inference rather than a captured wire frame.
 >
 > See the module docstring's "History" section before changing this
-> further. If this still doesn't work, the reliable next step is a
-> Wireshark capture of the Control4 app itself dimming outlet 2, to read
-> the real byte order off the wire instead of inferring it. Please open an
-> issue with a capture (or an HA diagnostics download) if you have this
-> hardware.
+> further. If this also fails, the reliable next step is a Wireshark
+> capture of the Control4 app itself dimming outlet 2, to read the real
+> byte order off the wire instead of inferring it. Please open an issue
+> with a capture (or an HA diagnostics download) if you have this hardware.
 
 All Control4 Zigbee devices use a proprietary text-based serial protocol
 layered on top of ZigBee APS instead of standard ZCL clusters. These quirks

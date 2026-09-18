@@ -66,9 +66,9 @@ History:
   pair, landing on `c4.dmx.lsc`. Real-hardware testing showed the same
   revert-to-off symptom yet again.
 
-  Attempt 7 (this version) stopped guessing from analogy and went to the
-  source: the user located the actual compiled Control4 driver on their
-  own PC — Composer253\Director\Drivers\outlet_ip_control4.c4w — which
+  Attempt 7 stopped guessing from analogy and went to the source: the user
+  located the actual compiled Control4 driver on their own PC —
+  Composer253\Director\Drivers\outlet_ip_control4.c4w — which
   outlet_wireless_dimmer.c4i's <control> field names as the exact driver
   for this device (outlet_wireless.c4i, the LOZ-5S1-W switch's descriptor,
   names a different one). That 1MB native binary's embedded string table
@@ -82,19 +82,40 @@ History:
   paired with a wire-verb table that includes (alongside on/of/tv/tc/...):
       c4.dm.rtl
   "rtl" matches "Ramp To Level" letter-for-letter — a driver-confirmed
-  verb name, not an analogy from a sibling device. This version sends
-  `c4.dm.rtl <outlet> <time_ms_hex4> <level_hex2>`, reusing the ZCL
-  transition_time argument (converted from 1/10-s to ms) that HA already
-  provides and every prior attempt discarded. The verb name is now solid;
-  the argument order (time before level) is still inferred by analogy
-  with c4_ramp_cluster.py's own `c4.dm.tv <ch> <idx> <time_ms_hex4>` and
-  is the one remaining guess — no format-string constant was found in the
-  binary to confirm it directly. See C4Outlet2DimmerLevelControl's
-  docstring for the full reasoning.
+  verb name, not an analogy from a sibling device. This attempt sent
+  `c4.dm.rtl <outlet> <time_ms_hex4> <level_hex2>` (time before level, by
+  analogy with c4_ramp_cluster.py's `c4.dm.tv <ch> <idx> <time_ms_hex4>`).
+  Real-hardware testing showed the same revert-to-off symptom again — the
+  verb was right, but this attempt's argument order was apparently wrong.
 
-  If this fails, or works with level/time swapped, the reliable next step
-  is a Wireshark capture of the Control4 app dimming this outlet, to read
-  the true byte order off the wire instead of inferring it.
+  Attempt 8 (this version) replaced analogy with the actual implementation:
+  the user pulled the driver binaries straight off a real HC-1000v2
+  controller's recovery partition
+  (I:\...\hc1000v2\recovery\recovery~\control4\drivers\*.c4l — ELF
+  binaries, the ARM/Linux Director-side runtime, as opposed to the
+  Windows-side .c4w files attempt 7 used). Unlike the Windows binaries,
+  outlet_ip_control4.c4l is NOT stripped: its symbol table has the literal
+  C++ mangled name
+
+      _ZN18outlet_ip_control415RampOutletLevelEN8OutletID4TypeEjj
+
+  which demangles to
+
+      outlet_ip_control4::RampOutletLevel(OutletID::Type, unsigned int, unsigned int)
+
+  — outlet selector, then two plain unsigned ints. Matched against the
+  command's own description order ("Ramp to Level INTEGER ... over TIME
+  STRING" — level named first), this reads as RampOutletLevel(outlet,
+  level, time): LEVEL BEFORE TIME, the reverse of attempt 7. This version
+  sends `c4.dm.rtl <outlet> <level_hex2> <time_ms_hex4>`.
+
+  This is a real function signature, not an analogy, but it is still
+  inference from a parameter list rather than a captured wire frame — the
+  serialization code itself was not disassembled. If this also fails, the
+  reliable next step is a Wireshark capture of the Control4 app dimming
+  this outlet, to read the true byte order off the wire instead of
+  inferring it from either the driver's C++ signatures or its embedded
+  strings.
 
 Implementation:
   • Outlet 1 (EP1) reuses C4DimmerOnOff / C4DimmerLevelControl UNCHANGED
@@ -108,7 +129,7 @@ Implementation:
     exists because the real APD120 ignores standard On/Off, and there's no
     evidence this text-protocol outlet does), paired with
     C4Outlet2DimmerLevelControl (this file) for brightness, which sends
-    the driver-confirmed `c4.dm.rtl <01> <time> <level>` command.
+    the driver-confirmed `c4.dm.rtl <01> <level> <time>` command.
   • EP197's button/state cluster treats outlet-index-1 c4.dm.tc
     announcements as a graduated level for outlet 2, and defers everything
     else (including any outlet-index-0 announcements) to the base sync, so
@@ -204,44 +225,41 @@ def _c4_pct_to_zcl_level(level_pct: int) -> int:
 class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
     """LevelControl for outlet 2 (synthetic EP11), via the driver's RAMP_TO_LEVEL verb.
 
-    Rounds 1 and 2 (c4.dm.tv with a different value / a different index
-    byte, see git history and this file's earlier revisions) both failed
-    identically on real hardware. Round 2's own research (control4-apd120-
-    dimmer-protocol.md / control4-fan-controller-sf120-protocol.md) guessed
-    the live "set" verb lived in a device-specific c4.dmx.* namespace — but
-    the actual compiled Control4 driver for this device (extracted from
-    the user's own Composer installation:
-    Composer253\\Director\\Drivers\\outlet_ip_control4.c4w, which
-    outlet_wireless_dimmer.c4i's <control> field names as this exact
-    device's driver) contains ZERO c4.dmx.* strings. That guess is now
-    known to be wrong, not just unconfirmed.
+    The verb name c4.dm.rtl ("Ramp To Level") is driver-confirmed — see the
+    module docstring's History section for how it was found and why
+    earlier guesses (c4.dm.tv with a different value/index, a c4.dmx.*
+    verb) are now known to be wrong for this device, not just unconfirmed.
 
-    What the driver binary actually contains is a command catalog with:
-      <name>SET_LEVEL</name>
-      <description>Set Level on the NAME to INTEGER</description>
-      <name>RAMP_TO_LEVEL</name>
-      <description>Ramp to Level INTEGER on the NAME over TIME STRING</description>
-    paired with a wire-verb table that includes (among on/of/tv/tc/...):
-      c4.dm.rtl
-    "rtl" matches "Ramp To Level" letter-for-letter, and — since C4_ON_
-    TRANSITION-style embedded drivers typically implement "set instantly"
-    as "ramp with zero time" rather than two separate code paths — is the
-    best candidate for both SET_LEVEL and RAMP_TO_LEVEL on the wire.
+    The argument ORDER is now also evidence-based rather than guessed by
+    analogy. An unstripped ARM/Linux driver binary pulled from a real
+    HC-1000v2 controller's recovery partition
+    (control4\\drivers\\outlet_ip_control4.c4l — the same driver identified
+    from the Windows side) still has its C++ symbol table, including:
 
-    This IS a real, driver-confirmed verb name, which is stronger evidence
-    than rounds 1/2 ever had. What is still guessed is the argument order:
-    no format-string constant was found alongside "rtl" to pin it down.
-    This class sends `c4.dm.rtl <outlet> <time_ms_hex4> <level_hex2>`,
-    following the established convention in this protocol family that the
-    value being set comes last (c4.dm.tv <outlet> 00 <level>;
-    c4_ramp_cluster.py's own c4.dm.tv <ch> <idx> <time_ms_hex4> for
-    transition-time config). The ZCL transition_time argument HA already
-    sends (ignored everywhere else in this codebase) is used for <time_ms>
-    here instead of being dropped, converting ZCL 1/10-s units to ms.
+        _ZN18outlet_ip_control415RampOutletLevelEN8OutletID4TypeEjj
 
-    If this does not work either, or works with the level/time arguments
-    swapped, the reliable next step is a Wireshark capture of the Control4
-    app dimming this outlet, to read the true byte order off the wire.
+    which demangles to:
+
+        outlet_ip_control4::RampOutletLevel(OutletID::Type, unsigned int, unsigned int)
+
+    Three parameters: the outlet selector, then two plain unsigned ints.
+    Paired with the command's own description order ("Ramp to Level
+    INTEGER ... over TIME STRING" — level named before time), the natural
+    reading is RampOutletLevel(outlet, level, time), i.e. LEVEL BEFORE
+    TIME on the wire, the opposite of this class's first version (which
+    also failed identically on real hardware). This class now sends
+    `c4.dm.rtl <outlet> <level_hex2> <time_ms_hex4>`.
+
+    This is stronger evidence than any prior attempt (a real function
+    signature, not an analogy to a sibling device), but it is still
+    inference from a C++ parameter list, not a captured wire frame. If
+    this also fails, the reliable next step is a Wireshark capture of the
+    Control4 app dimming this outlet, to read the true byte order off the
+    wire instead of inferring it — see the module docstring.
+
+    The ZCL transition_time argument HA already provides (ignored by every
+    earlier attempt in this file) is used for <time_ms>, converting ZCL
+    1/10-s units to ms.
 
     On/off itself does NOT go through this class — see C4Outlet1OnOff in
     control4_outlet.py, reused unchanged below, which keeps using the
@@ -292,13 +310,16 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
             _LOGGER.warning("C4 Outlet2DimmerLevel: poll failed: %s", exc)
 
     async def _send_c4_outlet_level(self, level_pct: int, time_ms: int) -> None:
-        """Send c4.dm.rtl 01 <time_ms> <level> — driver-confirmed verb, guessed arg order."""
+        """Send c4.dm.rtl 01 <level> <time_ms> — see class docstring for the
+        RampOutletLevel(OutletID::Type, uint level, uint time) evidence
+        behind this argument order (level before time).
+        """
         device = self.endpoint.device
         seq = next_c4_seq(device)
         time_ms = max(0, min(0xFFFF, int(time_ms)))
         cmd = (
             f"0s{seq:04x} c4.dm.rtl {self.OUTLET_IDX:02x} "
-            f"{time_ms:04x} {level_pct:02x}"
+            f"{level_pct:02x} {time_ms:04x}"
         )
         data = _build_c4_frame(0, cmd)
 
