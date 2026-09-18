@@ -528,6 +528,26 @@ except Exception as e:
 # ---------------------------------------------------------------------------
 
 try:
+    import control4_dimmer           # registers "C4-APD120" + LSZ/LDZ aliases
+except Exception as _e:
+    _LOGGER.error("C4: failed to import control4_dimmer - %s", _e)
+
+try:
+    import control4_switch           # registers "C4-SW120277"
+except Exception as _e:
+    _LOGGER.error("C4: failed to import control4_switch - %s", _e)
+
+try:
+    import control4_scene_controller # registers "C4-KC120277"
+except Exception as _e:
+    _LOGGER.error("C4: failed to import control4_scene_controller - %s", _e)
+
+try:
+    import control4_outlet           # registers "loz-5s1-w"
+except Exception as _e:
+    _LOGGER.error("C4: failed to import control4_outlet - %s", _e)
+
+try:
     import control4_fan              # registers "C4-4SF120"
 except Exception as _e:
     _LOGGER.error("C4: failed to import control4_fan — %s", _e)

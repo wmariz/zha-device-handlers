@@ -25,7 +25,7 @@ from zigpy.zcl.clusters.general import Basic, LevelControl, OnOff
 from zhaquirks.const import (
     BUTTON,
     BUTTON_1, BUTTON_2, BUTTON_3, BUTTON_4,
-    BUTTON_5, BUTTON_6, BUTTON_7, BUTTON_8,
+    BUTTON_5, BUTTON_6,
     CLUSTER_ID,
     COMMAND,
     DEVICE_TYPE,
@@ -46,6 +46,14 @@ from zhaquirks.const import (
     TURN_OFF,
     TURN_ON,
 )
+
+# zhaquirks.const only defines BUTTON_1..BUTTON_6 in some releases.
+# Define the higher buttons locally so this module imports on every version.
+try:  # pragma: no cover
+    from zhaquirks.const import BUTTON_7, BUTTON_8
+except ImportError:  # pragma: no cover
+    BUTTON_7 = "button_7"
+    BUTTON_8 = "button_8"
 
 _LOGGER = logging.getLogger(__name__)
 
