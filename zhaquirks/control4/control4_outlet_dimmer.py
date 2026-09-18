@@ -43,25 +43,55 @@ History:
   theory: c4.dm.tv's `<level>` field genuinely seems to reject anything
   other than 0x00/0x64, independent of which outlet it targets.
 
-  Attempt 5 (this version) noticed that c4_ramp_cluster.py uses the same
-  c4.dm.tv namespace as `<channel> <index> <value>` for the APD120's ramp
+  Attempt 5 noticed that c4_ramp_cluster.py uses the same c4.dm.tv
+  namespace as `<channel> <index> <value>` for the APD120's ramp
   parameters, where each index (0x01=fast, 0x02=on-ramp, 0x03=off-ramp,
   ...) is an independently addressable parameter accepting a wide value
   range (0-65535 ms) — not a fixed boolean-like pair. By that pattern, the
   outlet SET command's fixed "00" may be an *index* (plausibly "on/off
   state") rather than a filler byte, and graduated brightness may live at
-  a *different*, currently unknown index instead. This version guesses
-  index 0x01 for it — see C4Outlet2DimmerLevelControl's docstring. This is
-  an unconfirmed guess with no captured evidence behind the specific index
-  chosen. On/off itself no longer goes through a redirect for outlet 2 (see
-  Implementation) so it keeps using the confirmed index 0x00 unaffected by
-  this experiment.
+  a *different*, currently unknown index instead. This guessed index 0x01.
+  Real-hardware testing showed the same revert-to-off symptom again,
+  disproving this theory too: the graduated level does not live at a
+  different index within c4.dm.tv either.
 
-  If this attempt *also* fails, further index guessing has a large,
-  unconstrained search space and is unlikely to be productive — the
-  reliable next step is a Wireshark capture of a real Control4 controller
-  dimming outlet 2, to read the actual command off the wire instead of
-  guessing it.
+  Attempt 6 (this version) came from reading
+  control4-apd120-dimmer-protocol.md and control4-fan-controller-sf120-
+  protocol.md (zhaquirks/control4/documentation/), which revealed that
+  c4.dm.tv (no "x") is used ONLY for ramp/transition-time config on real
+  dimmers — never for a live "set to this level now" command, explaining
+  why attempt 5's index guess had no chance regardless of which index was
+  picked. The live "set" command lives in the device-specific c4.dmx.*
+  namespace, with a *dedicated verb* per value: confirmed for the fan
+  controller as announce `c4.dmx.fs` (fan state) / set `c4.dmx.fsc` (fan
+  speed control) — the announce verb plus a trailing "c" for "control".
+  The dimmer's own brightness announce is `c4.dmx.ls` (light state,
+  confirmed in control4-apd120-dimmer-protocol.md), but that document only
+  ever captured it as an announcement — its two captures were provisioning
+  and physical button presses, never an app-driven live level change, so
+  there is no confirmed "set" example in this namespace for a dimmer at
+  all. By the fs/fsc pattern, this version guesses the set verb is
+  `c4.dmx.lsc` ("light state control") — see C4Outlet2DimmerLevelControl's
+  docstring. This is a double guess: the verb name, AND the assumption
+  that its leading "channel" argument can select between outlet 2's two
+  circuits — every confirmed c4.dmx.ls/c4.dmx.fs example in both protocol
+  docs is from a single-channel device where that field is always 00.
+  C4DualOutletDimmerButtonCluster also now overrides _handle_light_state
+  to route c4.dmx.ls by that channel field instead of the base
+  C4ButtonCluster behavior, which hardcodes EP1 (correct only for a
+  single-channel device like the APD120).
+
+  If this attempt *also* fails, the verb/argument search space is large
+  and arbitrary per device type (compare `fsc` to whatever the dimmer or
+  outlet actually uses) — guessing further is unlikely to be productive.
+  The reliable next step is a Wireshark capture of the Control4 app itself
+  dimming outlet 2 to an intermediate level, to read the actual command
+  off the wire instead of guessing it. The device's own reported model
+  string (logged by C4OutletStateCluster / C4ConfigCluster) would also be
+  useful context — if it identifies as `outlet_switch` like its LOZ-5S1-W
+  sibling rather than `control4_light` like the APD120/SF120, it may not
+  implement the c4.dmx namespace at all, in which case none of the above
+  guesses could ever have worked. This has not been checked yet.
 
 Implementation:
   • Outlet 1 (EP1) reuses C4DimmerOnOff / C4DimmerLevelControl UNCHANGED
@@ -75,12 +105,13 @@ Implementation:
     exists because the real APD120 ignores standard On/Off, and there's no
     evidence this text-protocol outlet does), paired with
     C4Outlet2DimmerLevelControl (this file) for brightness, which sends
-    c4.dm.tv <01> <guessed index> <level> with a graduated 0-100 level.
-  • EP197's button/state cluster treats outlet-index-1 c4.dm.tc
-    announcements as a graduated level for outlet 2, and defers everything
-    else (including any outlet-index-0 announcements) to the base
-    on/off-only sync, so outlet 1's current_level stays owned exclusively
-    by the real-ZCL / EP2-EP196 path above.
+    the guessed `c4.dmx.lsc <01> <level>` command with a graduated 0-100
+    level.
+  • EP197's button/state cluster treats outlet-index-1 c4.dm.tc *and*
+    c4.dmx.ls announcements as a graduated level for outlet 2, and defers
+    everything else (including any outlet-index-0 announcements of either
+    kind) to the base sync, so outlet 1's current_level stays owned
+    exclusively by the real-ZCL / EP2-EP196 path above.
 """
 
 import logging
@@ -169,36 +200,48 @@ def _c4_pct_to_zcl_level(level_pct: int) -> int:
 # ---------------------------------------------------------------------------
 
 class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
-    """LevelControl for outlet 2 (synthetic EP11), via graduated c4.dm.tv.
+    """LevelControl for outlet 2 (synthetic EP11), via a guessed c4.dmx verb.
 
-    UNVERIFIED GUESS, one specific thing being tested: the confirmed on/off
-    command for this outlet is `c4.dm.tv <outlet> 00 <level>`, where
-    <level> only ever accepts 0x00/0x64. c4_ramp_cluster.py shows the same
-    c4.dm.tv namespace is really `<channel> <index> <value>` for the
-    APD120's ramp parameters (index 0x01=fast, 0x02=on-ramp, 0x03=off-ramp,
-    etc., each an independently addressable parameter). By that pattern,
-    the outlet command's fixed "00" may be an *index* meaning "on/off
-    state" rather than a filler byte — in which case a graduated brightness
-    might live at a *different* index instead of being crammed into the
-    same one. This class guesses index 0x01 ("level", by analogy with
-    typical state=0/level=1 firmware conventions) for that purpose. There
-    is no captured evidence this index exists or means anything in
-    particular; if it doesn't work, the next step is a Wireshark capture
-    of a real Control4 controller dimming this outlet, not another guess.
+    UNVERIFIED GUESS (round 2). Round 1 tried c4.dm.tv with a different
+    index byte and failed identically to the original bug (see git history
+    and this file's earlier revisions) — real hardware testing showed that
+    approach doesn't work, and control4-apd120-dimmer-protocol.md /
+    control4-fan-controller-sf120-protocol.md revealed why it was likely
+    the wrong namespace: c4.dm.tv (no "x") is only ever used for
+    ramp/transition-time config on real dimmers, never for the live
+    "set to this level now" command. The live command lives in the
+    device-specific c4.dmx.* namespace instead, with a *dedicated verb*
+    per value being set — confirmed for the fan controller:
+    announce `c4.dmx.fs` (fan state) / set `c4.dmx.fsc` (fan speed
+    control), same "state" + "c" = "control" suffix pattern.
+
+    The dimmer's own announce for brightness is `c4.dmx.ls` (light state),
+    confirmed in control4-apd120-dimmer-protocol.md — but only ever
+    observed AS an announcement in the captures used for that document
+    (which covered provisioning and physical button presses, never an
+    app-driven live level change), so there is no confirmed example of a
+    "set" command in this namespace at all for a dimmer. By the fs/fsc
+    pattern, this class guesses the set verb is `c4.dmx.lsc` ("light state
+    control"). This is a double guess: the verb name AND the assumption
+    that its leading "channel" argument can select between two outlets —
+    every confirmed c4.dmx.ls/c4.dmx.fs example in both protocol docs is
+    from a single-channel device where that field is always 00. If this
+    doesn't work either, the reliable next step is a Wireshark capture of
+    the Control4 app actually dimming this outlet, not a third guess.
 
     On/off itself does NOT go through this class — see C4Outlet1OnOff in
     control4_outlet.py, reused unchanged below, which keeps using the
-    confirmed index 0x00 with the fixed 0x64/0x00 values.
+    confirmed c4.dm.tv on/off transport with the fixed 0x64/0x00 values.
 
     Inherits C4DimmerLevelControl's local caching of on_level/transition-time
     attributes but overrides write_attributes (never forward to the device —
     this protocol has no ZCL WriteAttributes equivalent at all) and
-    move_to_level(_with_on_off) to send c4.dm.tv instead of a real ZCL frame,
-    since outlet 2 has no physical endpoint a real frame could reach.
+    move_to_level(_with_on_off) to send the guessed c4.dmx.lsc command
+    instead of a real ZCL frame, since outlet 2 has no physical endpoint a
+    real frame could reach.
     """
 
     OUTLET_IDX = 1
-    _LEVEL_INDEX = 0x01  # guessed — see class docstring
 
     async def write_attributes(self, attributes, manufacturer=None):
         for attr, value in attributes.items():
@@ -216,7 +259,7 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
         """Send a C4 Get command to query outlet 2's current level."""
         device = self.endpoint.device
         seq = next_c4_seq(device)
-        cmd = f"0g{seq:04x} c4.dm.tv {self.OUTLET_IDX:02x} {self._LEVEL_INDEX:02x}"
+        cmd = f"0g{seq:04x} c4.dmx.lsc {self.OUTLET_IDX:02x}"
         data = _build_c4_frame(0, cmd)
 
         _LOGGER.debug("C4 Outlet2DimmerLevel: polling — %s", cmd)
@@ -233,10 +276,10 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
             _LOGGER.warning("C4 Outlet2DimmerLevel: poll failed: %s", exc)
 
     async def _send_c4_outlet_level(self, level_pct: int) -> None:
-        """Send c4.dm.tv 01 01 <level> — guessed index, see class docstring."""
+        """Send c4.dmx.lsc 01 <level> — guessed verb, see class docstring."""
         device = self.endpoint.device
         seq = next_c4_seq(device)
-        cmd = f"0s{seq:04x} c4.dm.tv {self.OUTLET_IDX:02x} {self._LEVEL_INDEX:02x} {level_pct:02x}"
+        cmd = f"0s{seq:04x} c4.dmx.lsc {self.OUTLET_IDX:02x} {level_pct:02x}"
         data = _build_c4_frame(0, cmd)
 
         _LOGGER.debug("C4 Outlet2DimmerLevel: sending %s", cmd)
@@ -273,7 +316,8 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
             )
             await self._send_c4_outlet_level(level_pct)
 
-            # Optimistic update — device will confirm via c4.dm.tc announce
+            # Optimistic update — device will confirm via a c4.dm.tc or
+            # c4.dmx.ls announce (see C4DualOutletDimmerButtonCluster)
             self._update_attribute(
                 LevelControl.AttributeDefs.current_level.id, level_zcl
             )
@@ -341,6 +385,35 @@ class C4DualOutletDimmerButtonCluster(C4DualOutletButtonCluster):
         # Outlet index 0 (owned by real ZCL instead) and anything else fall
         # through to the base on/off-only sync.
         super()._handle_state_announcement(namespace, data)
+
+    def _handle_light_state(self, fields):
+        """Route c4.dmx.ls by its leading 'ch' field instead of always EP1.
+
+        The base C4ButtonCluster._handle_light_state (c4_button_cluster.py)
+        hardcodes EP1 via _sync_ep1_level — correct for the single-channel
+        APD120, where ch is always 00, but this device has two outlets. If
+        ch=01 ever shows up for outlet 2 (unconfirmed — see
+        C4Outlet2DimmerLevelControl's docstring for why), route it there
+        instead; anything else falls back to the base behavior so outlet 1
+        keeps working exactly as before.
+        """
+        try:
+            if len(fields) >= 3 and int(fields[0], 16) == 1:
+                level_pct = int(fields[2], 16)
+                _LOGGER.debug(
+                    "C4 dual outlet dimmer: c4.dmx.ls outlet=1 level=%d",
+                    level_pct,
+                )
+                self._sync_level_for_outlet_2(level_pct)
+                return
+        except (ValueError, IndexError) as e:
+            _LOGGER.warning(
+                "C4 dual outlet dimmer: failed to parse c4.dmx.ls: %s (%s)",
+                fields, e,
+            )
+            return
+
+        super()._handle_light_state(fields)
 
     def _sync_level_for_outlet_2(self, level_pct):
         ep_id = OUTLET_EP_MAP.get(1)

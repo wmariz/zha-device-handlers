@@ -31,18 +31,34 @@ controller required.
 > **confirmed working on real hardware**, including dragging the
 > brightness slider while the light is on. Outlet 2 (synthetic EP11) has
 > no real Zigbee endpoint of its own, so it can't receive a real ZCL frame.
-> Two attempts to give it a graduated level over the outlet's c4.dm.tv text
-> command (confirmed working for plain on/off) both reverted the light to
-> off on real hardware, the same failure outlet 1 originally had. The
-> current version guesses that c4.dm.tv's fixed "00" field is actually a
-> parameter *index* (by analogy with `c4_ramp_cluster.py`'s use of the same
-> namespace) and tries a different index for brightness — **unconfirmed,
-> and may not work either**. See the module docstring's "History" section
-> before changing this further. If it still doesn't work, the reliable next
-> step is a Wireshark capture of a real Control4 controller dimming outlet
-> 2, to read the actual command instead of guessing it. Please open an
-> issue with that capture (or an HA diagnostics download) if you have this
-> hardware.
+>
+> Three attempts at a graduated level for outlet 2 have failed on real
+> hardware so far (all revert the light to off): two tried the outlet's
+> confirmed on/off command (`c4.dm.tv`) with a graduated value or a
+> different parameter index. `zhaquirks/control4/documentation/`'s protocol
+> write-ups for the APD120 and the SF120 fan controller revealed why:
+> `c4.dm.tv` is only ever used for ramp/transition-time config on real
+> dimmers, never for a live "set to this level" command — that command
+> lives in a device-specific `c4.dmx.*` namespace with its own dedicated
+> verb (confirmed for the fan: announce `c4.dmx.fs` / set `c4.dmx.fsc`).
+> The current version guesses the dimmer's equivalent is `c4.dmx.lsc`, by
+> analogy with its confirmed announce `c4.dmx.ls` — **also unconfirmed,
+> and may not work**: neither protocol document ever captured a live
+> "set" command in this namespace at all (only provisioning and physical
+> button presses, which use pre-programmed preset levels), so its
+> existence for a dimmer, let alone for this specific outlet, is not
+> established.
+>
+> See the module docstring's "History" section before changing this
+> further. If this also fails, the reliable next step is a Wireshark
+> capture of the Control4 app itself dimming outlet 2 to an intermediate
+> level — reading the real command off the wire instead of guessing it.
+> Checking what model string this device reports (logged by
+> `C4OutletStateCluster`/`C4ConfigCluster`) is also useful: if it's
+> `outlet_switch` like its LOZ-5S1-W sibling rather than `control4_light`
+> like the APD120/SF120, it may not implement the `c4.dmx` namespace at
+> all. Please open an issue with a capture (or an HA diagnostics download)
+> if you have this hardware.
 
 All Control4 Zigbee devices use a proprietary text-based serial protocol
 layered on top of ZigBee APS instead of standard ZCL clusters. These quirks
