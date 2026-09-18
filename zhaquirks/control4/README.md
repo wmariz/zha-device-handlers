@@ -21,21 +21,24 @@ controller required.
 | C4-SW120277 | On/Off Wall Switch | Switch |
 | C4-KC120277 | 8-Button Scene Controller | 8 event entities (press, hold, release) |
 | loz-5s1-w | Dual Switched Outlet | 2 switches (one per outlet) |
-| loz-5d1-w | Dimming Outlet *(experimental — see note)* | 1 light (dimmable, outlet 0) + 1 switch (outlet 1) |
+| loz-5d1-w | Dual Dimming Outlet *(outlet 1 confirmed, outlet 2 unverified — see note)* | 2 lights (dimmable, one per outlet) |
 | C4-Z2IO-ZP | Zigbee IO Module | 2 switches (relays), 5 binary sensors (contacts), temperature, humidity |
 | C4-SR260 | IR/Zigbee Remote (50 buttons + LCD) | 50 event entities (press, release), battery |
 
-> **loz-5d1-w note:** this quirk (`control4_outlet_dimmer.py`) has not yet
-> been verified against a real device capture. Two earlier approaches that
-> sent brightness as a graduated value over the outlet's c4.dm.tv text
-> command did not work on real hardware (the light reverted to off, or got
-> stuck at a fixed 75%). The current version instead sends real ZCL Level
-> Control frames on outlet 0 (EP1), the same way the confirmed C4-APD120
-> dimmer does — on/off works either way, but graduated brightness on
-> outlet 0 is still unconfirmed. Outlet 1 has no real endpoint of its own
-> and is exposed as a plain on/off switch, not a light. Please open an
-> issue with a Wireshark capture or HA diagnostics download if you have
-> this hardware.
+> **loz-5d1-w note:** this quirk (`control4_outlet_dimmer.py`) uses two
+> different transports for its two outlets. Outlet 1 (EP1) sends real ZCL
+> Level Control frames, the same way the confirmed C4-APD120 dimmer does —
+> **confirmed working on real hardware**, including dragging the
+> brightness slider while the light is on. Outlet 2 (synthetic EP11) has
+> no real Zigbee endpoint of its own, so it can't receive a real ZCL frame;
+> it sends a graduated level over the outlet's c4.dm.tv text command
+> instead, which is the original Control4 app's own transport for that
+> outlet — **not yet confirmed** against real hardware. (An earlier
+> version tried the c4.dm.tv approach for outlet 1 too, which didn't work;
+> that failure turned out to be specific to outlet 1 needing real ZCL, not
+> a sign that c4.dm.tv rejects graduated levels in general.) Please open an
+> issue with a Wireshark capture or HA diagnostics download if outlet 2
+> misbehaves.
 
 All Control4 Zigbee devices use a proprietary text-based serial protocol
 layered on top of ZigBee APS instead of standard ZCL clusters. These quirks
