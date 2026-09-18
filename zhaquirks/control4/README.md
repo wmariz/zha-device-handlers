@@ -32,33 +32,34 @@ controller required.
 > brightness slider while the light is on. Outlet 2 (synthetic EP11) has
 > no real Zigbee endpoint of its own, so it can't receive a real ZCL frame.
 >
-> Three attempts at a graduated level for outlet 2 have failed on real
-> hardware so far (all revert the light to off): two tried the outlet's
-> confirmed on/off command (`c4.dm.tv`) with a graduated value or a
-> different parameter index. `zhaquirks/control4/documentation/`'s protocol
-> write-ups for the APD120 and the SF120 fan controller revealed why:
-> `c4.dm.tv` is only ever used for ramp/transition-time config on real
-> dimmers, never for a live "set to this level" command — that command
-> lives in a device-specific `c4.dmx.*` namespace with its own dedicated
-> verb (confirmed for the fan: announce `c4.dmx.fs` / set `c4.dmx.fsc`).
-> The current version guesses the dimmer's equivalent is `c4.dmx.lsc`, by
-> analogy with its confirmed announce `c4.dmx.ls` — **also unconfirmed,
-> and may not work**: neither protocol document ever captured a live
-> "set" command in this namespace at all (only provisioning and physical
-> button presses, which use pre-programmed preset levels), so its
-> existence for a dimmer, let alone for this specific outlet, is not
-> established.
+> Three earlier attempts at a graduated level for outlet 2 failed on real
+> hardware (all reverted the light to off): two tried the outlet's confirmed
+> on/off command (`c4.dm.tv`) with a graduated value or a different
+> parameter index, and a third guessed a `c4.dmx.lsc` verb by analogy with
+> the fan controller's protocol.
+>
+> The current version instead comes from the actual compiled Control4
+> driver for this device (`outlet_ip_control4.c4w`, extracted from a local
+> Composer installation — `outlet_wireless_dimmer.c4i`'s `<control>` field
+> names it as this exact device's driver). Its embedded command catalog
+> confirms `SET_LEVEL`/`RAMP_TO_LEVEL` ("Ramp to Level INTEGER ... over TIME
+> STRING") as real commands, and its wire-verb table includes `c4.dm.rtl` —
+> matching "Ramp To Level" — alongside the already-confirmed `c4.dm.tv`/
+> `c4.dm.tc`/`c4.dm.on`/`c4.dm.of`. Notably, this binary contains **zero**
+> `c4.dmx.*` strings, which confirms the previous attempt's namespace guess
+> could never have worked for this driver. The verb name (`c4.dm.rtl`) is
+> now driver-confirmed; the exact argument order (this version sends
+> `<outlet> <time_ms> <level>`, reusing the ZCL transition_time HA already
+> provides) is still inferred by analogy with `c4_ramp_cluster.py`'s own
+> command shape, not read directly off a format string in the binary — so
+> it may need the level/time order swapped.
 >
 > See the module docstring's "History" section before changing this
-> further. If this also fails, the reliable next step is a Wireshark
-> capture of the Control4 app itself dimming outlet 2 to an intermediate
-> level — reading the real command off the wire instead of guessing it.
-> Checking what model string this device reports (logged by
-> `C4OutletStateCluster`/`C4ConfigCluster`) is also useful: if it's
-> `outlet_switch` like its LOZ-5S1-W sibling rather than `control4_light`
-> like the APD120/SF120, it may not implement the `c4.dmx` namespace at
-> all. Please open an issue with a capture (or an HA diagnostics download)
-> if you have this hardware.
+> further. If this still doesn't work, the reliable next step is a
+> Wireshark capture of the Control4 app itself dimming outlet 2, to read
+> the real byte order off the wire instead of inferring it. Please open an
+> issue with a capture (or an HA diagnostics download) if you have this
+> hardware.
 
 All Control4 Zigbee devices use a proprietary text-based serial protocol
 layered on top of ZigBee APS instead of standard ZCL clusters. These quirks
