@@ -1,9 +1,10 @@
-"""C4 ramp/transition time cluster — controls dimmer ramp rates on Control4 devices.
+"""C4 ramp/transition time + hardware-config cluster for Control4 dimmers.
 
-Documented from the C4-APD120 dimmer provisioning protocol (c4.dm.tv namespace).
-During provisioning, the coordinator queries 9 transition time parameters via Get
-commands.  This cluster allows reading and writing those parameters from Home
-Assistant via ZHA service calls.
+Documented from the C4-APD120/LDZ-101 dimmer provisioning protocol (c4.dm.*
+namespaces). During provisioning, the coordinator queries 9 transition time
+parameters via Get commands. This cluster allows reading and writing those
+parameters, plus two related hardware-config toggles, from Home Assistant
+via ZHA service calls.
 
 Transition time indices (from APD120 capture):
   Index 01:  100 ms  — fast/instant ramp
@@ -16,14 +17,25 @@ Transition time indices (from APD120 capture):
   Index 09:    0 ms  — disabled
   Index 0A:    0 ms  — disabled
 
-Protocol:
+Ramp protocol:
   Get:  0g<seq4> c4.dm.tv <ch> <idx>
   Set:  0s<seq4> c4.dm.tv <ch> <idx> <value_hex_ms>
 
 Values are unsigned 16-bit integers representing milliseconds.
 
+CONFIRMED from a real HC300 controller log (SET_BUTTON_ATTACHED /
+SET_LED_ATTACHED executing on the "Wireless Dimmer" driver — the LDZ-101
+in Composer): two related hardware-config toggles, using their own
+namespaces rather than c4.dm.tv's indexed-value shape:
+  Set button-hardware-attached: 0s<seq4> c4.dm.ba <0|1>
+  Set LED-hardware-attached:    0s<seq4> c4.dm.lm <0|1>
+Both take a single decimal digit (0 or 1), not a hex-padded value — no Get
+form observed. Added here rather than to C4LEDCluster/the button cluster
+since Composer groups these with the ramp rates as one "Wireless Dimmer"
+hardware-config panel, and the wire transport is identical.
+
 Exported:
-  C4RampCluster         — cluster with ramp-rate commands
+  C4RampCluster         — cluster with ramp-rate + hardware-config commands
   C4_RAMP_CLUSTER_ID    — cluster ID (0xFC44)
   RAMP_IDX_*            — named constants for transition time indices
 """
@@ -106,13 +118,18 @@ def _ms_to_zcl_tenths(ms: int) -> int:
 
 
 class C4RampCluster(CustomCluster):
-    """Ramp/transition time cluster for Control4 dimmers.
+    """Ramp/transition time + hardware-config cluster for Control4 dimmers.
 
     Provides commands to read and write dimmer ramp rates via the C4
-    serial-over-ZigBee protocol (c4.dm.tv namespace).
+    serial-over-ZigBee protocol (c4.dm.tv namespace), plus two related
+    hardware-config toggles (button/LED attached — c4.dm.ba / c4.dm.lm)
+    that Composer groups with the ramp rates under the same "Wireless
+    Dimmer" driver panel.
 
     The cluster caches the current ramp times locally so that
-    C4DimmerOnOff can read them for on/off transition commands.
+    C4DimmerOnOff can read them for on/off transition commands. The
+    button/LED-attached toggles are fire-and-forget — no local cache,
+    since no confirmed Get command exists for them.
 
     Usage from Home Assistant (via zha.issue_zigbee_cluster_command):
       service: zha.issue_zigbee_cluster_command
@@ -126,6 +143,10 @@ class C4RampCluster(CustomCluster):
         args:
           - 2               # index (RAMP_IDX_ON = on-ramp)
           - 1500            # time_ms (1500 ms)
+
+      # set_button_attached (command: 4) / set_led_attached (command: 5)
+      # both take a single arg:
+      #   args: [1]   # attached=1 (or 0 to detach)
     """
 
     cluster_id = C4_RAMP_CLUSTER_ID
@@ -178,6 +199,22 @@ class C4RampCluster(CustomCluster):
             is_manufacturer_specific=True,
         )
 
+        set_button_attached = ZCLCommandDef(
+            id=0x04,
+            schema={
+                "attached": t.uint8_t,
+            },
+            is_manufacturer_specific=True,
+        )
+
+        set_led_attached = ZCLCommandDef(
+            id=0x05,
+            schema={
+                "attached": t.uint8_t,
+            },
+            is_manufacturer_specific=True,
+        )
+
     # ------------------------------------------------------------------
     # Public accessors for other clusters (C4DimmerOnOff)
     # ------------------------------------------------------------------
@@ -222,6 +259,22 @@ class C4RampCluster(CustomCluster):
         """Set both on-ramp and off-ramp times in one call."""
         await self._send_ramp_set(RAMP_IDX_ON, int(on_time_ms))
         await self._send_ramp_set(RAMP_IDX_OFF, int(off_time_ms))
+
+    async def set_button_attached(self, attached):
+        """Set whether the physical button hardware is attached.
+
+        CONFIRMED from a real HC300 controller log: `c4.dm.ba <0|1>`.
+        """
+        await self._send_attached_flag("c4.dm.ba", "button_attached", int(attached))
+
+    async def set_led_attached(self, attached):
+        """Set whether the LED indicator hardware is attached.
+
+        CONFIRMED from a real HC300 controller log: `c4.dm.lm <0|1>` —
+        the same 0/1 the controller's own UI echoed back as
+        <led_attached>0|1</led_attached> after each send.
+        """
+        await self._send_attached_flag("c4.dm.lm", "led_attached", int(attached))
 
     def handle_cluster_request(self, hdr, args, *, dst_addressing=None):
         """Log any unexpected inbound cluster requests."""
@@ -275,6 +328,39 @@ class C4RampCluster(CustomCluster):
         except Exception as e:
             _LOGGER.warning(
                 "C4 Ramp: failed to set %s to %d ms — %s", name, time_ms, e,
+            )
+
+    async def _send_attached_flag(self, namespace: str, label: str, attached: int):
+        """Send a `0s<seq> <namespace> <0|1>` hardware-attached toggle.
+
+        Shared transport for set_button_attached/set_led_attached — same
+        C4_PROFILE_BUTTON/C4_CLUSTER_ID/EP1->EP1 send as _send_ramp_set,
+        just a single decimal 0/1 payload instead of an indexed hex value,
+        and no local cache to update (no get_*_attached() accessor exists
+        yet — no confirmed Get command was observed for these).
+        """
+        device = self.endpoint.device
+        attached = 1 if attached else 0
+        seq = next_c4_seq(device)
+        cmd = f"0s{seq:04x} {namespace} {attached:d}"
+
+        _LOGGER.info(
+            "C4 Ramp: setting %s=%d — cmd: %s", label, attached, cmd,
+        )
+
+        frame = _build_c4_frame(seq, cmd)
+        try:
+            await device.request(
+                profile=C4_PROFILE_BUTTON,
+                cluster=C4_CLUSTER_ID,
+                src_ep=1, dst_ep=1,
+                sequence=device.get_sequence(),
+                data=frame,
+                expect_reply=False,
+            )
+        except Exception as e:
+            _LOGGER.warning(
+                "C4 Ramp: failed to set %s=%d — %s", label, attached, e,
             )
 
     def _sync_zcl_transition_attrs(self):

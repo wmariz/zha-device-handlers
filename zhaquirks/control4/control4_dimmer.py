@@ -160,6 +160,18 @@ History:
   endpoint. device_automation_triggers was updated to point at the
   virtual endpoints too, since events no longer fire on EP197 at all
   once C4DimmerButtonCluster is in use.
+
+  Button/LED-attached hardware config: CONFIRMED from a real HC300
+  controller log capturing Composer's own SET_BUTTON_ATTACHED /
+  SET_LED_ATTACHED on the LDZ-101 — `c4.dm.ba <0|1>` and
+  `c4.dm.lm <0|1>` respectively (single decimal digit, no hex padding,
+  unlike c4.dm.tv's indexed ramp values). Added as new
+  set_button_attached / set_led_attached commands on C4RampCluster
+  (c4_ramp_cluster.py, EP4) — grouped there rather than on C4LEDCluster
+  or the button cluster because Composer itself groups these with the
+  ramp rates under the same "Wireless Dimmer" driver panel, and the
+  wire transport is identical. See c4_ramp_cluster.py's own docstring
+  for the full protocol detail.
 """
 
 import logging
