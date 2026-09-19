@@ -196,6 +196,27 @@ History:
   discovery reliably turns any OnOff cluster into a real Switch entity,
   which is the same virtual-endpoint trick already used above for the
   two button Event entities.
+
+  Per-button LED-color RGB lights: CONFIRMED from a real HC300 controller
+  log — the top button LED's on-color is set via
+  `0s<seq> c4.dm.l0o <rrggbb_hex>` (the only one of the four combos
+  actually observed transmitting; l0f/l1o/l1f were requested in Composer
+  but throttled before ever hitting the wire — see c4_led_rgb.py). This
+  is a different namespace family from C4LEDCluster's c4.dmx.led
+  (EP3, KC120277 scene-controller protocol), which is very likely
+  non-functional for this device's own LEDs. Per the user's request,
+  only "on" color is exposed, since the LED only follows this quirk's
+  commands while led_attached is off — otherwise the device's own
+  built-in logic drives it. Two new virtual endpoints
+  (LED_COLOR_EP_MAP: 202 "top", 203 "bottom" — c4_led_rgb.py), each
+  carrying a plain OnOff + Color cluster, so ZHA's light-platform
+  discovery creates a real RGB light entity per LED (same virtual-
+  endpoint trick as the button/attached-switch entities above). Color
+  is set via the ZCL Hue/Saturation model rather than XY, converting to
+  RGB with a plain stdlib colorsys call; turning the light off sends
+  black, on re-sends the last color. Bottom LED (c4.dm.l1o) is
+  UNCONFIRMED — implemented by analogy with the one command actually
+  captured, pending a real-hardware test.
 """
 
 import logging
@@ -258,6 +279,12 @@ from c4_attached_switch import (
     ATTACHED_SWITCH_EP_MAP,
     C4ButtonAttachedOnOff,
     C4LedAttachedOnOff,
+)
+from c4_led_rgb import (
+    LED_COLOR_EP_MAP,
+    C4LedOnOff,
+    C4TopLedColorCluster,
+    C4BottomLedColorCluster,
 )
 from c4_hooks import _C4_MODEL_QUIRK_MAP
 
@@ -694,6 +721,20 @@ class Control4APD120Dimmer(CustomDevice):
                 PROFILE_ID:      zha.PROFILE_ID,
                 DEVICE_TYPE:     0x0000,
                 INPUT_CLUSTERS:  [C4LedAttachedOnOff],
+                OUTPUT_CLUSTERS: [],
+            },
+            # Virtual per-button LED-color endpoints — one RGB light
+            # entity each in ZHA. See c4_led_rgb.py.
+            LED_COLOR_EP_MAP["top"]: {
+                PROFILE_ID:      zha.PROFILE_ID,
+                DEVICE_TYPE:     0x0000,
+                INPUT_CLUSTERS:  [C4LedOnOff, C4TopLedColorCluster],
+                OUTPUT_CLUSTERS: [],
+            },
+            LED_COLOR_EP_MAP["bottom"]: {
+                PROFILE_ID:      zha.PROFILE_ID,
+                DEVICE_TYPE:     0x0000,
+                INPUT_CLUSTERS:  [C4LedOnOff, C4BottomLedColorCluster],
                 OUTPUT_CLUSTERS: [],
             },
         },
