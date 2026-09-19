@@ -17,6 +17,13 @@ Patch 4 — ControllerApplication.packet_received
   Intercepts broadcast C4 packets to sniff the model string and call
   custom_profile_packet_received on initialised devices.
 
+Patch 5 — Endpoint.get_model_info
+  Returns the already-known model/manufacturer for C4 devices instead of
+  attempting a real Basic-cluster ZCL read, which always times out (C4
+  devices only answer their own ASCII protocol). Avoids a "Re-interview
+  failed" WARNING + traceback every time zigpy's periodic
+  Device.reinterview() fires.
+
 _C4_MODEL_QUIRK_MAP is populated by each device module at import time via
   _C4_MODEL_QUIRK_MAP["model_string"] = QuirkClass
 """
@@ -512,6 +519,45 @@ try:
 
 except Exception as e:
     _LOGGER.error("C4: Failed to install broadcast patch: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Patch 5: Endpoint.get_model_info — skip the real ZCL round trip for C4
+# devices
+#
+# CONFIRMED from a real HA debug log: zigpy's periodic Device.reinterview()
+# (unrelated to Patch 1's initial-pairing interview) calls
+# Endpoint.get_model_info(), which tries a genuine Basic-cluster
+# read_attributes(["manufacturer", "model"]) over the air. C4 devices only
+# ever answer their own proprietary ASCII protocol, never a real ZCL Basic
+# read, so this always times out — surfacing as a "Re-interview failed,
+# keeping existing device" WARNING + traceback every time it fires. Purely
+# cosmetic (zigpy already falls back to keeping the existing, already-
+# correct device on failure) but avoidable, since model/manufacturer for a
+# C4 device are already known — set once during the original pairing by
+# Patch 3/3b's model-sniffing — and never need a live re-read.
+# ---------------------------------------------------------------------------
+try:
+    from zigpy.endpoint import Endpoint as _ZigpyEndpoint3
+
+    if not getattr(_ZigpyEndpoint3, '_c4_model_info_patch', False):
+        _original_get_model_info = _ZigpyEndpoint3.get_model_info
+
+        async def _c4_patched_get_model_info(self):
+            device_ieee = str(getattr(self.device, 'ieee', '')).lower()
+            if device_ieee.startswith(C4_IEEE_PREFIX):
+                return self.device.model, self.device.manufacturer
+            return await _original_get_model_info(self)
+
+        _ZigpyEndpoint3.get_model_info      = _c4_patched_get_model_info
+        _ZigpyEndpoint3._c4_model_info_patch = True
+        _LOGGER.info("C4: Installed get_model_info short-circuit patch")
+    else:
+        _LOGGER.debug("C4: get_model_info patch already installed")
+
+except Exception as e:
+    _LOGGER.error("C4: Failed to install get_model_info patch: %s", e)
+
 
 # ---------------------------------------------------------------------------
 # Device module imports — must come AFTER all patches are installed above.
