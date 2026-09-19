@@ -165,13 +165,20 @@ History:
   controller log capturing Composer's own SET_BUTTON_ATTACHED /
   SET_LED_ATTACHED on the LDZ-101 — `c4.dm.ba <0|1>` and
   `c4.dm.lm <0|1>` respectively (single decimal digit, no hex padding,
-  unlike c4.dm.tv's indexed ramp values). Added as new
-  set_button_attached / set_led_attached commands on C4RampCluster
-  (c4_ramp_cluster.py, EP4) — grouped there rather than on C4LEDCluster
-  or the button cluster because Composer itself groups these with the
-  ramp rates under the same "Wireless Dimmer" driver panel, and the
-  wire transport is identical. See c4_ramp_cluster.py's own docstring
-  for the full protocol detail.
+  unlike c4.dm.tv's indexed ramp values). First added as ZCL commands on
+  C4RampCluster, then as custom Bool attributes there — both confirmed
+  broken on real hardware for producing a usable HA control (a command
+  never gets its own entity and rendered as a 0-255 slider; a bare
+  attribute on a fully custom cluster gets no auto-generated entity
+  either, since ZHA only has hardcoded platform support for a handful
+  of core-recognized ZCL attributes). Final fix: two new virtual
+  endpoints (ATTACHED_SWITCH_EP_MAP: 200 "button_attached", 201
+  "led_attached" — c4_attached_switch.py), each carrying nothing but a
+  plain OnOff cluster whose on/off/toggle commands send the wire
+  command instead of controlling real power. ZHA's switch-platform
+  discovery reliably turns any OnOff cluster into a real Switch entity,
+  which is the same virtual-endpoint trick already used above for the
+  two button Event entities.
 """
 
 import logging
@@ -231,6 +238,11 @@ from c4_basic_cluster import C4BasicCluster
 from c4_button_cluster import C4DimmerButtonCluster, _DIMMER_BUTTON_CLUSTERS
 from c4_led_cluster import C4LEDCluster
 from c4_ramp_cluster import C4RampCluster, C4_RAMP_CLUSTER_ID
+from c4_attached_switch import (
+    ATTACHED_SWITCH_EP_MAP,
+    C4ButtonAttachedOnOff,
+    C4LedAttachedOnOff,
+)
 from c4_hooks import _C4_MODEL_QUIRK_MAP
 
 _LOGGER = logging.getLogger(__name__)
@@ -653,6 +665,20 @@ class Control4APD120Dimmer(CustomDevice):
                     OUTPUT_CLUSTERS: [],
                 }
                 for btn_name, ep_id in DIMMER_BUTTON_EVENT_EP_MAP.items()
+            },
+            # Virtual button/led-attached endpoints — one Switch entity
+            # each in ZHA. See c4_attached_switch.py.
+            ATTACHED_SWITCH_EP_MAP["button_attached"]: {
+                PROFILE_ID:      zha.PROFILE_ID,
+                DEVICE_TYPE:     0x0000,
+                INPUT_CLUSTERS:  [C4ButtonAttachedOnOff],
+                OUTPUT_CLUSTERS: [],
+            },
+            ATTACHED_SWITCH_EP_MAP["led_attached"]: {
+                PROFILE_ID:      zha.PROFILE_ID,
+                DEVICE_TYPE:     0x0000,
+                INPUT_CLUSTERS:  [C4LedAttachedOnOff],
+                OUTPUT_CLUSTERS: [],
             },
         },
     }
