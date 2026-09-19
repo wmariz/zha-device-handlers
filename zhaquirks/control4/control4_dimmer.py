@@ -142,24 +142,31 @@ History:
   from "top pressed" etc., but there was no actual HA *entity* anywhere
   reflecting button activity — nothing in Developer Tools -> States, no
   history, nothing to put on a dashboard. zha_send_event alone only
-  produces a bus event (zha_event), never an entity. The KC120277 scene
-  controller (control4_scene_controller.py) already solves the exact
-  same problem for its own 8 buttons: one virtual per-button endpoint
-  each, holding a dedicated EventableCluster, so ZHA creates one Event
-  entity per button. Replicated the same pattern for this dimmer's two
-  buttons: two new virtual endpoints (DIMMER_BUTTON_EVENT_EP_MAP: 198
-  "top", 199 "bottom"), a small per-button EventableCluster factory
-  (_make_dimmer_button_cluster, c4_button_cluster.py), and a new
-  C4DimmerButtonCluster (replacing bare C4ButtonCluster on EP197) that
-  overrides only _fire_button_zha_event() — a new override point split
-  out of C4ButtonCluster._handle_button_event() specifically for this —
-  so the dimmer's own on/off state sync (_sync_state_from_event /
+  produces a bus event (zha_event), never an entity. First attempt (based
+  on an unverified assumption borrowed from the KC120277 scene
+  controller's own docstring, which claimed the same trick "creates one
+  Event entity per button"): two new virtual endpoints
+  (DIMMER_BUTTON_EVENT_EP_MAP: 198 "top", 199 "bottom"), each holding a
+  bare EventableCluster (c4_button_cluster.py). CONFIRMED WRONG on real
+  hardware: no entity of any kind appeared for either button after
+  pairing — EventableCluster's only real behavior is firing the classic
+  zha_event bus message, not creating an entity. Fixed by rebuilding
+  _make_dimmer_button_cluster (c4_button_cluster.py) around a real, plain
+  MultistateInput cluster (0x0012, a standard ZCL cluster ZHA's sensor
+  platform already recognizes generically — the same pattern
+  zhaquirks/xiaomi/aqara/switch_acn047.py uses for its own buttons) with
+  a present_value counter bumped on every simple click. Each button now
+  gets a real Sensor entity whose state/history changes on every
+  SHORT_PRESS. C4DimmerButtonCluster (replacing bare C4ButtonCluster on
+  EP197) overrides only _fire_button_zha_event() — a new override point
+  split out of C4ButtonCluster._handle_button_event() specifically for
+  this — so the dimmer's own on/off state sync (_sync_state_from_event /
   _sync_cc_event, unique to this class; the scene controller has no
   load to sync) keeps running unchanged, and only *where* the
-  zha_event fires changes: from EP197 itself to the matching virtual
-  endpoint. device_automation_triggers was updated to point at the
-  virtual endpoints too, since events no longer fire on EP197 at all
-  once C4DimmerButtonCluster is in use.
+  zha_event fires (plus the new present_value bump) happens: on the
+  matching virtual endpoint instead of EP197. device_automation_triggers
+  was updated to point at the virtual endpoints too, since events no
+  longer fire on EP197 at all once C4DimmerButtonCluster is in use.
 
   Button/LED-attached hardware config: CONFIRMED from a real HC300
   controller log capturing Composer's own SET_BUTTON_ATTACHED /
@@ -194,7 +201,7 @@ from zigpy.quirks import CustomCluster, CustomDevice
 from zigpy.zcl import foundation
 from zigpy.zcl.foundation import Status as ZCLStatus
 from zigpy.zcl.clusters.general import (
-    Groups, Identify, LevelControl, OnOff, Scenes,
+    Groups, Identify, LevelControl, MultistateInput, OnOff, Scenes,
 )
 
 from zhaquirks.const import (
@@ -222,7 +229,6 @@ import c4_hooks
 
 import c4_helpers as C4
 from c4_helpers import (
-    C4_BUTTON_CLUSTER_ID,
     C4_DEFAULT_ON_LEVEL,
     C4_MANUF_CLUSTER,
     C4_OFF_TRANSITION,
@@ -694,13 +700,19 @@ class Control4APD120Dimmer(CustomDevice):
     # ENDPOINT_ID points at DIMMER_BUTTON_EVENT_EP_MAP's virtual per-button
     # endpoints, not at 197 (this cluster's own endpoint) — since
     # C4DimmerButtonCluster started firing zha_send_event there instead, to
-    # also get a dedicated Event entity per button (see its docstring).
+    # also get a dedicated sensor entity per button (see its docstring).
+    # CLUSTER_ID must match the virtual endpoint's real cluster identity —
+    # MultistateInput (0x0012, see c4_button_cluster.py's
+    # _make_dimmer_button_cluster), not the C4_BUTTON_CLUSTER_ID used on
+    # EP197 itself, since that's the cluster ZHA tags the fired zha_event
+    # with (a stale C4_BUTTON_CLUSTER_ID here would silently break trigger
+    # matching after the MultistateInput switch below).
     # Keyed by _btn_name (not _btn_id): DIMMER_BUTTON_MAP maps two ids
     # (0x00, 0x01) onto the same "top" button/virtual endpoint.
     device_automation_triggers = {
         (_action, _btn_name): {
             COMMAND: _action,
-            CLUSTER_ID: C4_BUTTON_CLUSTER_ID,
+            CLUSTER_ID: MultistateInput.cluster_id,
             ENDPOINT_ID: DIMMER_BUTTON_EVENT_EP_MAP[_btn_name],
         }
         for _btn_id, _btn_name in DIMMER_BUTTON_MAP.items()

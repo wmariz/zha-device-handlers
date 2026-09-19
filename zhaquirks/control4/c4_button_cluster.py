@@ -2,7 +2,7 @@
 
 Classes exported:
   C4ButtonCluster                  — base, used by plain switches
-  C4DimmerButtonCluster            — C4-APD120/LDZ-101 dimmer (adds per-button Event entities)
+  C4DimmerButtonCluster            — C4-APD120/LDZ-101 dimmer (adds per-button sensor entities)
   C4SwitchButtonCluster            — on/off switch variant
   C4SceneControllerButtonCluster   — KC120277 8-button keypad
   C4DualOutletButtonCluster        — LOZ-5S1-W dual outlet
@@ -10,7 +10,7 @@ Classes exported:
   _DIMMER_BUTTON_CLUSTERS          — per-button virtual cluster dict for the dimmer (name → class)
   _KC120277_BUTTON_CLUSTERS        — per-button virtual cluster dict (btn_id → class)
   _SR260_BUTTON_CLUSTERS           — per-button virtual cluster dict for SR260
-  _make_dimmer_button_cluster()    — factory for the dimmer's per-button EventableCluster
+  _make_dimmer_button_cluster()    — factory for the dimmer's per-button MultistateInput cluster
   _make_kc120277_button_cluster()  — factory for per-button EventableCluster
   _make_sr260_button_cluster()     — factory for SR260 per-button EventableCluster
 """
@@ -23,7 +23,8 @@ _QUIRK_DIR = os.path.dirname(os.path.abspath(__file__))
 if _QUIRK_DIR not in sys.path:
     sys.path.insert(0, _QUIRK_DIR)
 
-from zigpy.zcl.clusters.general import LevelControl, OnOff
+from zigpy.quirks import CustomCluster
+from zigpy.zcl.clusters.general import LevelControl, MultistateInput, OnOff
 
 from zhaquirks import EventableCluster
 from zhaquirks.const import (
@@ -446,30 +447,58 @@ class C4ButtonCluster(EventableCluster):
 
 
 # ---------------------------------------------------------------------------
-# Dimmer variant — adds a dedicated Event entity per physical button
+# Dimmer variant — adds a dedicated sensor entity per physical button
 # ---------------------------------------------------------------------------
 
 def _make_dimmer_button_cluster(button_name: str) -> type:
-    """Return a unique EventableCluster class for one dimmer physical button.
+    """Return a unique MultistateInput-based cluster for one dimmer button.
 
-    Each class lives on its own virtual endpoint (DIMMER_BUTTON_EVENT_EP_MAP),
-    so ZHA creates one independent Event entity per button — mirroring
-    _make_kc120277_button_cluster above. Physical Zigbee frames never arrive
-    on these endpoints — routing is done by
-    C4DimmerButtonCluster._fire_button_zha_event().
+    CONFIRMED WRONG on real hardware: the previous version of this factory
+    built a bare EventableCluster and relied on it to make ZHA create a
+    dedicated "Event" entity per button, mirroring a claim in this same
+    file's docstring for the KC120277 scene controller. It doesn't —
+    EventableCluster's only real behavior is firing the classic zha_event
+    BUS message (self.listener_event(ZHA_SEND_EVENT, ...)), which is
+    exactly what already worked for device_automation_triggers; it was
+    never a mechanism for creating a dashboard-visible entity, and no
+    entity appeared for either button after pairing.
+
+    Fixed by building a real, plain ZCL MultistateInput cluster (0x0012)
+    instead, the same pattern zhaquirks already uses successfully elsewhere
+    (e.g. zhaquirks/xiaomi/aqara/switch_acn047.py's MultistateInputCluster)
+    — ZHA's sensor-platform discovery recognizes this standard cluster
+    generically and creates a real Sensor entity for it, quirk-declared
+    virtual endpoint or not. C4DimmerButtonCluster._fire_button_zha_event
+    bumps this cluster's present_value (via record_short_press()) on every
+    simple click (SHORT_PRESS), so the sensor's state — and its history —
+    changes on each one, which is the actual feedback asked for. The
+    zha_event bus message for automations keeps firing exactly as before;
+    this only adds the missing entity, it doesn't replace anything.
     """
 
-    class _ButtonCluster(EventableCluster):
-        cluster_id   = C4_BUTTON_CLUSTER_ID
+    class _ButtonCluster(CustomCluster, MultistateInput):
+        cluster_id   = MultistateInput.cluster_id
         name         = f"{button_name.capitalize()} Button"
         ep_attribute = f"c4_dimmer_btn_{button_name}"
         _c4_custom_handler = False  # no physical routing
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._click_count = 0
 
         def handle_message(self, hdr, args):
             pass  # no physical packets arrive here
 
         def handle_cluster_request(self, hdr, args, *, dst_addressing=None):
             pass
+
+        def record_short_press(self):
+            """Bump present_value so the sensor's state/history changes."""
+            self._click_count += 1
+            self._update_attribute(
+                MultistateInput.AttributeDefs.present_value.id,
+                self._click_count,
+            )
 
     _ButtonCluster.__name__     = f"C4Dimmer{button_name.capitalize()}ButtonCluster"
     _ButtonCluster.__qualname__ = _ButtonCluster.__name__
@@ -484,7 +513,7 @@ _DIMMER_BUTTON_CLUSTERS: dict[str, type] = {
 
 
 class C4DimmerButtonCluster(C4ButtonCluster):
-    """C4ButtonCluster, but each button fires its own dedicated Event entity.
+    """C4ButtonCluster, but each button also gets a dedicated sensor entity.
 
     CONFIRMED gap found by the user: device_automation_triggers (fixed
     earlier — see control4_dimmer.py's module docstring) makes "top
@@ -492,10 +521,20 @@ class C4DimmerButtonCluster(C4ButtonCluster):
     but there was no actual HA *entity* anywhere showing button activity
     — nothing in Developer Tools -> States, no history, nothing on a
     dashboard. zha_send_event alone only ever produces a bus event
-    (zha_event), not an entity; the KC120277 scene controller
-    (control4_scene_controller.py) already solves this the same way for
-    its own 8 buttons, via one virtual per-button endpoint each holding
-    a dedicated EventableCluster.
+    (zha_event), not an entity.
+
+    CONFIRMED WRONG on real hardware: an earlier version of this fix built
+    a virtual endpoint per button holding a bare EventableCluster, on the
+    (unverified) assumption that ZHA creates a dedicated Event entity for
+    it the same way it does for the KC120277 scene controller's buttons.
+    No entity ever appeared after pairing — EventableCluster's only real
+    behavior is firing the classic zha_event bus message, which is not an
+    entity-creation mechanism. Fixed by giving each virtual endpoint a
+    real MultistateInput cluster instead (see _make_dimmer_button_cluster
+    in this file) — a standard ZCL cluster ZHA's sensor platform
+    recognizes generically — and bumping its present_value on every
+    simple click, so a real Sensor entity now shows up per button and its
+    state/history changes on each click.
 
     Overrides _fire_button_zha_event() (not _handle_button_event()) so
     the dimmer-specific on/off state sync in _sync_state_from_event /
@@ -525,15 +564,17 @@ class C4DimmerButtonCluster(C4ButtonCluster):
             )
             return
 
-        btn_cluster = ep.in_clusters.get(C4_BUTTON_CLUSTER_ID)
+        btn_cluster = ep.in_clusters.get(MultistateInput.cluster_id)
         if btn_cluster is None:
             _LOGGER.warning(
                 "C4 dimmer button: no cluster 0x%04X on EP %d",
-                C4_BUTTON_CLUSTER_ID, ep_id,
+                MultistateInput.cluster_id, ep_id,
             )
             return
 
         btn_cluster.listener_event("zha_send_event", action, {ENDPOINT_ID: ep_id})
+        if action == SHORT_PRESS:
+            btn_cluster.record_short_press()
         _LOGGER.debug(
             "C4 dimmer button: fired %r for %s on EP %d",
             action, button_name, ep_id,
