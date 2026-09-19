@@ -5,15 +5,26 @@ including turning on at an arbitrary brightness and dragging the
 brightness slider while a light is on (it does not revert to off — see
 attempt 10 in "History" for the real bug behind that symptom).
 
-STILL OPEN, possibly outside this file's control: after dimming a light
-to some level, turning it off, then back on, the UI can keep showing the
-stale pre-off brightness for a while even though the physical light
-correctly goes to 100%. Attempts 11-13 added/extended optimistic
-current_level syncing for both outlets, but a debug-log capture (attempt
-13) showed outlet 2's zigpy-side attribute cache updating correctly and
-immediately — no stale value ever appears in the cache this quirk
-controls. If the UI still shows one, the likely remaining suspect is
-Home Assistant's own light-entity/frontend state, not this file. Read
+RESOLVED (was "STILL OPEN"): the brief flash of a *different* brightness
+right after turning a light back on, before it settles on the real value,
+is Home Assistant's own ZHA integration doing an optimistic restore from
+its `off_brightness` entity attribute — confirmed by the user directly in
+Developer Tools -> States, where outlet 2's flash value (89) matched its
+`off_brightness` attribute exactly. This lives in HA core/ZHA, not in
+zhaquirks, runs for any dimmable ZHA light, and is *supposed* to
+self-correct once the real level update arrives. It is not a bug and
+nothing in this file can or should suppress it.
+
+What WAS a real bug: outlet 1 briefly settling on a wrong FINAL value
+(e.g. 188/254 ~= 73%) instead of the correct 100% after being dimmed,
+turned off, then back on — see attempt 14. Attempt 13 had let outlet 1's
+current_level be overwritten by every c4.dm.tc announcement the real
+ramping circuit emits (including stray mid-ramp values like 0%), which
+raced against the reliable real-ZCL optimistic update from both
+directions: corrupting the value captured into HA's `off_brightness` at
+turn-off, and corrupting the final resting value after turn-on. Attempt
+14 reverted this, so outlet 1's current_level is once again driven only
+by the real-ZCL optimistic update and genuine device reports. Read
 "History" before changing this file again — several earlier attempts
 mistook a related symptom (attempt 10) for a wire-protocol problem and
 spent a full hardware-test cycle each ruling out the wrong thing.
@@ -238,8 +249,44 @@ History:
   This is a genuine improvement (outlet 1's real-time level tracking was
   incomplete before), but it targets a newly-discovered gap, not
   necessarily the exact "off then on" symptom, which outlet 2's clean
-  trace suggests may live outside this file entirely. Re-testing with
-  debug logging still on remains the way to tell the difference.
+  trace suggests may live outside this file entirely.
+
+  Attempt 14 reverted attempt 13's outlet-0 half after it caused a real
+  regression: the user tested it and found outlet 1 now settling on a
+  wrong value (73%) instead of turning fully on (100%) after being
+  dimmed, off, then on again — worse than the pre-attempt-13 behavior. The
+  real APD120-style circuit sends MULTIPLE c4.dm.tc announcements while
+  ramping toward a target (confirmed in the debug log: 97%, 34%, 0%, 3%,
+  98% in quick succession while the user was interacting with outlet 1),
+  and syncing current_level from every single one raced against the
+  reliable real-ZCL optimistic update — whichever arrived last won,
+  including a transient mid-ramp value if the announcement stream didn't
+  end exactly on the target or arrived out of order. _sync_level_for_
+  outlet is back to outlet-1-only; outlet 0's current_level is once again
+  owned exclusively by the real-ZCL path
+  (C4DimmerLevelControlWithOptimisticSync) and EP2/EP196, with no
+  c4.dm.tc-based override.
+
+  The user then checked Developer Tools -> States directly (not just the
+  dashboard card) and found the *entity's own* brightness going
+  null (off) -> 0 -> 188 for outlet 1, versus null -> 89 -> 253 for
+  outlet 2 — and noticed outlet 2's mid-value (89) exactly matched that
+  entity's `off_brightness` attribute. That pinpointed the "flash" itself
+  as Home Assistant's ZHA integration optimistically restoring
+  `off_brightness` on turn-on, entirely outside this file (see the
+  module-level "RESOLVED" note) — outlet 2's flash was always going to
+  self-correct (253 ~= 100%, correct). Outlet 1's case is the attempt-13
+  bug described above wearing two faces at once: the stray c4.dm.tc
+  announcements corrupted current_level both at the moment it got
+  captured into `off_brightness` on turn-off (landing on 0 instead of the
+  real prior level) and again after the turn-on optimistic update fired
+  (landing on 188/~73% instead of 254/100%). Removing outlet 1's
+  c4.dm.tc-based override fixes both: `off_brightness` will capture
+  whatever the optimistic path/real reports actually set, and nothing
+  will overwrite the correct value after turn-on either. This is a
+  postulated mechanism consistent with all evidence gathered so far, not
+  independently re-confirmed on hardware yet — re-testing outlet 1's
+  dim/off/on cycle is the way to check it.
 
 Implementation:
   • Outlet 1 (EP1) reuses C4DimmerOnOff UNCHANGED from control4_dimmer.py
@@ -259,10 +306,13 @@ Implementation:
     attempt 11) — paired with C4Outlet2DimmerLevelControl (this file) for
     brightness, which sends the confirmed `c4.dm.tv <01> 00 <level>`
     command (same shape as on/off, just with a graduated value).
-  • EP197's button/state cluster syncs current_level/on_off for whichever
-    outlet a c4.dm.tc announcement names (see attempt 13) — outlet 1 gets
-    this as a second confirmation path alongside real-ZCL and EP2/EP196;
-    it's the only level-sync path outlet 2 has.
+  • EP197's button/state cluster syncs current_level/on_off from
+    c4.dm.tc announcements for outlet 2 only (its only level-sync path,
+    since it has no real Zigbee endpoint). Outlet 1's announcements are
+    left to the base class's on/off-only handling — see attempt 14: the
+    real circuit emits multiple graduated announcements while ramping,
+    which raced against and corrupted outlet 1's more reliable real-ZCL
+    optimistic update when both fed the same current_level.
 """
 
 import logging
@@ -695,39 +745,45 @@ class C4DualOutletDimmerButtonCluster(C4DualOutletButtonCluster):
         if namespace == "c4.dm.tc" and len(data) >= 2:
             try:
                 outlet_idx = int(data[0], 16)
-                level_pct = int(data[1], 16)
-            except (ValueError, TypeError) as e:
-                _LOGGER.warning(
-                    "C4 dual outlet dimmer: failed to parse c4.dm.tc: "
-                    "data=%s (%s)", data, e,
-                )
-                return
-            _LOGGER.debug(
-                "C4 dual outlet dimmer: c4.dm.tc outlet=%d level=%d",
-                outlet_idx, level_pct,
-            )
-            self._sync_level_for_outlet(outlet_idx, level_pct)
-            return
+            except (ValueError, TypeError):
+                outlet_idx = None
 
-        # Anything else (button clicks, LED sync, ...) defers to the base
-        # class's generic handling. (An earlier revision of this file also
-        # overrode _handle_light_state for c4.dmx.ls — removed once the
-        # actual driver binary confirmed this device never sends anything
-        # in the c4.dmx.* namespace; see module docstring.)
+            if outlet_idx == 1:
+                try:
+                    level_pct = int(data[1], 16)
+                    _LOGGER.debug(
+                        "C4 dual outlet dimmer: c4.dm.tc outlet=1 level=%d",
+                        level_pct,
+                    )
+                    self._sync_level_for_outlet(1, level_pct)
+                except (ValueError, TypeError) as e:
+                    _LOGGER.warning(
+                        "C4 dual outlet dimmer: failed to parse c4.dm.tc: "
+                        "data=%s (%s)", data, e,
+                    )
+                return
+
+        # Outlet index 0 (owned by real ZCL instead) and anything else fall
+        # through to the base on/off-only sync — see REVERTED note below.
         super()._handle_state_announcement(namespace, data)
 
     def _sync_level_for_outlet(self, outlet_idx, level_pct):
-        """Sync current_level/on_off for either outlet from a c4.dm.tc announce.
+        """Sync current_level/on_off for one outlet from a c4.dm.tc announce.
 
-        Originally written for outlet 1 (EP11) only, on the assumption that
-        outlet 0 (EP1) exclusively used the real-ZCL path
-        (C4DimmerLevelControlWithOptimisticSync) plus EP2/EP196's
-        _sync_ep1_level for confirmation. Real-hardware debug logs showed
-        outlet 0 *also* sends c4.dm.tc announcements with a graduated
-        level, which the base class's _sync_onoff_for_outlet was silently
-        collapsing to a boolean — this generalizes the sync to cover
-        whichever outlet index the announcement names, giving outlet 0 a
-        second, independent confirmation path instead of discarding it.
+        Outlet 1 (EP11) ONLY — this is its sole confirmation path, and has
+        shown no issues. A prior revision of this method also handled
+        outlet 0 (EP1), on the theory that it needed a second confirmation
+        path alongside real-ZCL (C4DimmerLevelControlWithOptimisticSync)
+        and EP2/EP196. REVERTED: real-hardware testing showed the real
+        APD120-style circuit sends MULTIPLE c4.dm.tc announcements while
+        ramping (e.g. 3%, 34%, 73%, 97%... while transitioning toward a
+        target), and syncing every one of them raced against the reliable
+        real-ZCL optimistic update — outlet 1 started settling on a
+        transient mid-ramp value (e.g. 73%) instead of the correct target
+        (100%) whenever the announcement stream didn't end exactly on the
+        target or arrived out of order. Outlet 0 is intentionally back to
+        on/off-only syncing (via the base class's _sync_onoff_for_outlet)
+        so its current_level is owned exclusively by the real-ZCL path.
         """
         ep_id = OUTLET_EP_MAP.get(outlet_idx)
         if ep_id is None:

@@ -45,20 +45,27 @@ controller required.
 > `level=` keyword instead), so every dim request silently sent "off"
 > regardless of the value requested.
 >
-> **Possibly still open, outside this file:** after dimming a light to
-> some level, turning it off, then back on, the UI can keep showing the
-> stale pre-off brightness for a while even though the physical light
-> correctly goes to 100%. A debug-log capture of this exact sequence
-> showed outlet 2's zigpy-side attribute cache updating correctly and
-> immediately on every on/off — no stale value ever appeared in the cache
-> this quirk controls — so if the UI still shows one, the likely remaining
-> suspect is Home Assistant's own light-entity/frontend state rather than
-> this quirk. The same capture also found a real, separate gap: outlet 1
-> sends graduated-level announcements over the same channel outlet 2 uses,
-> which were being discarded down to a boolean; that's now fixed too. See
-> the module docstring's "STILL OPEN" note. Please open an issue (ideally
-> with an HA debug log for `control4_outlet_dimmer`) if you can help
-> narrow this down further.
+> **Resolved: the brief "flash" of a different brightness right after
+> turning a light back on.** This turned out to be Home Assistant's own
+> ZHA integration optimistically restoring its `off_brightness` entity
+> attribute on turn-on — confirmed by checking Developer Tools -> States
+> directly, where the flashed value matched `off_brightness` exactly. It
+> lives in HA core/ZHA, not in this quirk, and is expected to self-correct
+> once the real level comes back; there is nothing to fix here.
+>
+> That investigation did turn up one real bug, now fixed: outlet 1 could
+> settle on the wrong *final* brightness (e.g. ~73% instead of 100%) after
+> being dimmed, turned off, then back on. The real dimming circuit sends
+> several graduated `c4.dm.tc` announcements while ramping (e.g. 97%, 34%,
+> 0%, 3%, 98% in quick succession), and an earlier revision synced
+> outlet 1's brightness from every one of them, racing against the more
+> reliable real-ZCL update and occasionally landing on a transient
+> mid-ramp value. Outlet 1's brightness is now driven solely by the real
+> ZCL passthrough again; outlet 2 (which has no real Zigbee endpoint and
+> so has no other source of truth) keeps syncing from `c4.dm.tc`. See the
+> module docstring's "History" (attempts 13–14) for the full trail. Please
+> open an issue (ideally with an HA debug log for
+> `control4_outlet_dimmer`) if outlet 1 still misbehaves after this fix.
 
 All Control4 Zigbee devices use a proprietary text-based serial protocol
 layered on top of ZigBee APS instead of standard ZCL clusters. These quirks
