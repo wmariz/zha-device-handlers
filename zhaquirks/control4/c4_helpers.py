@@ -117,11 +117,29 @@ C4_ENDPOINT_DEFAULTS = {
 # Button / event maps
 # ---------------------------------------------------------------------------
 
-# Button IDs from c4.dmx.bp / c4.dmx.cc captures
+# Button IDs from c4.dmx.bp / c4.dmx.cc captures. Still used as-is by
+# C4SwitchButtonCluster/C4DualOutletButtonCluster (different physical
+# devices) — do not repurpose for the dimmer, see APD120_BUTTON_MAP below.
 DIMMER_BUTTON_MAP = {
     0x00: "top",
     0x01: "top",     # ON  button
     0x05: "bottom",  # OFF button
+}
+
+# CONFIRMED from two clean, isolated real HA debug log captures on an
+# LDZ-101: the c4.dm.* protocol (this device's actual button protocol —
+# see c4_button_cluster.py's _handle_dm_b_code / the c4.dm.cc handling in
+# _handle_state_announcement) uses a plain two-button id scheme (0=top,
+# 1=bottom), NOT DIMMER_BUTTON_MAP's older c4.dmx.*-era on/off-button
+# scheme (0x00 AND 0x01 both "top", 0x05 "bottom"). Reusing
+# DIMMER_BUTTON_MAP for c4.dm.* ids routed every press from BOTH physical
+# buttons to "top" (id 1 wrongly resolved to "top" instead of "bottom",
+# and id 5 — needed for DIMMER_BUTTON_MAP's "bottom" — never appears in
+# this protocol at all), so "bottom" never fired. Used only by
+# C4DimmerButtonCluster.
+APD120_BUTTON_MAP = {
+    0x00: "top",
+    0x01: "bottom",
 }
 
 # Virtual endpoint IDs for the dimmer's per-button Event entities (ZHA-side

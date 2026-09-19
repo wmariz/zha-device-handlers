@@ -239,6 +239,7 @@ import c4_hooks
 
 import c4_helpers as C4
 from c4_helpers import (
+    APD120_BUTTON_MAP,
     C4_DEFAULT_ON_LEVEL,
     C4_MANUF_CLUSTER,
     C4_OFF_TRANSITION,
@@ -246,7 +247,6 @@ from c4_helpers import (
     C4_PROFILE_BUTTON,
     C4_PROFILE_NETWORK,
     DIMMER_BUTTON_EVENT_EP_MAP,
-    DIMMER_BUTTON_MAP,
     C4DimmerManufCluster,
     C4ConfigCluster,
 )
@@ -716,15 +716,18 @@ class Control4APD120Dimmer(CustomDevice):
     # _make_dimmer_button_cluster), not the C4_BUTTON_CLUSTER_ID used on
     # EP197 itself, since that's the cluster ZHA tags the fired zha_event
     # with (a stale value here would silently break trigger matching).
-    # Keyed by _btn_name (not _btn_id): DIMMER_BUTTON_MAP maps two ids
-    # (0x00, 0x01) onto the same "top" button/virtual endpoint.
+    # Iterates APD120_BUTTON_MAP (c4_helpers.py) — the real, confirmed
+    # 0=top/1=bottom scheme for this device's c4.dm.* protocol — not the
+    # shared DIMMER_BUTTON_MAP, which uses an unrelated older on/off-
+    # button id scheme still needed by C4SwitchButtonCluster/
+    # C4DualOutletButtonCluster for their own physical devices.
     device_automation_triggers = {
         (_action, _btn_name): {
             COMMAND: _action,
             CLUSTER_ID: BinaryInput.cluster_id,
             ENDPOINT_ID: DIMMER_BUTTON_EVENT_EP_MAP[_btn_name],
         }
-        for _btn_id, _btn_name in DIMMER_BUTTON_MAP.items()
+        for _btn_id, _btn_name in APD120_BUTTON_MAP.items()
         for _action in (
             "press",
             SHORT_PRESS, DOUBLE_PRESS, TRIPLE_PRESS, QUADRUPLE_PRESS,

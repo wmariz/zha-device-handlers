@@ -43,6 +43,7 @@ import asyncio
 
 import c4_helpers as C4
 from c4_helpers import (
+    APD120_BUTTON_MAP,
     C4_BUTTON_CLUSTER_ID,
     C4_DISPLAY_CLUSTER_ID,
     DIMMER_BUTTON_EVENT_EP_MAP,
@@ -610,6 +611,19 @@ class C4DimmerButtonCluster(C4ButtonCluster):
     gets a real binary_sensor entity whose on/off state reflects press
     and release, per the user's own suggested design.
 
+    Also CONFIRMED WRONG on real hardware after the above: inheriting
+    BUTTON_MAP from C4ButtonCluster (= DIMMER_BUTTON_MAP, written for the
+    older c4.dmx.*-era on/off-button scheme where ids 0x00 AND 0x01 both
+    meant "top" and 0x05 meant "bottom") silently routed every c4.dm.*
+    press from BOTH physical buttons to "top" — id 1 (the real bottom
+    button) resolved to "top" instead, and id 5 (needed for
+    DIMMER_BUTTON_MAP's own "bottom") never appears in this protocol at
+    all, so "bottom" never fired. Overridden with APD120_BUTTON_MAP
+    (c4_helpers.py) — the real, confirmed 0=top/1=bottom scheme — instead
+    of touching the shared DIMMER_BUTTON_MAP, which
+    C4SwitchButtonCluster/C4DualOutletButtonCluster still rely on for
+    their own, different physical devices.
+
     Overrides _fire_button_zha_event() (not _handle_button_event()) so
     the dimmer-specific on/off state sync in _sync_state_from_event /
     _sync_cc_event (unique to this class among C4ButtonCluster's
@@ -620,6 +634,8 @@ class C4DimmerButtonCluster(C4ButtonCluster):
     (control4_dimmer.py) was updated to match — it now points at the
     virtual endpoints too, since events no longer fire on EP197 at all.
     """
+
+    BUTTON_MAP = APD120_BUTTON_MAP
 
     def _fire_button_zha_event(self, action, button_id, button_name):
         ep_id = DIMMER_BUTTON_EVENT_EP_MAP.get(button_name)
