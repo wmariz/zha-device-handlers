@@ -65,6 +65,42 @@ History:
   command() override, so this change is a no-op duplicate for it, not a
   behavior change — safe for both devices that share this class
   hierarchy.
+
+  Investigated two more user reports with fresh debug logs (with the
+  diagnostic logging above already in place): setting brightness to
+  100% settling at 99%, and transition times "not being respected."
+  Both turned out to be real hardware characteristics, not bugs:
+  commanding the ZCL max (254, the only valid "100%") consistently made
+  the device report back 99% via c4.dm.t0c — the numbers match the
+  device computing its own percentage as level/255 rather than the
+  correct level/254, an off-by-one in its own firmware that no ZCL-
+  compliant command can work around (255 is not a valid level to send).
+  For transitions, even an explicit transition_time=0 (instant) still
+  took ~0.7s for the light to visibly reach its target, while lowering
+  the level with the same transition_time=0 was near-instant (~0.1s) —
+  a rise-only floor consistent with a phase dimmer's soft-start
+  circuitry, which off/down transitions don't need and reasonably
+  tracked whatever transition time was actually commanded (~2.0s
+  commanded, ~2.0-2.5s observed). Left uninvestigated further: this
+  quirk is already sending the technically-correct values in both
+  cases; the device's own physical/firmware behavior is what falls a
+  little short, in a way this quirk cannot fix while staying
+  ZCL-compliant.
+
+  That same debug log surfaced a related, confirmed bug: unlike
+  outlet_dimmer.py's outlet 1, this file's C4DimmerLevelControl had no
+  optimistic sync of its own, so current_level (and therefore what HA's
+  UI displays) was driven purely by live c4.dm.t0c announcements — and
+  since the device reports every intermediate value while physically
+  ramping (e.g. 10%, 95%, 99% over about a second), the UI visibly
+  flashed through each one instead of jumping straight to the requested
+  target. The user confirmed they want this to behave like the outlet
+  dimmer instead. Added the same current_level/on_off optimistic sync
+  C4DimmerLevelControlWithOptimisticSync already does, directly to
+  C4DimmerLevelControl.command() (this file) — current_level now jumps
+  to the requested target the instant a command is sent, and later
+  c4.dm.t0c announcements still correct it if the device's real settled
+  level differs slightly (e.g. the 99%-not-100% case above).
 """
 
 import logging
@@ -367,22 +403,49 @@ class C4DimmerLevelControl(CustomCluster, LevelControl):
             LevelControl.ServerCommandDefs.move_to_level.id,
             LevelControl.ServerCommandDefs.move_to_level_with_on_off.id,
         ):
-            # Cache the requested target level as on_level, but only from
-            # the command actually SENT — not from the device's own
-            # c4.dm.t0c announcements (c4_helpers.py's _sync_ep1_level),
-            # which fire repeatedly while ramping and previously corrupted
-            # on_level with a transient mid-ramp value on every off(),
-            # making the light settle dimmer on each cycle (reverted; see
-            # _sync_ep1_level's docstring). The command-time target is
-            # what the user/HA actually asked for and is immune to ramp
-            # timing, matching the mechanism already proven on the
-            # LOZ-5D1-W outlet dimmer's
-            # C4DimmerLevelControlWithOptimisticSync.
             level_zcl = args[0] if args else kwargs.get("level")
-            if level_zcl is not None and level_zcl > 0:
-                self._update_attribute(
-                    LevelControl.AttributeDefs.on_level.id, level_zcl
+            if level_zcl is not None:
+                # CONFIRMED on real hardware: without this, current_level
+                # only ever changed when a genuine c4.dm.t0c announcement
+                # arrived — and since the device actually reports EVERY
+                # intermediate value while physically ramping (e.g. 10%,
+                # 95%, 99% while turning on over ~1s), HA's UI visibly
+                # flashed through each of them instead of jumping straight
+                # to the target, unlike the LOZ-5D1-W outlet dimmer (whose
+                # C4DimmerLevelControlWithOptimisticSync already does
+                # exactly this). The user asked for consistency: jump
+                # optimistically to the requested target immediately, the
+                # same way the outlet dimmer does — later c4.dm.t0c
+                # announcements (c4_helpers.py's _sync_ep1_level) still
+                # correct current_level if the device's real settled level
+                # ends up slightly different (e.g. 99% instead of 100%,
+                # a device firmware characteristic — see module docstring).
+                _LOGGER.debug(
+                    "C4 Level: optimistic current_level=%d on_off=%s",
+                    level_zcl, level_zcl > 0,
                 )
+                self._update_attribute(
+                    LevelControl.AttributeDefs.current_level.id, level_zcl
+                )
+                onoff = self.endpoint.in_clusters.get(OnOff.cluster_id)
+                if onoff is not None:
+                    onoff.update_attribute(
+                        OnOff.AttributeDefs.on_off.id, level_zcl > 0
+                    )
+                # Cache the requested target level as on_level too, but
+                # only from the command actually SENT — not from the
+                # device's own c4.dm.t0c announcements
+                # (c4_helpers.py's _sync_ep1_level), which fire repeatedly
+                # while ramping and previously corrupted on_level with a
+                # transient mid-ramp value on every off(), making the
+                # light settle dimmer on each cycle (reverted; see
+                # _sync_ep1_level's docstring). The command-time target is
+                # what the user/HA actually asked for and is immune to
+                # ramp timing.
+                if level_zcl > 0:
+                    self._update_attribute(
+                        LevelControl.AttributeDefs.on_level.id, level_zcl
+                    )
         return result if result is not None else self._SUCCESS
 
 
