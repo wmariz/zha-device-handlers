@@ -71,7 +71,7 @@ History:
 
   Attempt 7 stopped guessing from analogy and went to the source: the user
   located the actual compiled Control4 driver on their own PC —
-  Composer253\Director\Drivers\outlet_ip_control4.c4w — which
+  Composer253/Director/Drivers/outlet_ip_control4.c4w — which
   outlet_wireless_dimmer.c4i's <control> field names as the exact driver
   for this device (outlet_wireless.c4i, the LOZ-5S1-W switch's descriptor,
   names a different one). That 1MB native binary's embedded string table
@@ -94,7 +94,7 @@ History:
   Attempt 8 (this version) replaced analogy with the actual implementation:
   the user pulled the driver binaries straight off a real HC-1000v2
   controller's recovery partition
-  (I:\...\hc1000v2\recovery\recovery~\control4\drivers\*.c4l — ELF
+  (I:/.../hc1000v2/recovery/recovery~/control4/drivers/*.c4l — ELF
   binaries, the ARM/Linux Director-side runtime, as opposed to the
   Windows-side .c4w files attempt 7 used). Unlike the Windows binaries,
   outlet_ip_control4.c4l is NOT stripped: its symbol table has the literal
