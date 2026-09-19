@@ -102,7 +102,8 @@ class C4AttachedOnOff(CustomCluster, OnOff):
         cmd = f"0s{seq:04x} {self._C4_NAMESPACE} {value}"
 
         _LOGGER.info(
-            "C4 %s: setting attached=%d — cmd: %s", self._C4_LABEL, value, cmd,
+            "C4 %s (endpoint %d): setting attached=%d — cmd: %s",
+            self._C4_LABEL, self.endpoint.endpoint_id, value, cmd,
         )
 
         frame = _build_c4_frame(seq, cmd)
@@ -117,7 +118,8 @@ class C4AttachedOnOff(CustomCluster, OnOff):
             )
         except Exception as e:
             _LOGGER.warning(
-                "C4 %s: failed to set attached=%d — %s", self._C4_LABEL, value, e,
+                "C4 %s (endpoint %d): failed to set attached=%d — %s",
+                self._C4_LABEL, self.endpoint.endpoint_id, value, e,
             )
 
 
