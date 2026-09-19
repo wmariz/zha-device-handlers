@@ -65,17 +65,19 @@ controller required.
 > so has no other source of truth) keeps syncing from `c4.dm.tc`.
 >
 > A second, unrelated bug turned up after that fix: outlet 1 was turning
-> back on to a fixed 75% instead of 100% on a plain on/off toggle (not
-> the brightness slider). A plain on() asks this quirk for a level to
-> send, which falls back to a hardcoded ~75% default whenever there's no
-> better cached value — and outlet 1's cached brightness now correctly
-> reads 0 right after being turned off (a side effect of the fix above),
-> which triggers that fallback. Outlet 1's plain on/off now defaults
-> straight to 100% instead, matching outlet 2's own on/off behavior
-> (dimmed brightness is only ever reached deliberately, via the slider).
-> See the module docstring's "History" (attempts 13–15) for the full
-> trail. Please open an issue (ideally with an HA debug log for
-> `control4_outlet_dimmer`) if outlet 1 still misbehaves after this fix.
+> back on to a fixed 75% instead of restoring its previous brightness on
+> a plain on/off toggle (not the brightness slider). A plain on() asks
+> this quirk for a level to send, which falls back to a hardcoded ~75%
+> default whenever there's no better cached value — and outlet 1's
+> cached brightness now correctly reads 0 right after being turned off
+> (a side effect of the fix above), which triggered that fallback.
+> Checking Home Assistant's own ZHA source confirmed the standard
+> behavior is to restore the previous brightness on a plain turn-on, not
+> jump to any fixed value, so outlet 1 now caches its last non-zero
+> level separately and restores it the same way. See the module
+> docstring's "History" (attempts 13–16) for the full trail. Please open
+> an issue (ideally with an HA debug log for `control4_outlet_dimmer`)
+> if outlet 1 still misbehaves after this fix.
 
 All Control4 Zigbee devices use a proprietary text-based serial protocol
 layered on top of ZigBee APS instead of standard ZCL clusters. These quirks
