@@ -136,6 +136,14 @@ KC120277_BUTTON_MAP = {
 }
 
 DIMMER_EVENT_MAP = {
+    # c4.dmx.bp fires immediately on physical press-down, before the device
+    # knows whether it'll resolve into a short click (cc), a multi-click
+    # (cc with a higher count), or a hold (hc/he) — was unmapped, which sent
+    # every single button-down through as a useless "unknown_bp" zha_event.
+    # Named "press" (not SHORT_PRESS) to keep it distinct from "cc"=1, which
+    # already fires SHORT_PRESS after release once the click is resolved —
+    # using the same name for both would double-fire SHORT_PRESS per click.
+    "bp": "press",
     "hc": LONG_PRESS,
     "he": LONG_RELEASE,
     "cc": "click_count",

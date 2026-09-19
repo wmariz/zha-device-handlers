@@ -1,4 +1,24 @@
-"""ZHA quirk for the Control4 C4-APD120 Adaptive Phase Dimmer."""
+"""ZHA quirk for the Control4 C4-APD120 Adaptive Phase Dimmer.
+
+History:
+
+  Button triggers fix: device_automation_triggers advertised literal
+  "click"/"press"/"release" actions, but nothing in c4_button_cluster.py's
+  DIMMER_EVENT_MAP ever fired those exact strings — "click"/"release" were
+  simply dead (never selectable triggers actually fire), while the button's
+  real single-click/hold events (SHORT_PRESS via c4.dmx.cc=1, LONG_PRESS via
+  c4.dmx.hc, LONG_RELEASE via c4.dmx.he) were firing correctly but weren't
+  in this list at all, so HA's automation UI never offered them for this
+  device (only DOUBLE_PRESS/TRIPLE_PRESS/QUADRUPLE_PRESS, also from
+  c4.dmx.cc, were present). Separately, c4.dmx.bp — which fires immediately
+  on physical press-down, before the device resolves it into a click count
+  or a hold — was entirely unmapped in DIMMER_EVENT_MAP, producing a
+  useless "unknown_bp" zha_event instead of a real one. Mapped "bp" to a
+  new "press" action (not SHORT_PRESS, to avoid double-firing SHORT_PRESS
+  once from "press" and again from the click-count resolution) and added
+  it plus the three previously-missing real actions to
+  device_automation_triggers.
+"""
 
 import logging
 import os
@@ -349,6 +369,13 @@ class Control4APD120Dimmer(CustomDevice):
         },
     }
 
+    # CONFIRMED vs. dead: "click"/"release" never fired (nothing in
+    # c4_button_cluster.py's DIMMER_EVENT_MAP produces those exact literal
+    # strings), while SHORT_PRESS/LONG_PRESS/LONG_RELEASE were already being
+    # fired for real (via c4.dmx.cc=1 / hc / he) but were missing from this
+    # list entirely, so HA's automation UI never offered them as triggers
+    # for this device. "press" (c4.dmx.bp, immediate press-down before a
+    # click/hold resolves) is newly wired up in DIMMER_EVENT_MAP to match.
     device_automation_triggers = {
         (_action, _btn_name): {
             COMMAND: _action,
@@ -356,7 +383,11 @@ class Control4APD120Dimmer(CustomDevice):
             ENDPOINT_ID: 197,
         }
         for _btn_id, _btn_name in DIMMER_BUTTON_MAP.items()
-        for _action in ("click", "press", "release", DOUBLE_PRESS, TRIPLE_PRESS, QUADRUPLE_PRESS)
+        for _action in (
+            "press",
+            SHORT_PRESS, DOUBLE_PRESS, TRIPLE_PRESS, QUADRUPLE_PRESS,
+            LONG_PRESS, LONG_RELEASE,
+        )
     }
 
 
