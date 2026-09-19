@@ -220,6 +220,22 @@ class C4ButtonCluster(EventableCluster):
                     data[0], data[1],
                 )
                 self._handle_button_event(namespace, data[0], data[1])
+        elif namespace == "c4.dm.cc":
+            # CONFIRMED from a real HA debug log capture on an LDZ-101
+            # dimmer: this device's actual click-count announcements use
+            # the single-channel `c4.dm.*` family (like c4.dm.t0c for
+            # level), not `c4.dmx.cc` — every real button press was
+            # silently falling through to "unknown namespace" below.
+            # Identical shape/semantics to c4.dmx.cc otherwise (button,
+            # click count), so _handle_button_event's event_code
+            # resolution (namespace.split(".")[-1] == "cc") works
+            # unchanged.
+            if len(data) >= 2:
+                _LOGGER.debug(
+                    "C4 state: click count, button = %s, clicks = %s",
+                    data[0], data[1],
+                )
+                self._handle_button_event(namespace, data[0], data[1])
         elif namespace == "c4.dmx.hc":
             _LOGGER.debug("C4 state: hold, button = %s", data[0])
             self._handle_button_event(namespace, data[0])
