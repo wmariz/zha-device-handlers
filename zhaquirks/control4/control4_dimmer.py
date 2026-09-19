@@ -733,16 +733,21 @@ class Control4APD120Dimmer(CustomDevice):
                 OUTPUT_CLUSTERS: [],
             },
             # Virtual per-button LED-color endpoints — one RGB light
-            # entity each in ZHA. See c4_led_rgb.py.
+            # entity each in ZHA. See c4_led_rgb.py. DEVICE_TYPE matters
+            # here (unlike every other virtual endpoint on this device):
+            # ZHA's light-vs-switch platform tiebreak for an OnOff cluster
+            # with siblings apparently leans on it, not just cluster
+            # presence — COLOR_DIMMABLE_LIGHT matches the confirmed real
+            # pattern in zhaquirks/siglis/zigfred.py's own LED endpoint.
             LED_COLOR_EP_MAP["top"]: {
                 PROFILE_ID:      zha.PROFILE_ID,
-                DEVICE_TYPE:     0x0000,
+                DEVICE_TYPE:     zha.DeviceType.COLOR_DIMMABLE_LIGHT,
                 INPUT_CLUSTERS:  [C4LedOnOff, C4LedLevelControl, C4TopLedColorCluster],
                 OUTPUT_CLUSTERS: [],
             },
             LED_COLOR_EP_MAP["bottom"]: {
                 PROFILE_ID:      zha.PROFILE_ID,
-                DEVICE_TYPE:     0x0000,
+                DEVICE_TYPE:     zha.DeviceType.COLOR_DIMMABLE_LIGHT,
                 INPUT_CLUSTERS:  [C4LedOnOff, C4LedLevelControl, C4BottomLedColorCluster],
                 OUTPUT_CLUSTERS: [],
             },
