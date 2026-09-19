@@ -208,15 +208,23 @@ History:
   only "on" color is exposed, since the LED only follows this quirk's
   commands while led_attached is off — otherwise the device's own
   built-in logic drives it. Two new virtual endpoints
-  (LED_COLOR_EP_MAP: 202 "top", 203 "bottom" — c4_led_rgb.py), each
-  carrying a plain OnOff + Color cluster, so ZHA's light-platform
-  discovery creates a real RGB light entity per LED (same virtual-
-  endpoint trick as the button/attached-switch entities above). Color
-  is set via the ZCL Hue/Saturation model rather than XY, converting to
-  RGB with a plain stdlib colorsys call; turning the light off sends
-  black, on re-sends the last color. Bottom LED (c4.dm.l1o) is
-  UNCONFIRMED — implemented by analogy with the one command actually
-  captured, pending a real-hardware test.
+  (LED_COLOR_EP_MAP: 202 "top", 203 "bottom" — c4_led_rgb.py).
+
+  CONFIRMED WRONG on real hardware: a first version gave each endpoint
+  just OnOff + Color, expecting ZHA's light platform to claim the pair
+  as one RGB light entity. It didn't — the generic Switch platform
+  claimed the bare OnOff cluster instead (two unlabeled "Interruptor"
+  entities appeared) and Color was left completely unclaimed, no entity
+  at all. Fixed by adding a LevelControl cluster too — apparently
+  required before ZHA's light-platform discovery treats an endpoint as
+  a light at all. Once that was needed anyway, the user pointed out
+  Control4 already treats black as "off" for these LEDs, so
+  LevelControl's brightness now doubles as the HSV "V" component
+  instead of carrying separate on/off wire logic: 0% brightness already
+  sends black through the same hue/saturation-to-RGB conversion, and
+  on()/off() just set brightness to 254/0 and resend the current color.
+  Bottom LED (c4.dm.l1o) is UNCONFIRMED — implemented by analogy with
+  the one command actually captured, pending a real-hardware test.
 """
 
 import logging
@@ -283,6 +291,7 @@ from c4_attached_switch import (
 from c4_led_rgb import (
     LED_COLOR_EP_MAP,
     C4LedOnOff,
+    C4LedLevelControl,
     C4TopLedColorCluster,
     C4BottomLedColorCluster,
 )
@@ -728,13 +737,13 @@ class Control4APD120Dimmer(CustomDevice):
             LED_COLOR_EP_MAP["top"]: {
                 PROFILE_ID:      zha.PROFILE_ID,
                 DEVICE_TYPE:     0x0000,
-                INPUT_CLUSTERS:  [C4LedOnOff, C4TopLedColorCluster],
+                INPUT_CLUSTERS:  [C4LedOnOff, C4LedLevelControl, C4TopLedColorCluster],
                 OUTPUT_CLUSTERS: [],
             },
             LED_COLOR_EP_MAP["bottom"]: {
                 PROFILE_ID:      zha.PROFILE_ID,
                 DEVICE_TYPE:     0x0000,
-                INPUT_CLUSTERS:  [C4LedOnOff, C4BottomLedColorCluster],
+                INPUT_CLUSTERS:  [C4LedOnOff, C4LedLevelControl, C4BottomLedColorCluster],
                 OUTPUT_CLUSTERS: [],
             },
         },
