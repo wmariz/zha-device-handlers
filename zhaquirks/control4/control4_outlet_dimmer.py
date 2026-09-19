@@ -5,15 +5,15 @@ including turning on at an arbitrary brightness and dragging the
 brightness slider while a light is on (it does not revert to off — see
 attempt 10 in "History" for the real bug behind that symptom).
 
-STILL OPEN on both outlets: after dimming a light to some level, turning
-it off, then back on, the UI keeps showing the stale pre-off brightness
-for a while even though the physical light correctly goes to 100%.
-Attempts 11 (outlet 2) and 12 (outlet 1) added optimistic current_level
-syncing that should help, but the user reports attempt 11 did NOT resolve
-it for outlet 2, so there is likely another layer to this (possibly in
-how Home Assistant's own light entity caches/re-sends the "last
-brightness" on a plain on/off toggle, rather than in this quirk's
-zigpy-side attribute cache) that hasn't been identified yet. Read
+STILL OPEN, possibly outside this file's control: after dimming a light
+to some level, turning it off, then back on, the UI can keep showing the
+stale pre-off brightness for a while even though the physical light
+correctly goes to 100%. Attempts 11-13 added/extended optimistic
+current_level syncing for both outlets, but a debug-log capture (attempt
+13) showed outlet 2's zigpy-side attribute cache updating correctly and
+immediately — no stale value ever appears in the cache this quirk
+controls. If the UI still shows one, the likely remaining suspect is
+Home Assistant's own light-entity/frontend state, not this file. Read
 "History" before changing this file again — several earlier attempts
 mistook a related symptom (attempt 10) for a wire-protocol problem and
 spent a full hardware-test cycle each ruling out the wrong thing.
@@ -210,17 +210,36 @@ History:
   actually requested right after sending it — checking `kwargs["level"]`
   too, the same args-vs-kwargs gap from attempt 10.
 
-  Neither this nor attempt 11's equivalent for outlet 2 has been
-  confirmed to fully fix the "off then back on" symptom yet, and outlet
-  2's report suggests it may not be enough by itself — see the module
-  docstring's "STILL OPEN" note. The likely next step is a fresh debug-log
-  capture of exactly this repro (dim to some level, turn off, turn back
-  on) for both outlets, since the debug logging already in this file
-  proved decisive for attempt 10 and should show directly whether
-  current_level/on_off are being updated correctly in zigpy's own cache
-  even if Home Assistant's UI doesn't reflect it — which would point at
-  something outside this quirk (e.g. HA's own light-entity brightness
-  caching) rather than another sync gap here.
+  Neither this nor attempt 11's equivalent for outlet 2 was confirmed to
+  fully fix the "off then back on" symptom, and outlet 2's report
+  suggested it might not be enough by itself.
+
+  Attempt 13 used the requested fresh debug-log capture (dim, off, back
+  on) and found two things. First, outlet 2's own trace was fully
+  correct: `C4 Outlet2OnOff: syncing current_level=254 to match
+  on_off=True` fires immediately on turning on, well before the device's
+  own c4.dm.tc confirmation arrives — zigpy's cache never held a stale
+  value at any point in the log. If the UI still shows a stale brightness
+  despite this, the cache this quirk controls is not the cause; the next
+  place to look is Home Assistant's own light-entity/frontend state
+  (outside what a ZHA quirk can fix). Second, and unexpectedly: the same
+  log showed outlet 0 (EP1, outlet 1) sending c4.dm.tc announcements with
+  a graduated level (e.g. 97%, 34%, 0%, 3%, 98% while the user dimmed it)
+  — something not previously known to happen, since outlet 1 was assumed
+  to rely solely on the real-ZCL path plus EP2/EP196 for confirmation.
+  C4DualOutletButtonCluster's base _sync_onoff_for_outlet was collapsing
+  these to a boolean and discarding the actual level for outlet index 0.
+  Generalized _sync_level_for_outlet_2 into _sync_level_for_outlet(
+  outlet_idx, level_pct) so outlet 1 also gets its current_level kept in
+  sync from this channel — a second, independent confirmation path
+  alongside the EP2/EP196 report and the optimistic update from attempt
+  12, in case either of those is unreliable for this device.
+
+  This is a genuine improvement (outlet 1's real-time level tracking was
+  incomplete before), but it targets a newly-discovered gap, not
+  necessarily the exact "off then on" symptom, which outlet 2's clean
+  trace suggests may live outside this file entirely. Re-testing with
+  debug logging still on remains the way to tell the difference.
 
 Implementation:
   • Outlet 1 (EP1) reuses C4DimmerOnOff UNCHANGED from control4_dimmer.py
@@ -240,11 +259,10 @@ Implementation:
     attempt 11) — paired with C4Outlet2DimmerLevelControl (this file) for
     brightness, which sends the confirmed `c4.dm.tv <01> 00 <level>`
     command (same shape as on/off, just with a graduated value).
-  • EP197's button/state cluster treats outlet-index-1 c4.dm.tc
-    announcements as a graduated level for outlet 2, and defers everything
-    else (including any outlet-index-0 announcements) to the base sync, so
-    outlet 1's current_level stays owned exclusively by the real-ZCL /
-    EP2-EP196 path above.
+  • EP197's button/state cluster syncs current_level/on_off for whichever
+    outlet a c4.dm.tc announcement names (see attempt 13) — outlet 1 gets
+    this as a second confirmation path alongside real-ZCL and EP2/EP196;
+    it's the only level-sync path outlet 2 has.
 """
 
 import logging
@@ -677,37 +695,45 @@ class C4DualOutletDimmerButtonCluster(C4DualOutletButtonCluster):
         if namespace == "c4.dm.tc" and len(data) >= 2:
             try:
                 outlet_idx = int(data[0], 16)
-            except (ValueError, TypeError):
-                outlet_idx = None
-
-            if outlet_idx == 1:
-                try:
-                    level_pct = int(data[1], 16)
-                    _LOGGER.debug(
-                        "C4 dual outlet dimmer: c4.dm.tc outlet=1 level=%d",
-                        level_pct,
-                    )
-                    self._sync_level_for_outlet_2(level_pct)
-                except (ValueError, TypeError) as e:
-                    _LOGGER.warning(
-                        "C4 dual outlet dimmer: failed to parse c4.dm.tc: "
-                        "data=%s (%s)", data, e,
-                    )
+                level_pct = int(data[1], 16)
+            except (ValueError, TypeError) as e:
+                _LOGGER.warning(
+                    "C4 dual outlet dimmer: failed to parse c4.dm.tc: "
+                    "data=%s (%s)", data, e,
+                )
                 return
+            _LOGGER.debug(
+                "C4 dual outlet dimmer: c4.dm.tc outlet=%d level=%d",
+                outlet_idx, level_pct,
+            )
+            self._sync_level_for_outlet(outlet_idx, level_pct)
+            return
 
-        # Outlet index 0 (owned by real ZCL instead) and anything else fall
-        # through to the base on/off-only sync. (An earlier revision of
-        # this file also overrode _handle_light_state for c4.dmx.ls —
-        # removed once the actual driver binary confirmed this device never
-        # sends anything in the c4.dmx.* namespace; see module docstring.)
+        # Anything else (button clicks, LED sync, ...) defers to the base
+        # class's generic handling. (An earlier revision of this file also
+        # overrode _handle_light_state for c4.dmx.ls — removed once the
+        # actual driver binary confirmed this device never sends anything
+        # in the c4.dmx.* namespace; see module docstring.)
         super()._handle_state_announcement(namespace, data)
 
-    def _sync_level_for_outlet_2(self, level_pct):
-        ep_id = OUTLET_EP_MAP.get(1)
+    def _sync_level_for_outlet(self, outlet_idx, level_pct):
+        """Sync current_level/on_off for either outlet from a c4.dm.tc announce.
+
+        Originally written for outlet 1 (EP11) only, on the assumption that
+        outlet 0 (EP1) exclusively used the real-ZCL path
+        (C4DimmerLevelControlWithOptimisticSync) plus EP2/EP196's
+        _sync_ep1_level for confirmation. Real-hardware debug logs showed
+        outlet 0 *also* sends c4.dm.tc announcements with a graduated
+        level, which the base class's _sync_onoff_for_outlet was silently
+        collapsing to a boolean — this generalizes the sync to cover
+        whichever outlet index the announcement names, giving outlet 0 a
+        second, independent confirmation path instead of discarding it.
+        """
+        ep_id = OUTLET_EP_MAP.get(outlet_idx)
         if ep_id is None:
             _LOGGER.warning(
-                "C4 dual outlet dimmer: OUTLET_EP_MAP has no entry for "
-                "outlet index 1 — cannot sync level"
+                "C4 dual outlet dimmer: unknown outlet index %d in "
+                "c4.dm.tc — cannot sync level", outlet_idx,
             )
             return
         try:
@@ -715,8 +741,8 @@ class C4DualOutletDimmerButtonCluster(C4DualOutletButtonCluster):
             if ep is None:
                 _LOGGER.warning(
                     "C4 dual outlet dimmer: endpoint %s not found on "
-                    "device — cannot sync outlet 2 level (pct=%d)",
-                    ep_id, level_pct,
+                    "device — cannot sync outlet %d level (pct=%d)",
+                    ep_id, outlet_idx, level_pct,
                 )
                 return
             level_zcl = _c4_pct_to_zcl_level(level_pct)
@@ -724,8 +750,8 @@ class C4DualOutletDimmerButtonCluster(C4DualOutletButtonCluster):
             onoff_cluster = ep.in_clusters.get(OnOff.cluster_id)
             if level_cluster is not None:
                 _LOGGER.debug(
-                    "C4 dual outlet dimmer: outlet 2 (ep %s) level=%d (pct=%d)",
-                    ep_id, level_zcl, level_pct,
+                    "C4 dual outlet dimmer: outlet %d (ep %s) level=%d (pct=%d)",
+                    outlet_idx, ep_id, level_zcl, level_pct,
                 )
                 level_cluster.update_attribute(
                     LevelControl.AttributeDefs.current_level.id, level_zcl
@@ -733,7 +759,8 @@ class C4DualOutletDimmerButtonCluster(C4DualOutletButtonCluster):
             else:
                 _LOGGER.warning(
                     "C4 dual outlet dimmer: no LevelControl cluster on "
-                    "ep %s to sync level (pct=%d)", ep_id, level_pct,
+                    "ep %s to sync level (outlet %d, pct=%d)",
+                    ep_id, outlet_idx, level_pct,
                 )
             if onoff_cluster is not None:
                 onoff_cluster.update_attribute(
@@ -742,12 +769,13 @@ class C4DualOutletDimmerButtonCluster(C4DualOutletButtonCluster):
             else:
                 _LOGGER.warning(
                     "C4 dual outlet dimmer: no OnOff cluster on ep %s to "
-                    "sync on/off (pct=%d)", ep_id, level_pct,
+                    "sync on/off (outlet %d, pct=%d)",
+                    ep_id, outlet_idx, level_pct,
                 )
         except Exception:
             _LOGGER.warning(
-                "C4 dual outlet dimmer: outlet 2 level sync failed",
-                exc_info=True,
+                "C4 dual outlet dimmer: outlet %d level sync failed",
+                outlet_idx, exc_info=True,
             )
 
 

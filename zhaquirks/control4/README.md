@@ -45,16 +45,20 @@ controller required.
 > `level=` keyword instead), so every dim request silently sent "off"
 > regardless of the value requested.
 >
-> **Still open on both outlets:** after dimming a light to some level,
-> turning it off, then back on, the UI keeps showing the stale pre-off
-> brightness for a while even though the physical light correctly goes to
-> 100%. Two fixes (syncing `current_level` optimistically alongside
-> `on_off`) have been tried and haven't fully resolved it, so there is
-> likely another layer to this beyond this quirk's own zigpy-side
-> attribute cache — see the module docstring's "STILL OPEN" note. Please
-> open an issue (ideally with an HA debug log for
-> `control4_outlet_dimmer`) if you can help narrow this down, especially
-> a capture of the exact dim-then-off-then-on sequence.
+> **Possibly still open, outside this file:** after dimming a light to
+> some level, turning it off, then back on, the UI can keep showing the
+> stale pre-off brightness for a while even though the physical light
+> correctly goes to 100%. A debug-log capture of this exact sequence
+> showed outlet 2's zigpy-side attribute cache updating correctly and
+> immediately on every on/off — no stale value ever appeared in the cache
+> this quirk controls — so if the UI still shows one, the likely remaining
+> suspect is Home Assistant's own light-entity/frontend state rather than
+> this quirk. The same capture also found a real, separate gap: outlet 1
+> sends graduated-level announcements over the same channel outlet 2 uses,
+> which were being discarded down to a boolean; that's now fixed too. See
+> the module docstring's "STILL OPEN" note. Please open an issue (ideally
+> with an HA debug log for `control4_outlet_dimmer`) if you can help
+> narrow this down further.
 
 All Control4 Zigbee devices use a proprietary text-based serial protocol
 layered on top of ZigBee APS instead of standard ZCL clusters. These quirks
