@@ -62,9 +62,19 @@ controller required.
 > reliable real-ZCL update and occasionally landing on a transient
 > mid-ramp value. Outlet 1's brightness is now driven solely by the real
 > ZCL passthrough again; outlet 2 (which has no real Zigbee endpoint and
-> so has no other source of truth) keeps syncing from `c4.dm.tc`. See the
-> module docstring's "History" (attempts 13–14) for the full trail. Please
-> open an issue (ideally with an HA debug log for
+> so has no other source of truth) keeps syncing from `c4.dm.tc`.
+>
+> A second, unrelated bug turned up after that fix: outlet 1 was turning
+> back on to a fixed 75% instead of 100% on a plain on/off toggle (not
+> the brightness slider). A plain on() asks this quirk for a level to
+> send, which falls back to a hardcoded ~75% default whenever there's no
+> better cached value — and outlet 1's cached brightness now correctly
+> reads 0 right after being turned off (a side effect of the fix above),
+> which triggers that fallback. Outlet 1's plain on/off now defaults
+> straight to 100% instead, matching outlet 2's own on/off behavior
+> (dimmed brightness is only ever reached deliberately, via the slider).
+> See the module docstring's "History" (attempts 13–15) for the full
+> trail. Please open an issue (ideally with an HA debug log for
 > `control4_outlet_dimmer`) if outlet 1 still misbehaves after this fix.
 
 All Control4 Zigbee devices use a proprietary text-based serial protocol
