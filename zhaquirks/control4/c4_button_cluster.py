@@ -226,8 +226,24 @@ class C4ButtonCluster(EventableCluster):
                 _LOGGER.debug("C4 state: scene change, button = %s", data[0])
                 self._handle_button_event(namespace, data[0])
         elif namespace == "c4.dmx.tc":
-            if data:
-                _LOGGER.debug("C4 state: transition complete, button = %s", data[0])
+            # CONFIRMED bug: this only ever passed data[0] (button) through,
+            # never data[1] — but _sync_state_from_event's "tc" branch
+            # expects params["extra_value"] (the level reached once the
+            # transition finished) to call _sync_ep1_level, and that key is
+            # only populated when _handle_button_event receives a third
+            # (extra) argument. Level was silently never synced from this
+            # event. Fixed by passing data[1] through, same as c4.dmx.cc.
+            if len(data) >= 2:
+                _LOGGER.debug(
+                    "C4 state: transition complete, button = %s, level = %s",
+                    data[0], data[1],
+                )
+                self._handle_button_event(namespace, data[0], data[1])
+            elif data:
+                _LOGGER.debug(
+                    "C4 state: transition complete, button = %s (no level "
+                    "field)", data[0],
+                )
                 self._handle_button_event(namespace, data[0])
         elif namespace == "c4.zr.bb":
             # SR260 remote — button begin (key down). data[0] = button id (hex).
@@ -366,7 +382,20 @@ class C4ButtonCluster(EventableCluster):
         elif event_code == "tc":
             extra = params.get("extra_value")
             if extra is not None:
-                _sync_ep1_level(self.endpoint.device, extra, "tc_event")
+                # CONFIRMED bug: extra is the raw 0-100% hex byte from
+                # c4.dmx.tc's second field (same convention as every other
+                # dim-level source in this protocol family — c4.dmx.dim,
+                # c4.dmx.ls, c4.dm.t0c), but this passed it to
+                # _sync_ep1_level completely unscaled, as if it were
+                # already a 0-254 ZCL level — e.g. 80 (meaning 80%) would
+                # have been written as current_level=80 (~31%) instead of
+                # ~204 (80%). This call was unreachable until the
+                # c4.dmx.tc dispatch fix (see _handle_state_announcement)
+                # started actually passing extra through, so the wrong
+                # scale was never observed in practice; fixed before it
+                # could be.
+                zcl_level = round(extra * 254 / 100) if extra > 0 else 0
+                _sync_ep1_level(self.endpoint.device, zcl_level, "tc_event")
 
     def _sync_cc_event(self, button_id, click_count):
         """Sync on/off from c4.dmx.cc click-count confirmation."""
