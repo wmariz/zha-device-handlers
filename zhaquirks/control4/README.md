@@ -34,21 +34,27 @@ controller required.
 > real hardware** for graduated dimming, including dragging the brightness
 > slider while a light is on.
 >
-> Getting outlet 2 working took eleven attempts, most of them chasing the
-> wrong layer — see the module docstring's "History" section for the full
-> trail if you're touching this file. The short version: the wire command
-> was correct from very early on (confirmed by connecting the physical
-> device to a real HC-300 controller and decoding its driver log
+> Getting graduated dimming working took ten attempts, most of them
+> chasing the wrong layer — see the module docstring's "History" section
+> for the full trail if you're touching this file. The short version: the
+> wire command was correct from very early on (confirmed by connecting the
+> physical device to a real HC-300 controller and decoding its driver log
 > byte-for-byte), but this quirk's own command handler had a real bug — it
 > read the requested brightness from a positional argument that arrives
 > empty on newer zigpy/Python stacks (the level comes through as a
 > `level=` keyword instead), so every dim request silently sent "off"
-> regardless of the value requested. A smaller follow-up fix (not yet
-> independently confirmed) keeps `current_level` in sync when outlet 2 is
-> switched plainly on/off, so the UI shouldn't briefly show a stale pre-off
-> brightness the way it did before. Please open an issue (ideally with an
-> HA debug log for `control4_outlet_dimmer`) if either outlet still
-> misbehaves.
+> regardless of the value requested.
+>
+> **Still open on both outlets:** after dimming a light to some level,
+> turning it off, then back on, the UI keeps showing the stale pre-off
+> brightness for a while even though the physical light correctly goes to
+> 100%. Two fixes (syncing `current_level` optimistically alongside
+> `on_off`) have been tried and haven't fully resolved it, so there is
+> likely another layer to this beyond this quirk's own zigpy-side
+> attribute cache — see the module docstring's "STILL OPEN" note. Please
+> open an issue (ideally with an HA debug log for
+> `control4_outlet_dimmer`) if you can help narrow this down, especially
+> a capture of the exact dim-then-off-then-on sequence.
 
 All Control4 Zigbee devices use a proprietary text-based serial protocol
 layered on top of ZigBee APS instead of standard ZCL clusters. These quirks

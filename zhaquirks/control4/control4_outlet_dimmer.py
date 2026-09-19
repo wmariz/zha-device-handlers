@@ -1,20 +1,22 @@
 """ZHA quirk for the Control4 LOZ-5D1-W Dimming Outlet.
 
-CONFIRMED on real hardware: outlet 1 (EP1) dims correctly — turning on at
-an arbitrary brightness works, and dragging the brightness slider while
-the light is on updates the level in place (it does not revert to off).
+CONFIRMED on real hardware: graduated dimming works on BOTH outlets,
+including turning on at an arbitrary brightness and dragging the
+brightness slider while a light is on (it does not revert to off — see
+attempt 10 in "History" for the real bug behind that symptom).
 
-Outlet 2 (synthetic EP11): CONFIRMED on real hardware, graduated dimming
-works (attempt 10 in "History" below fixed the real bug: this quirk's own
-command() read the requested brightness from `args[0]`, which arrives
-empty on the user's zigpy/Python stack — the level comes through as a
-`level=` keyword instead, so every dim request silently sent level 0
-regardless of what was requested). Attempt 11 fixed a smaller follow-up UX
-issue: turning the light back on after a graduated dim briefly showed the
-stale pre-off level before correcting itself. Read "History" before
-changing this file again — several earlier attempts mistook the attempt-10
-symptom for a wire-protocol problem and spent a full hardware-test cycle
-each ruling out the wrong thing.
+STILL OPEN on both outlets: after dimming a light to some level, turning
+it off, then back on, the UI keeps showing the stale pre-off brightness
+for a while even though the physical light correctly goes to 100%.
+Attempts 11 (outlet 2) and 12 (outlet 1) added optimistic current_level
+syncing that should help, but the user reports attempt 11 did NOT resolve
+it for outlet 2, so there is likely another layer to this (possibly in
+how Home Assistant's own light entity caches/re-sends the "last
+brightness" on a plain on/off toggle, rather than in this quirk's
+zigpy-side attribute cache) that hasn't been identified yet. Read
+"History" before changing this file again — several earlier attempts
+mistook a related symptom (attempt 10) for a wire-protocol problem and
+spent a full hardware-test cycle each ruling out the wrong thing.
 
 History:
 
@@ -190,14 +192,45 @@ History:
   for the LOZ-5S1-W switch, which has no LevelControl cluster to keep in
   sync) — added C4Outlet2OnOff, a thin subclass used only on outlet 2,
   that also mirrors the same always-100%/0% value into current_level
-  immediately after on/off/toggle.
+  immediately after on/off/toggle. The user reports this did NOT fix the
+  symptom for outlet 2 — see attempt 12's note on this being unresolved.
+
+  Attempt 12 found the same missing sync on outlet 1: the user noticed
+  that after dimming outlet 1, turning it off then back on also left the
+  UI showing the stale pre-off level, even though the light itself
+  correctly went to 100%. C4DimmerLevelControl (control4_dimmer.py, used
+  unchanged by outlet 1) forwards move_to_level(_with_on_off) straight to
+  a real ZCL send and never optimistically updates current_level itself —
+  it relies entirely on the device reporting the new level back via
+  EP2/EP196 (C4ConfigCluster -> _sync_ep1_level), which is either slow or
+  not firing reliably enough for this device. Added
+  C4DimmerLevelControlWithOptimisticSync, a subclass scoped to this file
+  (control4_dimmer.py and the real C4-APD120 it serves are left
+  untouched), that mirrors current_level/on_off from whatever level was
+  actually requested right after sending it — checking `kwargs["level"]`
+  too, the same args-vs-kwargs gap from attempt 10.
+
+  Neither this nor attempt 11's equivalent for outlet 2 has been
+  confirmed to fully fix the "off then back on" symptom yet, and outlet
+  2's report suggests it may not be enough by itself — see the module
+  docstring's "STILL OPEN" note. The likely next step is a fresh debug-log
+  capture of exactly this repro (dim to some level, turn off, turn back
+  on) for both outlets, since the debug logging already in this file
+  proved decisive for attempt 10 and should show directly whether
+  current_level/on_off are being updated correctly in zigpy's own cache
+  even if Home Assistant's UI doesn't reflect it — which would point at
+  something outside this quirk (e.g. HA's own light-entity brightness
+  caching) rather than another sync gap here.
 
 Implementation:
-  • Outlet 1 (EP1) reuses C4DimmerOnOff / C4DimmerLevelControl UNCHANGED
-    from control4_dimmer.py — no override, no text-command translation.
-    EP2/EP196 reuse the base C4ConfigCluster (not C4OutletConfigCluster),
-    matching the APD120's raw 0-255 dim-level report path
-    (_sync_ep1_level) instead of the outlet's on/off-flag interpretation.
+  • Outlet 1 (EP1) reuses C4DimmerOnOff UNCHANGED from control4_dimmer.py
+    for on/off, paired with C4DimmerLevelControlWithOptimisticSync (this
+    file, see attempt 12) instead of the bare C4DimmerLevelControl for
+    LevelControl — no text-command translation, real ZCL passthrough plus
+    an optimistic current_level/on_off sync. EP2/EP196 reuse the base
+    C4ConfigCluster (not C4OutletConfigCluster), matching the APD120's raw
+    0-255 dim-level report path (_sync_ep1_level) instead of the outlet's
+    on/off-flag interpretation.
   • Outlet 2 (synthetic EP11) uses C4Outlet2OnOff for on/off — a thin
     subclass of C4Outlet1OnOff (control4_outlet.py's confirmed direct
     c4.dm.tv boolean transport — no LevelControl redirect, unlike outlet
@@ -263,15 +296,18 @@ from c4_basic_cluster import C4BasicCluster
 from c4_button_cluster import C4DualOutletButtonCluster
 from c4_hooks import _C4_MODEL_QUIRK_MAP
 
-# Reused UNCHANGED for outlet 1: real-ZCL transport, same as the C4-APD120
-# (see module docstring). C4DimmerLevelControl is also the base class for
-# C4Outlet2DimmerLevelControl below (local attribute-caching reuse only).
+# C4DimmerOnOff reused UNCHANGED for outlet 1: real-ZCL transport, same as
+# the C4-APD120 (see module docstring). C4DimmerLevelControl is the base
+# class for both C4DimmerLevelControlWithOptimisticSync (outlet 1) and
+# C4Outlet2DimmerLevelControl (outlet 2) below (local attribute-caching
+# reuse only, in both cases).
 from control4_dimmer import C4DimmerOnOff, C4DimmerLevelControl
-# Reused UNCHANGED for outlet 2's on/off: the confirmed direct c4.dm.tv
-# boolean transport, independent of LevelControl — see module docstring for
-# why outlet 2 does NOT use the OnOff->LevelControl redirect that outlet 1
-# needs (that redirect exists because the real APD120 ignores standard
-# On/Off; there's no evidence this text-protocol outlet does).
+# Reused (as the base of C4Outlet2OnOff) for outlet 2's on/off: the
+# confirmed direct c4.dm.tv boolean transport, independent of LevelControl
+# — see module docstring for why outlet 2 does NOT use the OnOff->
+# LevelControl redirect that outlet 1 needs (that redirect exists because
+# the real APD120 ignores standard On/Off; there's no evidence this
+# text-protocol outlet does).
 from control4_outlet import C4Outlet1OnOff, C4OutletStateCluster
 
 _LOGGER = logging.getLogger(__name__)
@@ -292,6 +328,74 @@ def _c4_pct_to_zcl_level(level_pct: int) -> int:
     """Convert a C4 protocol level (0-100) to a ZCL Level Control value."""
     level_pct = max(0, min(100, int(level_pct)))
     return round(level_pct * 254 / 100)
+
+
+# ---------------------------------------------------------------------------
+# Outlet 1 LevelControl — real ZCL passthrough plus an optimistic
+# current_level/on_off sync C4DimmerLevelControl doesn't do on its own.
+# ---------------------------------------------------------------------------
+
+class C4DimmerLevelControlWithOptimisticSync(C4DimmerLevelControl):
+    """C4DimmerLevelControl, but also optimistically updates current_level.
+
+    CONFIRMED bug found on real hardware: after dimming outlet 1, turning
+    it off then back on made the UI keep showing the *stale pre-off level*
+    even though the physical light correctly went to 100%. C4DimmerOnOff's
+    on()/off() handlers (control4_dimmer.py) redirect into a real ZCL
+    move_to_level_with_on_off frame via C4DimmerLevelControl, which just
+    forwards it to a real wire send — it has no optimistic update of its
+    own, relying entirely on the device reporting current_level back
+    (EP2/EP196's C4ConfigCluster -> _sync_ep1_level). That confirmation
+    apparently isn't arriving reliably enough for this specific device to
+    keep the UI in sync, unlike the real C4-APD120 this class was written
+    for — hence a subclass scoped to this file instead of a change to
+    control4_dimmer.py itself, which is left untouched.
+
+    This also fixes the same args-vs-kwargs gap found in outlet 2's
+    C4Outlet2DimmerLevelControl (see module docstring, attempt 10):
+    move_to_level(_with_on_off) can deliver the level as a `level=`
+    keyword instead of positionally, so both are checked here too, even
+    though C4DimmerOnOff itself always calls with a positional level.
+    """
+
+    async def command(
+        self,
+        command_id,
+        *args,
+        manufacturer=None,
+        expect_reply=False,
+        tsn=None,
+        **kwargs,
+    ):
+        result = await super().command(
+            command_id, *args,
+            manufacturer=manufacturer, expect_reply=expect_reply,
+            tsn=tsn, **kwargs,
+        )
+        if command_id in (
+            LevelControl.ServerCommandDefs.move_to_level.id,
+            LevelControl.ServerCommandDefs.move_to_level_with_on_off.id,
+        ):
+            if args:
+                level_zcl = args[0]
+            elif "level" in kwargs:
+                level_zcl = kwargs["level"]
+            else:
+                level_zcl = None
+            if level_zcl is not None:
+                _LOGGER.debug(
+                    "C4 DimmerLevel outlet1: optimistic current_level=%d "
+                    "on_off=%s", level_zcl, level_zcl > 0,
+                )
+                self._update_attribute(
+                    LevelControl.AttributeDefs.current_level.id, level_zcl
+                )
+                onoff = self.endpoint.in_clusters.get(OnOff.cluster_id)
+                if onoff is not None:
+                    onoff.update_attribute(
+                        OnOff.AttributeDefs.on_off.id, level_zcl > 0
+                    )
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -724,7 +828,9 @@ class Control4LOZ5D1WDimmer(CustomDevice):
                     Groups.cluster_id,
                     Scenes.cluster_id,
                     C4DimmerOnOff,
-                    C4DimmerLevelControl,
+                    # Adds an optimistic current_level/on_off sync on top of
+                    # C4DimmerLevelControl — see its docstring.
+                    C4DimmerLevelControlWithOptimisticSync,
                     C4DimmerManufCluster,
                 ],
                 OUTPUT_CLUSTERS: [C4_MANUF_CLUSTER],
