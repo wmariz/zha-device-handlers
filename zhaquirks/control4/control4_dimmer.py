@@ -119,18 +119,23 @@ History:
   genuine physical adjustment at the wall switch (which this quirk never
   commands and so never suppresses) still reaches HA as before.
 
-  CONFIRMED BUG in the first version of that suppression mechanism: it
-  stored the deadline as a plain instance attribute directly on the
-  LevelControl cluster (self._optimistic_suppress_until = ...), which
-  never read back correctly from c4_helpers.py's _sync_ep1_level
-  (getattr always saw it as unset, even milliseconds after this class's
-  own debug log confirmed the write happened) — apparently zigpy's
-  Cluster base class does something with attribute access that a plain
-  custom instance attribute doesn't survive; never fully root-caused.
-  Moved the suppression deadline into c4_helpers.py as a module-level
-  dict keyed by device.ieee instead (c4_suppress_level_sync() /
-  _LEVEL_SYNC_SUPPRESS_UNTIL) — no dependency on Cluster's own attribute
-  machinery at all — which fixed it outright.
+  CONFIRMED BUG in the first TWO versions of that suppression mechanism
+  (both in c4_helpers.py, root-caused with an id()-logging debug
+  capture — see _sync_ep1_level's own docstring for the full detail):
+  storing the deadline as a plain instance attribute on the LevelControl
+  cluster never read back correctly, and switching to a module-level
+  dict keyed by device.ieee *looked* like the fix but failed identically
+  — logging id() of the dict at both the write and read sites proved
+  why: they were two different dict objects, because Home Assistant's
+  custom-quirks loader evidently imports c4_helpers.py more than once.
+  This module cannot be relied on as a singleton in this environment.
+
+  Final fix: c4_suppress_level_sync() (c4_helpers.py) now stores the
+  deadline directly on the zigpy `device` object itself instead of
+  anywhere in c4_helpers.py's own state — `device` is passed in by the
+  caller (self.endpoint.device, below) rather than looked up through a
+  module, so it is genuinely one single object regardless of which
+  import of c4_helpers.py happens to be running.
 """
 
 import logging
@@ -465,13 +470,16 @@ class C4DimmerLevelControl(CustomCluster, LevelControl):
                 # immediately overwrote it via _sync_ep1_level
                 # (c4_helpers.py), so the UI flashed through the live ramp
                 # anyway, right after an extra flash to the target first.
-                # _optimistic_suppress_until tells _sync_ep1_level to
-                # ignore announcements for a few seconds after this fires,
-                # so only the FINAL settled reading (once the window has
-                # passed) can still correct current_level — e.g. if the
-                # device's real settled level ends up slightly different
-                # from what was asked (99% instead of 100%, a device
-                # firmware characteristic — see module docstring).
+                # c4_suppress_level_sync() (c4_helpers.py) tells
+                # _sync_ep1_level to ignore announcements for a few
+                # seconds after this fires, so only the FINAL settled
+                # reading (once the window has passed) can still correct
+                # current_level — e.g. if the device's real settled level
+                # ends up slightly different from what was asked (99%
+                # instead of 100%, a device firmware characteristic — see
+                # module docstring). See module docstring for why this
+                # stores the deadline on the `device` object rather than
+                # anywhere in c4_helpers.py's own state.
                 _LOGGER.debug(
                     "C4 Level: optimistic current_level=%d on_off=%s "
                     "(suppressing live announcements for %.1fs)",

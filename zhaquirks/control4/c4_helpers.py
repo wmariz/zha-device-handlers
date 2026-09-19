@@ -753,16 +753,9 @@ def _c4_persist_device(device, source="unknown"):
     )
 
 
-# device.ieee -> monotonic timestamp until which _sync_ep1_level should
-# ignore live level announcements for that device's EP1. Module-level and
-# keyed by IEEE rather than stored as an attribute on the LevelControl
-# cluster instance itself: CONFIRMED on real hardware that storing it as
-# a plain instance attribute (self._optimistic_suppress_until = ...) on
-# the cluster never read back correctly from here — zigpy's Cluster base
-# class evidently does something with attribute get/set that a plain
-# custom instance attribute doesn't survive. This sidesteps that
-# entirely: no dependency on Cluster's own attribute machinery at all.
-_LEVEL_SYNC_SUPPRESS_UNTIL: dict = {}
+# Attribute name used to stash the suppression deadline directly on the
+# zigpy Device object — see c4_suppress_level_sync()'s docstring for why.
+_LEVEL_SYNC_ATTR = "_c4_level_sync_suppress_until"
 
 
 def c4_suppress_level_sync(device, seconds: float) -> None:
@@ -773,14 +766,26 @@ def c4_suppress_level_sync(device, seconds: float) -> None:
     target, so the several intermediate c4.dm.t0c announcements the
     device emits while physically ramping don't immediately overwrite it
     and flash the UI through the live ramp. See _sync_ep1_level's
-    docstring for the full history.
+    docstring for the full history of two earlier, failed attempts at
+    this exact mechanism.
+
+    Stores the deadline directly on the zigpy Device object (via
+    object.__setattr__, bypassing any custom __setattr__ a quirk/zigpy
+    class might define) rather than in any module-level state. CONFIRMED
+    on real hardware, with an id()-logging debug capture, that a
+    module-level dict here was read back from a *different* dict object
+    than the one written to — Home Assistant's custom-quirks loader
+    evidently imports this file more than once, so this module does NOT
+    reliably behave as a singleton and its own top-level state cannot be
+    trusted to be shared across every file that imports it. `device`
+    itself has no such problem: it is a single, genuine zigpy object
+    reference passed by the caller, identical no matter which import of
+    this file happens to be running.
     """
-    _LEVEL_SYNC_SUPPRESS_UNTIL[device.ieee] = time.monotonic() + seconds
+    object.__setattr__(device, _LEVEL_SYNC_ATTR, time.monotonic() + seconds)
     _LOGGER.debug(
-        "C4 suppress: SET dict_id=%s key=%r (type=%s) until=%.3f "
-        "dict_now=%r",
-        id(_LEVEL_SYNC_SUPPRESS_UNTIL), device.ieee, type(device.ieee),
-        _LEVEL_SYNC_SUPPRESS_UNTIL[device.ieee], _LEVEL_SYNC_SUPPRESS_UNTIL,
+        "C4 suppress: SET device=%s until=%.3f (module id=%s)",
+        device.ieee, getattr(device, _LEVEL_SYNC_ATTR), id(sys.modules[__name__]),
     )
 
 
@@ -812,26 +817,40 @@ def _sync_ep1_level(device, level_raw: int, source="unknown"):
     immediately overwriting that optimistic value, so the UI visibly
     flashed through the live ramp anyway. Skips the current_level (and
     on_off) update here for a short window after an optimistic update —
-    see _LEVEL_SYNC_SUPPRESS_UNTIL / c4_suppress_level_sync() above, used
-    by C4DimmerLevelControl.command() — so those intermediate readings
-    are ignored, while a later announcement (once the window has passed)
-    is still trusted normally, e.g. for a genuine physical adjustment at
+    see c4_suppress_level_sync() above, called by
+    C4DimmerLevelControl.command() — so those intermediate readings are
+    ignored, while a later announcement (once the window has passed) is
+    still trusted normally, e.g. for a genuine physical adjustment at
     the wall switch that this quirk never commanded itself.
 
-    CONFIRMED BUG in the first version of that suppression mechanism: it
-    stored the deadline as a plain instance attribute on the LevelControl
-    cluster (self._optimistic_suppress_until = ...) and read it back here
-    via getattr(level_cluster, ...) — a fresh debug log showed the write
-    side firing correctly every time (its own log line appeared) but the
-    read side here NEVER saw it (not even once, and never even the
-    "suppressed" log line), always falling through as if nothing had
-    been set, even milliseconds after the write. zigpy's Cluster base
-    class evidently does something with attribute access that a plain
-    custom instance attribute doesn't survive — never fully root-caused,
-    since switching to this module-level dict (no dependency on Cluster's
-    own attribute machinery at all, just a plain dict keyed by
-    device.ieee) fixed it outright and was simpler than digging further
-    into zigpy internals for something this self-contained.
+    CONFIRMED BUG in the first TWO versions of that suppression
+    mechanism, root-caused with an id()-logging debug capture:
+
+      1. Storing the deadline as a plain instance attribute on the
+         LevelControl cluster (self._optimistic_suppress_until = ...)
+         never read back correctly here via getattr(level_cluster, ...)
+         — the write's own debug log fired every time, but the read
+         here never once saw it, even milliseconds later.
+
+      2. Switching to a module-level dict here (keyed by device.ieee)
+         *looked* like the obvious fix, but failed identically. Logging
+         id() of the dict at both the write and read sites proved why:
+         they were two DIFFERENT dict objects. Home Assistant's
+         custom-quirks loader evidently imports c4_helpers.py more than
+         once — once for whatever loads control4_dimmer.py, and
+         separately again for whatever loads c4_button_cluster.py (which
+         calls this function) — so this module is NOT a reliable
+         singleton in this environment, and nothing stored in its own
+         top-level state can be assumed shared across every file that
+         imports it. (Whether the Cluster-attribute failure in (1) was
+         the same root cause or a second, independent one was never
+         determined — moving off both a Cluster instance attribute and
+         module-level state avoids needing to know.)
+
+    c4_suppress_level_sync() now stores the deadline directly on the
+    `device` object instead — genuinely one single object regardless of
+    which import of this file is running, since it's passed in by the
+    caller rather than looked up through this module.
     """
     try:
         ep1 = device.endpoints.get(1)
@@ -840,12 +859,11 @@ def _sync_ep1_level(device, level_raw: int, source="unknown"):
         level_cluster = ep1.in_clusters.get(LevelControl.cluster_id)
         onoff_cluster = ep1.in_clusters.get(OnOff.cluster_id)
 
-        suppress_until = _LEVEL_SYNC_SUPPRESS_UNTIL.get(device.ieee, 0)
+        suppress_until = getattr(device, _LEVEL_SYNC_ATTR, 0)
         _LOGGER.debug(
-            "C4 suppress: GET dict_id=%s key=%r (type=%s) found=%.3f "
-            "now=%.3f dict_now=%r",
-            id(_LEVEL_SYNC_SUPPRESS_UNTIL), device.ieee, type(device.ieee),
-            suppress_until, time.monotonic(), _LEVEL_SYNC_SUPPRESS_UNTIL,
+            "C4 suppress: GET device=%s found=%.3f now=%.3f (module id=%s)",
+            device.ieee, suppress_until, time.monotonic(),
+            id(sys.modules[__name__]),
         )
         if suppress_until and time.monotonic() < suppress_until:
             _LOGGER.debug(
