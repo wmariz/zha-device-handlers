@@ -156,14 +156,36 @@ class C4DimmerOnOff(CustomCluster, OnOff):
         """Return the on-ramp time in ZCL 1/10-second units."""
         ramp = self._get_ramp_cluster()
         if ramp is not None:
-            return ramp.get_on_ramp_tenths()
+            tenths = ramp.get_on_ramp_tenths()
+            _LOGGER.debug(
+                "C4 OnOff: on-ramp from C4RampCluster cache = %d tenths "
+                "(%d ms cached, NOT read from the real device — see "
+                "c4_ramp_cluster.py's docstring)",
+                tenths, ramp.get_ramp_ms(0x02),
+            )
+            return tenths
+        _LOGGER.debug(
+            "C4 OnOff: no C4RampCluster found on EP4 — falling back to "
+            "hardcoded C4_ON_TRANSITION=%d tenths", C4_ON_TRANSITION,
+        )
         return C4_ON_TRANSITION
 
     def _get_off_transition(self) -> int:
         """Return the off-ramp time in ZCL 1/10-second units."""
         ramp = self._get_ramp_cluster()
         if ramp is not None:
-            return ramp.get_off_ramp_tenths()
+            tenths = ramp.get_off_ramp_tenths()
+            _LOGGER.debug(
+                "C4 OnOff: off-ramp from C4RampCluster cache = %d tenths "
+                "(%d ms cached, NOT read from the real device — see "
+                "c4_ramp_cluster.py's docstring)",
+                tenths, ramp.get_ramp_ms(0x03),
+            )
+            return tenths
+        _LOGGER.debug(
+            "C4 OnOff: no C4RampCluster found on EP4 — falling back to "
+            "hardcoded C4_OFF_TRANSITION=%d tenths", C4_OFF_TRANSITION,
+        )
         return C4_OFF_TRANSITION
 
     async def command(
@@ -312,6 +334,30 @@ class C4DimmerLevelControl(CustomCluster, LevelControl):
         tsn=None,
         **kwargs,
     ):
+        if command_id in (
+            LevelControl.ServerCommandDefs.move_to_level.id,
+            LevelControl.ServerCommandDefs.move_to_level_with_on_off.id,
+        ):
+            # Diagnostic only (no behavior change): this is the ONLY place
+            # that logs what gets sent when HA/ZHA calls LevelControl
+            # directly (e.g. dragging the brightness slider, or "set to
+            # X%"), bypassing C4DimmerOnOff.command() entirely — that
+            # class only logs the level/transition IT computes for a
+            # plain on()/off(). Added to investigate two user reports:
+            # setting 100% settling at ~98%, and transition times seeming
+            # not to be honored — need to see the real args/kwargs this
+            # cluster actually forwards as a genuine ZCL frame to tell
+            # whether the level/transition requested is already wrong
+            # before it reaches the device, or whether the device itself
+            # is receiving the right numbers and doing something else.
+            _LOGGER.debug(
+                "C4 Level: command=0x%02x args=%s kwargs=%s (forwarding "
+                "as real ZCL move_to_level%s)",
+                command_id, args, kwargs,
+                "_with_on_off" if command_id ==
+                LevelControl.ServerCommandDefs.move_to_level_with_on_off.id
+                else "",
+            )
         result = await super().command(
             command_id, *args,
             manufacturer=manufacturer, expect_reply=expect_reply,
