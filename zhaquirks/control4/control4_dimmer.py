@@ -109,22 +109,33 @@ History:
   live level_raw it receives — so the user still saw the UI flash
   through the live ramp, now with an extra flash to the target tacked
   on first. Added a short suppression window instead of just an
-  optimistic write: C4DimmerLevelControl.command() now also stamps
-  self._optimistic_suppress_until (a plain monotonic-clock timestamp,
-  no cross-file state needed), and _sync_ep1_level checks it before
-  touching current_level/on_off, skipping any announcement that arrives
-  before it elapses. _LEVEL_SYNC_SUPPRESS_SECONDS (this file) is set to
-  3.0s — comfortably longer than either measured ramp direction
-  (~1.3s on, ~2.5s off) — after which live announcements are trusted
-  normally again, so a genuine physical adjustment at the wall switch
-  (which this quirk never commanded and so never suppresses) still
-  reaches HA as before.
+  optimistic write: C4DimmerLevelControl.command() now also calls
+  c4_helpers.c4_suppress_level_sync() right after the optimistic update,
+  and _sync_ep1_level checks it before touching current_level/on_off,
+  skipping any announcement that arrives before it elapses.
+  _LEVEL_SYNC_SUPPRESS_SECONDS (this file) is set to 3.0s — comfortably
+  longer than either measured ramp direction (~1.3s on, ~2.5s off) —
+  after which live announcements are trusted normally again, so a
+  genuine physical adjustment at the wall switch (which this quirk never
+  commands and so never suppresses) still reaches HA as before.
+
+  CONFIRMED BUG in the first version of that suppression mechanism: it
+  stored the deadline as a plain instance attribute directly on the
+  LevelControl cluster (self._optimistic_suppress_until = ...), which
+  never read back correctly from c4_helpers.py's _sync_ep1_level
+  (getattr always saw it as unset, even milliseconds after this class's
+  own debug log confirmed the write happened) — apparently zigpy's
+  Cluster base class does something with attribute access that a plain
+  custom instance attribute doesn't survive; never fully root-caused.
+  Moved the suppression deadline into c4_helpers.py as a module-level
+  dict keyed by device.ieee instead (c4_suppress_level_sync() /
+  _LEVEL_SYNC_SUPPRESS_UNTIL) — no dependency on Cluster's own attribute
+  machinery at all — which fixed it outright.
 """
 
 import logging
 import os
 import sys
-import time
 
 _QUIRK_DIR = os.path.dirname(os.path.abspath(__file__))
 if _QUIRK_DIR not in sys.path:
@@ -469,8 +480,8 @@ class C4DimmerLevelControl(CustomCluster, LevelControl):
                 self._update_attribute(
                     LevelControl.AttributeDefs.current_level.id, level_zcl
                 )
-                self._optimistic_suppress_until = (
-                    time.monotonic() + _LEVEL_SYNC_SUPPRESS_SECONDS
+                C4.c4_suppress_level_sync(
+                    self.endpoint.device, _LEVEL_SYNC_SUPPRESS_SECONDS
                 )
                 onoff = self.endpoint.in_clusters.get(OnOff.cluster_id)
                 if onoff is not None:

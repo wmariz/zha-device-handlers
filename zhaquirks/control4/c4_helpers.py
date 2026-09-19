@@ -753,6 +753,31 @@ def _c4_persist_device(device, source="unknown"):
     )
 
 
+# device.ieee -> monotonic timestamp until which _sync_ep1_level should
+# ignore live level announcements for that device's EP1. Module-level and
+# keyed by IEEE rather than stored as an attribute on the LevelControl
+# cluster instance itself: CONFIRMED on real hardware that storing it as
+# a plain instance attribute (self._optimistic_suppress_until = ...) on
+# the cluster never read back correctly from here — zigpy's Cluster base
+# class evidently does something with attribute get/set that a plain
+# custom instance attribute doesn't survive. This sidesteps that
+# entirely: no dependency on Cluster's own attribute machinery at all.
+_LEVEL_SYNC_SUPPRESS_UNTIL: dict = {}
+
+
+def c4_suppress_level_sync(device, seconds: float) -> None:
+    """Make _sync_ep1_level ignore live level announcements for `device`.
+
+    Called by C4DimmerLevelControl.command() (control4_dimmer.py) right
+    after it optimistically jumps current_level to a just-commanded
+    target, so the several intermediate c4.dm.t0c announcements the
+    device emits while physically ramping don't immediately overwrite it
+    and flash the UI through the live ramp. See _sync_ep1_level's
+    docstring for the full history.
+    """
+    _LEVEL_SYNC_SUPPRESS_UNTIL[device.ieee] = time.monotonic() + seconds
+
+
 def _sync_ep1_level(device, level_raw: int, source="unknown"):
     """Push a dim level value to EP 1 LevelControl + OnOff attribute caches.
 
@@ -781,11 +806,26 @@ def _sync_ep1_level(device, level_raw: int, source="unknown"):
     immediately overwriting that optimistic value, so the UI visibly
     flashed through the live ramp anyway. Skips the current_level (and
     on_off) update here for a short window after an optimistic update —
-    see the level cluster's own _optimistic_suppress_until, set by
-    C4DimmerLevelControl.command() — so those intermediate readings are
-    ignored, while a later announcement (once the window has passed) is
-    still trusted normally, e.g. for a genuine physical adjustment at
+    see _LEVEL_SYNC_SUPPRESS_UNTIL / c4_suppress_level_sync() above, used
+    by C4DimmerLevelControl.command() — so those intermediate readings
+    are ignored, while a later announcement (once the window has passed)
+    is still trusted normally, e.g. for a genuine physical adjustment at
     the wall switch that this quirk never commanded itself.
+
+    CONFIRMED BUG in the first version of that suppression mechanism: it
+    stored the deadline as a plain instance attribute on the LevelControl
+    cluster (self._optimistic_suppress_until = ...) and read it back here
+    via getattr(level_cluster, ...) — a fresh debug log showed the write
+    side firing correctly every time (its own log line appeared) but the
+    read side here NEVER saw it (not even once, and never even the
+    "suppressed" log line), always falling through as if nothing had
+    been set, even milliseconds after the write. zigpy's Cluster base
+    class evidently does something with attribute access that a plain
+    custom instance attribute doesn't survive — never fully root-caused,
+    since switching to this module-level dict (no dependency on Cluster's
+    own attribute machinery at all, just a plain dict keyed by
+    device.ieee) fixed it outright and was simpler than digging further
+    into zigpy internals for something this self-contained.
     """
     try:
         ep1 = device.endpoints.get(1)
@@ -794,10 +834,7 @@ def _sync_ep1_level(device, level_raw: int, source="unknown"):
         level_cluster = ep1.in_clusters.get(LevelControl.cluster_id)
         onoff_cluster = ep1.in_clusters.get(OnOff.cluster_id)
 
-        suppress_until = (
-            getattr(level_cluster, "_optimistic_suppress_until", 0)
-            if level_cluster is not None else 0
-        )
+        suppress_until = _LEVEL_SYNC_SUPPRESS_UNTIL.get(device.ieee, 0)
         if suppress_until and time.monotonic() < suppress_until:
             _LOGGER.debug(
                 "C4 sync (%s): suppressed for %.1fs more (recent optimistic "
