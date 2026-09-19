@@ -753,7 +753,19 @@ def _c4_persist_device(device, source="unknown"):
 
 
 def _sync_ep1_level(device, level_raw: int, source="unknown"):
-    """Push a dim level value to EP 1 LevelControl + OnOff attribute caches."""
+    """Push a dim level value to EP 1 LevelControl + OnOff attribute caches.
+
+    Also caches the ZCL on_level attribute alongside current_level, but
+    only when level_raw is non-zero — the same on_level-as-local-cache
+    mechanism proven on the LOZ-5D1-W outlet dimmer
+    (control4_outlet_dimmer.py, C4DimmerLevelControlWithOptimisticSync).
+    C4DimmerOnOff._get_on_level() (control4_dimmer.py) already checks
+    on_level before falling back to current_level and then to a hardcoded
+    default, so a plain on() can restore the last real dim level instead
+    of whatever current_level happened to read at pairing time and never
+    updated from since (see c4_button_cluster.py's new c4.dm.t0c handler,
+    the fix this was added for).
+    """
     try:
         ep1 = device.endpoints.get(1)
         if ep1 is None:
@@ -765,6 +777,10 @@ def _sync_ep1_level(device, level_raw: int, source="unknown"):
             level_cluster.update_attribute(
                 LevelControl.AttributeDefs.current_level.id, level_raw
             )
+            if level_raw > 0:
+                level_cluster.update_attribute(
+                    LevelControl.AttributeDefs.on_level.id, level_raw
+                )
         if onoff_cluster is not None:
             onoff_cluster.update_attribute(
                 OnOff.AttributeDefs.on_off.id, level_raw > 0

@@ -18,6 +18,34 @@ History:
   once from "press" and again from the click-count resolution) and added
   it plus the three previously-missing real actions to
   device_automation_triggers.
+
+  Plain on() restoring the wrong level, not the last dimmed one:
+  CONFIRMED via a real HA debug log capture on an LDZ-101 (this quirk's
+  own class, C4DimmerOnOff/C4DimmerLevelControl, is unchanged by this
+  fix — only c4_helpers.py/c4_button_cluster.py, shared plumbing this
+  device also uses, were touched). Every plain on() logged the exact
+  same target level regardless of how the light had last been dimmed
+  (observed: level 2, ~1%, on every single test) — C4DimmerOnOff's
+  _get_on_level() was working exactly as designed, but current_level
+  itself never changed: it was permanently stuck at whatever value the
+  device happened to report during the initial pairing interview. Root
+  cause: the device's real, live dim-level confirmations arrive as
+  `c4.dm.t0c <level_hex>` (channel 0 baked into the verb itself, unlike
+  the dual-outlet family's `c4.dm.tc <channel> <level>`, which needs an
+  explicit channel since it serves two outlets) — a namespace
+  c4_button_cluster.py's _handle_state_announcement had no case for, so
+  every single one fell through to "unknown namespace", got logged, and
+  was dropped. Added a c4.dm.t0c case (_handle_t0c_level, mirroring the
+  existing c4.dmx.dim/c4.dmx.ls handlers) so current_level finally
+  tracks the light's real level. Also made _sync_ep1_level (c4_helpers.py,
+  shared by all three of these announcement types plus EP2/EP196's own
+  dim-level reports) cache the ZCL on_level attribute alongside
+  current_level whenever the level is non-zero — the same mechanism
+  proven on the LOZ-5D1-W outlet dimmer (control4_outlet_dimmer.py) —
+  so a plain on() restores the light's last real dimmed level instead of
+  whatever current_level reads at the moment of turning off (0, from
+  _sync_cc_event's existing OFF-button handling or a live 0%
+  confirmation), matching the outlet dimmer's now-consistent behavior.
 """
 
 import logging

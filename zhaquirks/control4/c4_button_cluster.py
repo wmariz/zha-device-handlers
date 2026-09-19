@@ -198,6 +198,8 @@ class C4ButtonCluster(EventableCluster):
             self._handle_dim_level(data)
         elif namespace == "c4.dmx.ls":
             self._handle_light_state(data)
+        elif namespace == "c4.dm.t0c":
+            self._handle_t0c_level(data)
         elif namespace == "c4.dmx.warn":
             # Device-side warning is unusual — surface at INFO so it's visible.
             _LOGGER.info("C4 state: warning = %s", data)
@@ -321,6 +323,37 @@ class C4ButtonCluster(EventableCluster):
             _sync_ep1_level(self.endpoint.device, zcl_level, "c4.dmx.dim")
         except (ValueError, IndexError, TypeError):
             _LOGGER.warning("C4: failed to parse dim level: '%s'", data)
+
+    def _handle_t0c_level(self, data):
+        """Handle c4.dm.t0c; data[0] = 0-100% (0-0x64) encoded as a hex byte.
+
+        CONFIRMED from a real HA debug log capture on an LDZ-101 (uses this
+        same C4ButtonCluster via the Control4APD120Dimmer quirk): the
+        physical dimmer's live level confirmations use this single-channel
+        verb — channel 0 baked directly into the verb name itself, unlike
+        the dual-outlet family's `c4.dm.tc <channel> <level>`, which needs
+        an explicit channel argument since it serves two outlets. This
+        namespace was previously unhandled (fell through to "unknown
+        namespace", logged and dropped), so current_level never reflected
+        a live physical dim and stayed stuck at whatever value the initial
+        pairing interview happened to report — e.g. a plain on() via
+        C4DimmerOnOff._get_on_level() (control4_dimmer.py) kept restoring
+        that same stale value (observed: level 2, i.e. ~1%) instead of the
+        light's actual last dimmed level, no matter how the light had last
+        been set. _sync_ep1_level also caches on_level now (see its own
+        docstring), so this — like the LOZ-5D1-W outlet dimmer — restores
+        the real last level on a plain on() rather than a stale or fixed
+        one.
+        """
+        try:
+            level_pct = int(data[0], 16)
+            zcl_level = round(level_pct * 254 / 100) if level_pct > 0 else 0
+            _LOGGER.debug(
+                "C4 state: t0c level=%d%% → zcl=%d", level_pct, zcl_level
+            )
+            _sync_ep1_level(self.endpoint.device, zcl_level, "c4.dm.t0c")
+        except (ValueError, IndexError, TypeError):
+            _LOGGER.warning("C4: failed to parse t0c level: '%s'", data)
 
     # ------------------------------------------------------------------
     # State sync helpers
