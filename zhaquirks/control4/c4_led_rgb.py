@@ -168,7 +168,18 @@ class C4LedColorCluster(CustomCluster, Color):
                 expect_reply=expect_reply, tsn=tsn, **kwargs,
             )
 
-        color_x, color_y = args[0], args[1]
+        # CONFIRMED on real hardware: ZHA's own light platform calls this
+        # cluster's auto-generated move_to_color() wrapper with color_x/
+        # color_y as KEYWORD arguments, not positional — args was empty,
+        # so args[0]/args[1] raised IndexError before ever reaching
+        # _send_current_color(), which is why the color never made it to
+        # the wire despite the UI looking correct. Fall back to kwargs.
+        color_x = args[0] if len(args) > 0 else kwargs.get("color_x")
+        color_y = args[1] if len(args) > 1 else kwargs.get("color_y")
+        if color_x is None:
+            color_x = self.get(self.AttributeDefs.current_x.id, 21845)
+        if color_y is None:
+            color_y = self.get(self.AttributeDefs.current_y.id, 21845)
         self._update_attribute(self.AttributeDefs.current_x.id, color_x)
         self._update_attribute(self.AttributeDefs.current_y.id, color_y)
         await self._send_current_color()
