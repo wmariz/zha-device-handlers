@@ -1166,7 +1166,7 @@ for _c4_alias in (
     "loz-5d1-w", "LOZ-5D1-W", "C4-loz-5d1-w", "C4-LOZ-5D1-W",
 ):
     _C4_MODEL_QUIRK_MAP[_c4_alias] = Control4LOZ5D1WDimmer
-_LOGGER.warning(
+_LOGGER.info(
     "C4 LOZ-5D1-W: registered dimmer aliases "
     "(outlet 1 real ZCL, outlet 2 graduated c4.dm.tv)"
 )

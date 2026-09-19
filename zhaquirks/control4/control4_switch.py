@@ -198,5 +198,5 @@ for _c4_alias in (
     "C4-LSZ-101", "C4-LSZ-102",
 ):
     _C4_MODEL_QUIRK_MAP[_c4_alias] = Control4SW120Switch
-_LOGGER.warning("C4 SW120277: registered LSZ-101 switch aliases")
+_LOGGER.info("C4 SW120277: registered LSZ-101 switch aliases")
 _LOGGER.info("C4 SW120277: registered C4-SW120277 in _C4_MODEL_QUIRK_MAP")

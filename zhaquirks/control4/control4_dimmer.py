@@ -626,5 +626,5 @@ for _c4_alias in (
     "C4-LDZ-101", "C4-LDZ-102",
 ):
     _C4_MODEL_QUIRK_MAP[_c4_alias] = Control4APD120Dimmer
-_LOGGER.warning("C4 APD120: registered LDZ-101 dimmer aliases")
+_LOGGER.info("C4 APD120: registered LDZ-101 dimmer aliases")
 _LOGGER.info("C4 APD120: registered C4-APD120 in _C4_MODEL_QUIRK_MAP")
