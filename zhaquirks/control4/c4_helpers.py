@@ -11,6 +11,7 @@ import logging
 import os
 import struct
 import sys
+import time
 
 # Make this directory importable by sibling modules regardless of load order.
 _QUIRK_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -769,6 +770,22 @@ def _sync_ep1_level(device, level_raw: int, source="unknown"):
     the optimistic, command-time target level instead — see
     C4DimmerLevelControl.command() in control4_dimmer.py — which reflects
     what was actually asked for, immune to ramp timing.
+
+    CONFIRMED bug, also fixed: current_level itself has the exact same
+    problem. C4DimmerLevelControl.command() (control4_dimmer.py)
+    optimistically jumps current_level straight to the requested target
+    the instant a command is sent, so HA's UI doesn't have to wait for a
+    real confirmation — but every one of the several intermediate
+    c4.dm.t0c announcements the device emits while physically ramping
+    (e.g. 10%, 95%, 99% over about a second) was still landing here and
+    immediately overwriting that optimistic value, so the UI visibly
+    flashed through the live ramp anyway. Skips the current_level (and
+    on_off) update here for a short window after an optimistic update —
+    see the level cluster's own _optimistic_suppress_until, set by
+    C4DimmerLevelControl.command() — so those intermediate readings are
+    ignored, while a later announcement (once the window has passed) is
+    still trusted normally, e.g. for a genuine physical adjustment at
+    the wall switch that this quirk never commanded itself.
     """
     try:
         ep1 = device.endpoints.get(1)
@@ -776,6 +793,19 @@ def _sync_ep1_level(device, level_raw: int, source="unknown"):
             return
         level_cluster = ep1.in_clusters.get(LevelControl.cluster_id)
         onoff_cluster = ep1.in_clusters.get(OnOff.cluster_id)
+
+        suppress_until = (
+            getattr(level_cluster, "_optimistic_suppress_until", 0)
+            if level_cluster is not None else 0
+        )
+        if suppress_until and time.monotonic() < suppress_until:
+            _LOGGER.debug(
+                "C4 sync (%s): suppressed for %.1fs more (recent optimistic "
+                "update) — ignoring live level=%d",
+                source, suppress_until - time.monotonic(), level_raw,
+            )
+            return
+
         _LOGGER.debug("C4 sync (%s): level=%d", source, level_raw)
         if level_cluster is not None:
             level_cluster.update_attribute(

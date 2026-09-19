@@ -101,11 +101,30 @@ History:
   to the requested target the instant a command is sent, and later
   c4.dm.t0c announcements still correct it if the device's real settled
   level differs slightly (e.g. the 99%-not-100% case above).
+
+  CONFIRMED bug in that fix: jumping optimistically wasn't enough by
+  itself. The very next intermediate c4.dm.t0c reading (arriving well
+  under a second later) immediately overwrote the optimistic value via
+  _sync_ep1_level (c4_helpers.py), which unconditionally applies every
+  live level_raw it receives — so the user still saw the UI flash
+  through the live ramp, now with an extra flash to the target tacked
+  on first. Added a short suppression window instead of just an
+  optimistic write: C4DimmerLevelControl.command() now also stamps
+  self._optimistic_suppress_until (a plain monotonic-clock timestamp,
+  no cross-file state needed), and _sync_ep1_level checks it before
+  touching current_level/on_off, skipping any announcement that arrives
+  before it elapses. _LEVEL_SYNC_SUPPRESS_SECONDS (this file) is set to
+  3.0s — comfortably longer than either measured ramp direction
+  (~1.3s on, ~2.5s off) — after which live announcements are trusted
+  normally again, so a genuine physical adjustment at the wall switch
+  (which this quirk never commanded and so never suppresses) still
+  reaches HA as before.
 """
 
 import logging
 import os
 import sys
+import time
 
 _QUIRK_DIR = os.path.dirname(os.path.abspath(__file__))
 if _QUIRK_DIR not in sys.path:
@@ -162,6 +181,18 @@ from c4_ramp_cluster import C4RampCluster, C4_RAMP_CLUSTER_ID
 from c4_hooks import _C4_MODEL_QUIRK_MAP
 
 _LOGGER = logging.getLogger(__name__)
+
+# How long to ignore live c4.dm.t0c/c4.dmx.dim/c4.dmx.ls/EP2-EP196 level
+# announcements after C4DimmerLevelControl optimistically jumps
+# current_level to a just-commanded target (see its command() and
+# _sync_ep1_level in c4_helpers.py). CONFIRMED on real hardware: the
+# device emits several intermediate readings while physically ramping,
+# taking up to ~1.3s to turn on and ~2.5s to turn off (see this module's
+# History) — this window comfortably covers both directions with margin,
+# so those readings don't overwrite the optimistic value and flash the
+# UI through the live ramp. A real physical adjustment at the wall
+# switch is still picked up normally once the window has passed.
+_LEVEL_SYNC_SUPPRESS_SECONDS = 3.0
 
 
 # ---------------------------------------------------------------------------
@@ -415,17 +446,31 @@ class C4DimmerLevelControl(CustomCluster, LevelControl):
                 # C4DimmerLevelControlWithOptimisticSync already does
                 # exactly this). The user asked for consistency: jump
                 # optimistically to the requested target immediately, the
-                # same way the outlet dimmer does — later c4.dm.t0c
-                # announcements (c4_helpers.py's _sync_ep1_level) still
-                # correct current_level if the device's real settled level
-                # ends up slightly different (e.g. 99% instead of 100%,
-                # a device firmware characteristic — see module docstring).
+                # same way the outlet dimmer does.
+                #
+                # CONFIRMED bug in the first version of this fix: jumping
+                # optimistically wasn't enough by itself — the very next
+                # intermediate c4.dm.t0c reading (arriving ~100ms later)
+                # immediately overwrote it via _sync_ep1_level
+                # (c4_helpers.py), so the UI flashed through the live ramp
+                # anyway, right after an extra flash to the target first.
+                # _optimistic_suppress_until tells _sync_ep1_level to
+                # ignore announcements for a few seconds after this fires,
+                # so only the FINAL settled reading (once the window has
+                # passed) can still correct current_level — e.g. if the
+                # device's real settled level ends up slightly different
+                # from what was asked (99% instead of 100%, a device
+                # firmware characteristic — see module docstring).
                 _LOGGER.debug(
-                    "C4 Level: optimistic current_level=%d on_off=%s",
-                    level_zcl, level_zcl > 0,
+                    "C4 Level: optimistic current_level=%d on_off=%s "
+                    "(suppressing live announcements for %.1fs)",
+                    level_zcl, level_zcl > 0, _LEVEL_SYNC_SUPPRESS_SECONDS,
                 )
                 self._update_attribute(
                     LevelControl.AttributeDefs.current_level.id, level_zcl
+                )
+                self._optimistic_suppress_until = (
+                    time.monotonic() + _LEVEL_SYNC_SUPPRESS_SECONDS
                 )
                 onoff = self.endpoint.in_clusters.get(OnOff.cluster_id)
                 if onoff is not None:
