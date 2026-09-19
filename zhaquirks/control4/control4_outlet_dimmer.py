@@ -26,25 +26,18 @@ turn-off, and corrupting the final resting value after turn-on. Attempt
 14 reverted this, so outlet 1's current_level is once again driven only
 by the real-ZCL optimistic update and genuine device reports.
 
-A SECOND, unrelated real bug (see attempts 15-16): after attempt 14's
-fix, outlet 1 still settled at a fixed 75% instead of restoring its
-pre-off level on a plain on/off toggle after being dimmed and turned
-off. Root cause: C4DimmerOnOff's _get_on_level() (control4_dimmer.py,
-reused unchanged) falls back to a hardcoded C4_DEFAULT_ON_LEVEL
-(191 -> 75%) whenever neither the ZCL on_level attribute nor the
-LevelControl cluster's cached current_level holds a usable value — and
-current_level now correctly reads 0 right after being turned off, ever
-since attempt 12 started keeping it accurate. Attempt 15's first fix
-defaulted a plain on() straight to 100%, but checking Home Assistant's
-own ZHA source confirmed its standard behavior is to restore the last
-brightness on a plain (transition-less) turn-on, not jump to 100% — so
-attempt 16 replaced that with caching the last non-zero level into the
-ZCL on_level attribute (already a local-only cache in this file, never
-sent to the device), which _get_on_level() already checks before its
-75% fallback. Read "History" before changing this file again — several
-earlier attempts mistook a related symptom (attempt 10) for a
-wire-protocol problem and spent a full hardware-test cycle each ruling
-out the wrong thing.
+A SECOND, unrelated real bug (see attempt 15): after attempt 14's fix,
+outlet 1 still settled at a fixed 75% instead of 100% on a plain on/off
+toggle after being dimmed and turned off. Root cause: C4DimmerOnOff's
+_get_on_level() (control4_dimmer.py, reused unchanged) falls back to a
+hardcoded C4_DEFAULT_ON_LEVEL (191 -> 75%) whenever the LevelControl
+cluster's cached current_level reads as 0 — which it now correctly does
+right after being turned off, ever since attempt 12 started keeping it
+accurate. Fixed with a new C4Outlet1DimmerOnOff subclass (this file) that
+defaults a plain on() straight to 100% instead. Read "History" before
+changing this file again — several earlier attempts mistook a related
+symptom (attempt 10) for a wire-protocol problem and spent a full
+hardware-test cycle each ruling out the wrong thing.
 
 History:
 
@@ -324,55 +317,27 @@ History:
   all and stayed stuck at an old stale value from early testing, which
   happened to be near 100% — so the "correct" 100% behavior the user
   first confirmed was, in hindsight, an accident of a stale cache rather
-  than deliberate logic. First fix: C4Outlet1DimmerOnOff, a subclass of
-  C4DimmerOnOff overriding _get_on_level() to default straight to full
-  brightness (0xFE/254) instead of C4_DEFAULT_ON_LEVEL — reasoned as
-  matching outlet 2's own on/off semantics (always full brightness
-  unless a specific level is explicitly requested).
-
-  Attempt 16: before the user could re-test attempt 15's fix, they asked
-  a sharper question — given off_brightness exists, isn't restoring the
-  previous dim level the actual HA-standard behavior, rather than always
-  100%? Worth checking properly instead of assuming. Reading the real
-  upstream source (zigpy/zha, zha/application/platforms/light/__init__.py)
-  confirmed it: on an instant (transition-less) turn-off, ZHA's light
-  entity does NOT reset its own internal brightness cache
-  (`self._brightness`) to 0 or None — it deliberately keeps it, and a
-  later plain turn-on with no explicit brightness reuses it directly
-  (`level = ... else self._brightness or 254`), only ever falling back to
-  254 if that cache itself is empty/zero. `off_brightness` specifically
-  is a second, narrower mechanism only used to restore brightness when
-  the light was turned off WITH a transition (fade) — confirmed by
-  `self._off_with_transition` gating its use in async_turn_on. Either
-  way, restoring the previous level — not forcing 100% — is what
-  standard ZHA does. Asked the user directly which behavior they wanted
-  for outlet 1 now that this was understood properly; they chose
-  "restore last level," matching the HA standard.
-
-  Removed C4Outlet1DimmerOnOff (attempt 15) entirely — no OnOff-cluster
-  override is needed once the right value is available where
-  _get_on_level() already looks for it. C4DimmerLevelControlWithOptimisticSync
-  (attempt 12, this file) now also caches the ZCL on_level attribute
-  alongside current_level, but only when the level is non-zero — this
-  file's C4DimmerLevelControl._LOCAL_ATTRS already treats on_level as
-  local-only (never sent to the real device, see control4_dimmer.py),
-  so this needed no change there either. Turning
-  off leaves on_level untouched (only current_level goes to 0), so
-  _get_on_level()'s existing, unmodified first check picks up the last
-  non-zero level automatically. EP1 is back to using bare C4DimmerOnOff
-  in the device replacement (no subclass needed for on/off at all).
+  than deliberate logic. Fixed with C4Outlet1DimmerOnOff, a subclass of
+  C4DimmerOnOff (this file, control4_dimmer.py itself untouched) that
+  overrides _get_on_level() to default straight to full brightness
+  (0xFE/254) instead of C4_DEFAULT_ON_LEVEL, while still honoring an
+  explicit on_level attribute if one is ever set. This intentionally
+  makes outlet 1's plain on/off behave like outlet 2's (always full
+  brightness unless a specific level is explicitly requested), which
+  matches what the user confirmed as the wanted behavior for this
+  device.
 
 Implementation:
-  • Outlet 1 (EP1) reuses C4DimmerOnOff UNCHANGED from control4_dimmer.py
-    for on/off, paired with C4DimmerLevelControlWithOptimisticSync (this
-    file, see attempts 12 and 16) instead of the bare C4DimmerLevelControl
-    for LevelControl — no text-command translation, real ZCL passthrough
-    plus an optimistic current_level/on_off sync that also caches the ZCL
-    on_level attribute (local-only, never sent to the device) so a plain
-    on() restores the last dimmed level instead of falling back to
-    C4DimmerOnOff's hardcoded 75% default. EP2/EP196 reuse the base
-    C4ConfigCluster (not C4OutletConfigCluster), matching the APD120's raw
-    0-255 dim-level report path (_sync_ep1_level) instead of the outlet's
+  • Outlet 1 (EP1) uses C4Outlet1DimmerOnOff (this file, see attempt 15)
+    instead of the bare C4DimmerOnOff for on/off — same real-ZCL
+    move_to_level_with_on_off translation, but defaults a plain on() to
+    100% instead of C4DimmerOnOff's normal 75% fallback — paired with
+    C4DimmerLevelControlWithOptimisticSync (this file, see attempt 12)
+    instead of the bare C4DimmerLevelControl for LevelControl — no
+    text-command translation, real ZCL passthrough plus an optimistic
+    current_level/on_off sync. EP2/EP196 reuse the base C4ConfigCluster
+    (not C4OutletConfigCluster), matching the APD120's raw 0-255
+    dim-level report path (_sync_ep1_level) instead of the outlet's
     on/off-flag interpretation.
   • Outlet 2 (synthetic EP11) uses C4Outlet2OnOff for on/off — a thin
     subclass of C4Outlet1OnOff (control4_outlet.py's confirmed direct
@@ -476,6 +441,49 @@ def _c4_pct_to_zcl_level(level_pct: int) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Outlet 1 OnOff — a plain on() always targets full brightness.
+# ---------------------------------------------------------------------------
+
+class C4Outlet1DimmerOnOff(C4DimmerOnOff):
+    """C4DimmerOnOff, but a plain on() always targets full brightness.
+
+    CONFIRMED bug found on real hardware (see attempt 15 in the module
+    docstring): after dimming outlet 1, turning it off, then back on via
+    a plain on/off toggle (not the brightness slider) settled at 75%
+    instead of 100%. C4DimmerOnOff._get_on_level() (control4_dimmer.py)
+    falls back to the LevelControl cluster's cached current_level when no
+    explicit ZCL on_level attribute is set, and only falls back further
+    to the hardcoded C4_DEFAULT_ON_LEVEL (191 -> 75%) when that cache
+    reads as 0 or missing. Before attempt 12 this "worked" by accident:
+    current_level was never being kept accurate for outlet 1, so it sat
+    stuck at whatever stale value an old real device report last left it
+    at — which happened to be near 100% during the user's first test.
+    C4DimmerLevelControlWithOptimisticSync (attempt 12) made current_level
+    accurate, including correctly zeroing it on turn-off — which then
+    made _get_on_level() correctly see 0 and fall through to the 75%
+    hardcoded default, silently changing this device's behavior in the
+    process.
+
+    The user confirmed 100% — not "restore the pre-off dim level," and
+    not a fixed 75% — is the wanted behavior for a plain on/off toggle on
+    this device; graduated brightness is only ever reached deliberately
+    via the slider/service call. This mirrors outlet 2's own on/off
+    semantics, whose plain on/off command only ever carries 0x00/0x64,
+    never a graduated value. Overrides _get_on_level() to default
+    straight to full brightness instead of C4_DEFAULT_ON_LEVEL, while
+    still honoring an explicit ZCL on_level attribute if one is ever set.
+    """
+
+    def _get_on_level(self) -> int:
+        level_cluster = self.endpoint.level
+        if level_cluster is not None:
+            on_level = level_cluster.get("on_level")
+            if on_level is not None and 0 < on_level < 255:
+                return on_level
+        return 0xFE  # 254 -> 100%, matching outlet 2's fixed on/off levels
+
+
+# ---------------------------------------------------------------------------
 # Outlet 1 LevelControl — real ZCL passthrough plus an optimistic
 # current_level/on_off sync C4DimmerLevelControl doesn't do on its own.
 # ---------------------------------------------------------------------------
@@ -501,21 +509,6 @@ class C4DimmerLevelControlWithOptimisticSync(C4DimmerLevelControl):
     move_to_level(_with_on_off) can deliver the level as a `level=`
     keyword instead of positionally, so both are checked here too, even
     though C4DimmerOnOff itself always calls with a positional level.
-
-    Also caches the ZCL `on_level` attribute (see attempt 16) alongside
-    current_level, but only when the level is non-zero: C4DimmerOnOff's
-    _get_on_level() (control4_dimmer.py) already checks on_level first,
-    before falling back to current_level and then to a hardcoded 75%
-    default — and the base class's _LOCAL_ATTRS (control4_dimmer.py)
-    already treats on_level as a local-only cache, never sent to the
-    real device, so reusing it here to remember "the last non-zero
-    level" needs no changes to control4_dimmer.py. Turning off (level 0)
-    deliberately leaves on_level untouched, so a later plain on()
-    restores the level from before, matching Home Assistant's own
-    default light behavior
-    (ZHA's light entity keeps its last brightness across an instant
-    off/on cycle rather than resetting it — confirmed by reading
-    zha/application/platforms/light/__init__.py upstream).
     """
 
     async def command(
@@ -550,17 +543,6 @@ class C4DimmerLevelControlWithOptimisticSync(C4DimmerLevelControl):
                 self._update_attribute(
                     LevelControl.AttributeDefs.current_level.id, level_zcl
                 )
-                if level_zcl > 0:
-                    # Remember the last non-zero level as on_level so a
-                    # later plain on() (C4DimmerOnOff._get_on_level(),
-                    # control4_dimmer.py) restores it instead of falling
-                    # back to the hardcoded 75% default — see attempt 16.
-                    # Deliberately NOT updated when level_zcl == 0 (off):
-                    # on_level should keep remembering the level from
-                    # before, not get zeroed along with current_level.
-                    self._update_attribute(
-                        LevelControl.AttributeDefs.on_level.id, level_zcl
-                    )
                 onoff = self.endpoint.in_clusters.get(OnOff.cluster_id)
                 if onoff is not None:
                     onoff.update_attribute(
@@ -1014,11 +996,11 @@ class Control4LOZ5D1WDimmer(CustomDevice):
                     Identify.cluster_id,
                     Groups.cluster_id,
                     Scenes.cluster_id,
-                    C4DimmerOnOff,
+                    # Defaults a plain on() to full brightness instead of
+                    # C4DimmerOnOff's normal 75% fallback — see its docstring.
+                    C4Outlet1DimmerOnOff,
                     # Adds an optimistic current_level/on_off sync on top of
-                    # C4DimmerLevelControl, including caching on_level so a
-                    # plain on() restores the last dimmed level — see its
-                    # docstring (attempt 16).
+                    # C4DimmerLevelControl — see its docstring.
                     C4DimmerLevelControlWithOptimisticSync,
                     C4DimmerManufCluster,
                 ],
