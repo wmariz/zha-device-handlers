@@ -4,17 +4,17 @@ CONFIRMED on real hardware: outlet 1 (EP1) dims correctly — turning on at
 an arbitrary brightness works, and dragging the brightness slider while
 the light is on updates the level in place (it does not revert to off).
 
-Outlet 2 (synthetic EP11): a real bug was found and fixed (attempt 10 in
-"History" below), NOT YET CONFIRMED on real hardware. The wire command
-(`c4.dm.tv <outlet> 00 <level>`) was correct all along — confirmed from a
-real HC-300 controller's own driver log — but this quirk's own command()
-handler had a real bug: it read the requested brightness from `args[0]`,
-and on the user's zigpy/Python stack that argument arrives as a `level=`
-keyword instead, so `args` was always empty and every dim request
-silently sent level 0. Read "History" before changing this file again —
-several earlier attempts mistook this same symptom for a wire-protocol
-problem and spent a full hardware-test cycle each ruling out the wrong
-thing.
+Outlet 2 (synthetic EP11): CONFIRMED on real hardware, graduated dimming
+works (attempt 10 in "History" below fixed the real bug: this quirk's own
+command() read the requested brightness from `args[0]`, which arrives
+empty on the user's zigpy/Python stack — the level comes through as a
+`level=` keyword instead, so every dim request silently sent level 0
+regardless of what was requested). Attempt 11 fixed a smaller follow-up UX
+issue: turning the light back on after a graduated dim briefly showed the
+stale pre-off level before correcting itself. Read "History" before
+changing this file again — several earlier attempts mistook the attempt-10
+symptom for a wire-protocol problem and spent a full hardware-test cycle
+each ruling out the wrong thing.
 
 History:
 
@@ -179,20 +179,34 @@ History:
   real ZCL send instead of extracting the level itself. Fixed by checking
   `kwargs["level"]` when `args` is empty.
 
+  Attempt 11 fixed a smaller, related UX gap the user found once dimming
+  itself worked: dim outlet 2 to 50%, turn it off, then back on — the UI
+  briefly showed the stale pre-off level (50%) before correcting itself to
+  the real value (100%, since plain on/off always drives the outlet fully
+  on/off) once the device's c4.dm.tc announcement arrived. Outlet 1 never
+  shows this because its on/off redirects through a real ZCL frame, so
+  on_off and current_level arrive together in the same round trip.
+  C4Outlet1OnOff's optimistic update only ever sets on_off (it was written
+  for the LOZ-5S1-W switch, which has no LevelControl cluster to keep in
+  sync) — added C4Outlet2OnOff, a thin subclass used only on outlet 2,
+  that also mirrors the same always-100%/0% value into current_level
+  immediately after on/off/toggle.
+
 Implementation:
   • Outlet 1 (EP1) reuses C4DimmerOnOff / C4DimmerLevelControl UNCHANGED
     from control4_dimmer.py — no override, no text-command translation.
     EP2/EP196 reuse the base C4ConfigCluster (not C4OutletConfigCluster),
     matching the APD120's raw 0-255 dim-level report path
     (_sync_ep1_level) instead of the outlet's on/off-flag interpretation.
-  • Outlet 2 (synthetic EP11) uses C4Outlet1OnOff UNCHANGED from
-    control4_outlet.py for on/off (the confirmed direct c4.dm.tv boolean
-    transport — no LevelControl redirect, unlike outlet 1: that redirect
-    exists because the real APD120 ignores standard On/Off, and there's no
-    evidence this text-protocol outlet does), paired with
-    C4Outlet2DimmerLevelControl (this file) for brightness, which sends
-    the confirmed `c4.dm.tv <01> 00 <level>` command (same shape as
-    on/off, just with a graduated value).
+  • Outlet 2 (synthetic EP11) uses C4Outlet2OnOff for on/off — a thin
+    subclass of C4Outlet1OnOff (control4_outlet.py's confirmed direct
+    c4.dm.tv boolean transport — no LevelControl redirect, unlike outlet
+    1: that redirect exists because the real APD120 ignores standard
+    On/Off, and there's no evidence this text-protocol outlet does) that
+    additionally syncs current_level so it doesn't lag behind on_off (see
+    attempt 11) — paired with C4Outlet2DimmerLevelControl (this file) for
+    brightness, which sends the confirmed `c4.dm.tv <01> 00 <level>`
+    command (same shape as on/off, just with a graduated value).
   • EP197's button/state cluster treats outlet-index-1 c4.dm.tc
     announcements as a graduated level for outlet 2, and defers everything
     else (including any outlet-index-0 announcements) to the base sync, so
@@ -278,6 +292,74 @@ def _c4_pct_to_zcl_level(level_pct: int) -> int:
     """Convert a C4 protocol level (0-100) to a ZCL Level Control value."""
     level_pct = max(0, min(100, int(level_pct)))
     return round(level_pct * 254 / 100)
+
+
+# ---------------------------------------------------------------------------
+# Outlet 2 OnOff — C4Outlet1OnOff plus a current_level sync the switch-only
+# base class has no reason to know about.
+# ---------------------------------------------------------------------------
+
+class C4Outlet2OnOff(C4Outlet1OnOff):
+    """C4Outlet1OnOff, but also optimistically syncs current_level.
+
+    CONFIRMED bug found on real hardware: after dimming outlet 2 to a
+    graduated level (e.g. 50%), turning it off then back on made the UI
+    briefly show the *stale pre-off level* (50%) before correcting itself
+    to the real value (100%) a couple hundred ms later, once the device's
+    own c4.dm.tc announcement arrived. Outlet 1 never shows this, because
+    its on/off redirects through a real ZCL Level Control frame
+    (C4DimmerOnOff / C4DimmerLevelControl), so on_off and current_level
+    arrive and update together in the same round trip.
+
+    C4Outlet1OnOff (control4_outlet.py) doesn't have this problem itself —
+    on the LOZ-5S1-W switch it's built for, there is no LevelControl
+    cluster on the endpoint to be stale in the first place. Outlet 2 does
+    have one (C4Outlet2DimmerLevelControl below), so its on/off needs to
+    keep current_level in sync too. The plain on/off command is confirmed
+    to always drive the outlet fully on (0x64) or off (0x00) — see
+    control4_outlet.py's C4OutletOnOff._send_c4_outlet_command — so this
+    mirrors that same 100%/0% value into current_level immediately,
+    instead of leaving it at whatever level was last set before the light
+    was turned off.
+    """
+
+    async def command(
+        self,
+        command_id,
+        *args,
+        manufacturer=None,
+        expect_reply=False,
+        tsn=None,
+        **kwargs,
+    ):
+        result = await super().command(
+            command_id, *args,
+            manufacturer=manufacturer, expect_reply=expect_reply,
+            tsn=tsn, **kwargs,
+        )
+        if command_id in (
+            OnOff.ServerCommandDefs.on.id,
+            OnOff.ServerCommandDefs.off.id,
+            OnOff.ServerCommandDefs.toggle.id,
+        ):
+            # super() already sent the c4.dm.tv 01 00 64/00 command and
+            # optimistically set on_off to its final value (toggle is
+            # resolved to on/off internally before that happens) — mirror
+            # the same always-100%/0% value into current_level so the two
+            # attributes agree immediately instead of only after the real
+            # c4.dm.tc announcement arrives.
+            is_on = self.get("on_off")
+            level_cluster = self.endpoint.in_clusters.get(LevelControl.cluster_id)
+            if level_cluster is not None:
+                level_zcl = _c4_pct_to_zcl_level(100 if is_on else 0)
+                _LOGGER.debug(
+                    "C4 Outlet2OnOff: syncing current_level=%d to match "
+                    "on_off=%s", level_zcl, is_on,
+                )
+                level_cluster.update_attribute(
+                    LevelControl.AttributeDefs.current_level.id, level_zcl
+                )
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -653,9 +735,9 @@ class Control4LOZ5D1WDimmer(CustomDevice):
                 INPUT_CLUSTERS: [
                     # Confirmed direct on/off transport (index 0x00) — does
                     # NOT redirect through LevelControl, unlike outlet 1.
-                    C4Outlet1OnOff,
-                    # Guessed index 0x01 for graduated brightness — see its
-                    # class docstring.
+                    # Adds a current_level sync on top of C4Outlet1OnOff —
+                    # see C4Outlet2OnOff's docstring.
+                    C4Outlet2OnOff,
                     C4Outlet2DimmerLevelControl,
                 ],
                 OUTPUT_CLUSTERS: [],

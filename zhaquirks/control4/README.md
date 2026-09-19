@@ -30,12 +30,11 @@ controller required.
 > EP11) has no real Zigbee endpoint of its own, so it can't receive a real
 > ZCL frame; it speaks the outlet's own `c4.dm.tv <outlet> 00 <level>` text
 > command instead (same shape as the already-confirmed on/off command,
-> just with a graduated value). Outlet 1 is **confirmed working on real
-> hardware**, including dragging the brightness slider while the light is
-> on. Outlet 2's fix below is fresh and not yet confirmed on real hardware
-> — please report back either way if you have this device.
+> just with a graduated value). **Both outlets are confirmed working on
+> real hardware** for graduated dimming, including dragging the brightness
+> slider while a light is on.
 >
-> Getting outlet 2 working took ten attempts, most of them chasing the
+> Getting outlet 2 working took eleven attempts, most of them chasing the
 > wrong layer — see the module docstring's "History" section for the full
 > trail if you're touching this file. The short version: the wire command
 > was correct from very early on (confirmed by connecting the physical
@@ -44,7 +43,10 @@ controller required.
 > read the requested brightness from a positional argument that arrives
 > empty on newer zigpy/Python stacks (the level comes through as a
 > `level=` keyword instead), so every dim request silently sent "off"
-> regardless of the value requested. Please open an issue (ideally with an
+> regardless of the value requested. A smaller follow-up fix (not yet
+> independently confirmed) keeps `current_level` in sync when outlet 2 is
+> switched plainly on/off, so the UI shouldn't briefly show a stale pre-off
+> brightness the way it did before. Please open an issue (ideally with an
 > HA debug log for `control4_outlet_dimmer`) if either outlet still
 > misbehaves.
 
