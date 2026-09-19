@@ -4,14 +4,17 @@ CONFIRMED on real hardware: outlet 1 (EP1) dims correctly — turning on at
 an arbitrary brightness works, and dragging the brightness slider while
 the light is on updates the level in place (it does not revert to off).
 
-Outlet 2 (synthetic EP11): the wire command is now CONFIRMED from a real
-HC-300 controller's own driver log (not inference) — see attempt 9 in
-"History" below. Every attempt before that reported the same revert-to-off
-symptom despite attempt 9's command turning out to be correct on the wire
-(the device echoes back exactly the level sent), so if this still
-misbehaves after attempt 9, the bug is more likely in this quirk's own
-state handling than in the wire format — please
-read it before changing this file again, to avoid repeating a dead end.
+Outlet 2 (synthetic EP11): a real bug was found and fixed (attempt 10 in
+"History" below), NOT YET CONFIRMED on real hardware. The wire command
+(`c4.dm.tv <outlet> 00 <level>`) was correct all along — confirmed from a
+real HC-300 controller's own driver log — but this quirk's own command()
+handler had a real bug: it read the requested brightness from `args[0]`,
+and on the user's zigpy/Python stack that argument arrives as a `level=`
+keyword instead, so `args` was always empty and every dim request
+silently sent level 0. Read "History" before changing this file again —
+several earlier attempts mistook this same symptom for a wire-protocol
+problem and spent a full hardware-test cycle each ruling out the wrong
+thing.
 
 History:
 
@@ -157,6 +160,25 @@ History:
   so real device-side ramping is left as a possible future enhancement
   rather than another source of risk.
 
+  Attempt 10 found the actual bug, using the debug logging attempt 9 added.
+  The user's own HA debug log showed, for every single dim attempt:
+
+      C4 Outlet2DimmerLevel: move_to_level cmd=0x04 args=() zcl=0 -> c4_pct=0
+      C4 Outlet2DimmerLevel: sending 0s004a c4.dm.tv 01 00 00
+
+  `args` was an EMPTY tuple every time, regardless of the brightness
+  requested, so `level_zcl = args[0] if args else 0` silently fell back to
+  0 on every call — the device was always being told to turn off, which
+  exactly matches every symptom reported since the very first bug report
+  in this saga. This was never a wire-protocol problem: `move_to_level(_
+  with_on_off)` can arrive with the level passed as a `level=` keyword
+  argument instead of positionally (confirmed present in `kwargs` on the
+  user's zigpy/Python 3.14 stack), and this class's command() only ever
+  checked `args[0]`. C4DimmerLevelControl (outlet 1's class) never hit
+  this bug because it blindly forwards `*args, **kwargs` straight into a
+  real ZCL send instead of extracting the level itself. Fixed by checking
+  `kwargs["level"]` when `args` is empty.
+
 Implementation:
   • Outlet 1 (EP1) reuses C4DimmerOnOff / C4DimmerLevelControl UNCHANGED
     from control4_dimmer.py — no override, no text-command translation.
@@ -284,14 +306,15 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
     "Light (v2) 2(15)" in the log). This is the SAME `c4.dm.tv <outlet> 00
     <level>` command already confirmed for on/off — it simply also accepts
     values between 0x00 and 0x64, and the device announces each one back.
-    This is exactly what attempts 1/2/4 in this file's history already
-    tried and reported as failing on real hardware; given the log now
-    proves the device itself accepts and echoes these commands correctly,
-    a prior failure to reflect this in Home Assistant is more likely to
-    have been in this quirk's own state handling than in the wire command
-    — see the module docstring's History for the full reasoning and please
-    report exactly what HA shows if this still misbehaves (with debug logs
-    if possible), since the wire format is no longer the suspect.
+
+    BUG FOUND AND FIXED, not yet confirmed on real hardware (module
+    docstring's History, attempt 10): the wire command above was always
+    correct. The actual bug was in this class's own command() — it read
+    the requested brightness from `args[0]`, but on the user's zigpy/
+    Python 3.14 stack, move_to_level(_with_on_off) can deliver it as a
+    `level=` keyword argument instead, leaving `args`
+    empty and silently sending level 0 on every single dim request. Fixed
+    by falling back to `kwargs["level"]` when `args` is empty.
 
     The same log also confirms RAMP_TO_LEVEL's real wire format —
     `0i<seq> c4.dm.rtl <outlet> <level_hex2> <time_ms_hex8>` (an
@@ -386,12 +409,24 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
             LevelControl.ServerCommandDefs.move_to_level.id,
             LevelControl.ServerCommandDefs.move_to_level_with_on_off.id,
         ):
-            level_zcl = args[0] if args else 0
+            # Confirmed via a real HA/zigpy debug log: this command can
+            # arrive with an EMPTY args tuple, with "level" passed as a
+            # keyword argument instead (schema-field-name calling
+            # convention). args[0] alone silently defaulted to 0 every
+            # time, which is why every dim attempt turned the light off
+            # regardless of the requested brightness — see module
+            # docstring's History, attempt 10.
+            if args:
+                level_zcl = args[0]
+            elif "level" in kwargs:
+                level_zcl = kwargs["level"]
+            else:
+                level_zcl = 0
             level_pct = _zcl_level_to_c4_pct(level_zcl)
             _LOGGER.debug(
                 "C4 Outlet2DimmerLevel: move_to_level cmd=0x%02x args=%s "
-                "zcl=%d -> c4_pct=%d",
-                command_id, args, level_zcl, level_pct,
+                "kwargs=%s zcl=%d -> c4_pct=%d",
+                command_id, args, kwargs, level_zcl, level_pct,
             )
             await self._send_c4_outlet_level(level_pct)
 

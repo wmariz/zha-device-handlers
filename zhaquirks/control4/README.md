@@ -21,35 +21,32 @@ controller required.
 | C4-SW120277 | On/Off Wall Switch | Switch |
 | C4-KC120277 | 8-Button Scene Controller | 8 event entities (press, hold, release) |
 | loz-5s1-w | Dual Switched Outlet | 2 switches (one per outlet) |
-| loz-5d1-w | Dual Dimming Outlet *(outlet 1 confirmed; outlet 2's wire command is confirmed but see note)* | 2 lights (dimmable, one per outlet) |
+| loz-5d1-w | Dual Dimming Outlet | 2 lights (dimmable, one per outlet) |
 | C4-Z2IO-ZP | Zigbee IO Module | 2 switches (relays), 5 binary sensors (contacts), temperature, humidity |
 | C4-SR260 | IR/Zigbee Remote (50 buttons + LCD) | 50 event entities (press, release), battery |
 
 > **loz-5d1-w note:** outlet 1 (EP1) sends real ZCL Level Control frames,
-> the same way the confirmed C4-APD120 dimmer does — **confirmed working
-> on real hardware**, including dragging the brightness slider while the
-> light is on. Outlet 2 (synthetic EP11) has no real Zigbee endpoint of
-> its own, so it can't receive a real ZCL frame; it speaks the outlet's
-> own `c4.dm.tv <outlet> 00 <level>` text command instead (same shape as
-> the already-confirmed on/off command, just with a graduated value).
+> the same way the confirmed C4-APD120 dimmer does. Outlet 2 (synthetic
+> EP11) has no real Zigbee endpoint of its own, so it can't receive a real
+> ZCL frame; it speaks the outlet's own `c4.dm.tv <outlet> 00 <level>` text
+> command instead (same shape as the already-confirmed on/off command,
+> just with a graduated value). Outlet 1 is **confirmed working on real
+> hardware**, including dragging the brightness slider while the light is
+> on. Outlet 2's fix below is fresh and not yet confirmed on real hardware
+> — please report back either way if you have this device.
 >
-> Several earlier guesses at outlet 2's command (a different value/index
-> within `c4.dm.tv`, a `c4.dmx.lsc` verb by analogy with the fan
-> controller, `c4.dm.rtl`/RAMP_TO_LEVEL with an inferred argument order —
-> see the module docstring's "History" section for the full trail) all
-> reported the same revert-to-off symptom on real hardware. The current
-> `c4.dm.tv` command is no longer a guess: the user connected the physical
-> device to a real HC-300 controller and captured its own driver log while
-> dimming through Composer, and decoding the logged Zigbee payload
-> byte-for-byte shows the controller sending exactly this command with
-> graduated values (`00`, `64`, `50`, `3c`, `28`, `14`, ...) and the device
-> echoing each one back via its own confirming announcement. Since this is
-> the same command earlier attempts already tried and reported as failing,
-> if it still misbehaves the likelier suspect now is this quirk's own
-> state-sync logic rather than the wire command — the code has more debug
-> logging on both the send and receive side to help pin that down. Please
-> open an issue (with HA debug logs, or another capture) if it still
-> doesn't work.
+> Getting outlet 2 working took ten attempts, most of them chasing the
+> wrong layer — see the module docstring's "History" section for the full
+> trail if you're touching this file. The short version: the wire command
+> was correct from very early on (confirmed by connecting the physical
+> device to a real HC-300 controller and decoding its driver log
+> byte-for-byte), but this quirk's own command handler had a real bug — it
+> read the requested brightness from a positional argument that arrives
+> empty on newer zigpy/Python stacks (the level comes through as a
+> `level=` keyword instead), so every dim request silently sent "off"
+> regardless of the value requested. Please open an issue (ideally with an
+> HA debug log for `control4_outlet_dimmer`) if either outlet still
+> misbehaves.
 
 All Control4 Zigbee devices use a proprietary text-based serial protocol
 layered on top of ZigBee APS instead of standard ZCL clusters. These quirks
