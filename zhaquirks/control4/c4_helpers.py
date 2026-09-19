@@ -755,16 +755,20 @@ def _c4_persist_device(device, source="unknown"):
 def _sync_ep1_level(device, level_raw: int, source="unknown"):
     """Push a dim level value to EP 1 LevelControl + OnOff attribute caches.
 
-    Also caches the ZCL on_level attribute alongside current_level, but
-    only when level_raw is non-zero — the same on_level-as-local-cache
-    mechanism proven on the LOZ-5D1-W outlet dimmer
-    (control4_outlet_dimmer.py, C4DimmerLevelControlWithOptimisticSync).
-    C4DimmerOnOff._get_on_level() (control4_dimmer.py) already checks
-    on_level before falling back to current_level and then to a hardcoded
-    default, so a plain on() can restore the last real dim level instead
-    of whatever current_level happened to read at pairing time and never
-    updated from since (see c4_button_cluster.py's new c4.dm.t0c handler,
-    the fix this was added for).
+    CONFIRMED bug, now reverted: this briefly also cached on_level here
+    whenever level_raw was non-zero, to let a plain on() restore the last
+    real dim level (see c4.dm.t0c in c4_button_cluster.py). That broke on
+    real hardware: off()/on() both ramp over ~2s / ~0.8s (see
+    C4DimmerOnOff._get_on_transition/_get_off_transition), and the device
+    emits several intermediate c4.dm.t0c announcements while ramping — so
+    turning off captured whatever small transient value happened to be
+    the last non-zero one just before hitting 0%, not the level the light
+    was actually at before being turned off. Each off/on cycle could
+    latch onto a smaller transient value than the last, making the light
+    settle dimmer and dimmer on every cycle. on_level is now cached from
+    the optimistic, command-time target level instead — see
+    C4DimmerLevelControl.command() in control4_dimmer.py — which reflects
+    what was actually asked for, immune to ramp timing.
     """
     try:
         ep1 = device.endpoints.get(1)
@@ -777,10 +781,6 @@ def _sync_ep1_level(device, level_raw: int, source="unknown"):
             level_cluster.update_attribute(
                 LevelControl.AttributeDefs.current_level.id, level_raw
             )
-            if level_raw > 0:
-                level_cluster.update_attribute(
-                    LevelControl.AttributeDefs.on_level.id, level_raw
-                )
         if onoff_cluster is not None:
             onoff_cluster.update_attribute(
                 OnOff.AttributeDefs.on_off.id, level_raw > 0

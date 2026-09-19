@@ -20,32 +20,51 @@ History:
   device_automation_triggers.
 
   Plain on() restoring the wrong level, not the last dimmed one:
-  CONFIRMED via a real HA debug log capture on an LDZ-101 (this quirk's
-  own class, C4DimmerOnOff/C4DimmerLevelControl, is unchanged by this
-  fix — only c4_helpers.py/c4_button_cluster.py, shared plumbing this
-  device also uses, were touched). Every plain on() logged the exact
-  same target level regardless of how the light had last been dimmed
-  (observed: level 2, ~1%, on every single test) — C4DimmerOnOff's
-  _get_on_level() was working exactly as designed, but current_level
-  itself never changed: it was permanently stuck at whatever value the
-  device happened to report during the initial pairing interview. Root
-  cause: the device's real, live dim-level confirmations arrive as
-  `c4.dm.t0c <level_hex>` (channel 0 baked into the verb itself, unlike
-  the dual-outlet family's `c4.dm.tc <channel> <level>`, which needs an
-  explicit channel since it serves two outlets) — a namespace
-  c4_button_cluster.py's _handle_state_announcement had no case for, so
-  every single one fell through to "unknown namespace", got logged, and
-  was dropped. Added a c4.dm.t0c case (_handle_t0c_level, mirroring the
-  existing c4.dmx.dim/c4.dmx.ls handlers) so current_level finally
-  tracks the light's real level. Also made _sync_ep1_level (c4_helpers.py,
-  shared by all three of these announcement types plus EP2/EP196's own
-  dim-level reports) cache the ZCL on_level attribute alongside
-  current_level whenever the level is non-zero — the same mechanism
-  proven on the LOZ-5D1-W outlet dimmer (control4_outlet_dimmer.py) —
-  so a plain on() restores the light's last real dimmed level instead of
-  whatever current_level reads at the moment of turning off (0, from
-  _sync_cc_event's existing OFF-button handling or a live 0%
-  confirmation), matching the outlet dimmer's now-consistent behavior.
+  CONFIRMED via a real HA debug log capture on an LDZ-101. Every plain
+  on() logged the exact same target level regardless of how the light
+  had last been dimmed (observed: level 2, ~1%, on every single test) —
+  C4DimmerOnOff's _get_on_level() was working exactly as designed, but
+  current_level itself never changed: it was permanently stuck at
+  whatever value the device happened to report during the initial
+  pairing interview. Root cause: the device's real, live dim-level
+  confirmations arrive as `c4.dm.t0c <level_hex>` (channel 0 baked into
+  the verb itself, unlike the dual-outlet family's
+  `c4.dm.tc <channel> <level>`, which needs an explicit channel since it
+  serves two outlets) — a namespace c4_button_cluster.py's
+  _handle_state_announcement had no case for, so every single one fell
+  through to "unknown namespace", got logged, and was dropped. Added a
+  c4.dm.t0c case (_handle_t0c_level, mirroring the existing
+  c4.dmx.dim/c4.dmx.ls handlers) so current_level finally tracks the
+  light's real level.
+
+  First fix for restoring the last dimmed level on a plain on(): made
+  _sync_ep1_level (c4_helpers.py, shared by c4.dmx.dim/c4.dmx.ls/c4.dm.t0c
+  plus EP2/EP196's own dim-level reports) also cache the ZCL on_level
+  attribute alongside current_level whenever the announced level was
+  non-zero — mirroring the mechanism already proven on the LOZ-5D1-W
+  outlet dimmer. CONFIRMED BROKEN on real hardware and reverted the same
+  day: off() and on() both ramp (~2s / ~0.8s — see
+  _get_on/off_transition), and the device emits several intermediate
+  c4.dm.t0c announcements while ramping. Caching on_level from every one
+  of them meant turning off captured whatever small transient value
+  happened to be the last non-zero one right before hitting 0%, not the
+  level the light was actually at beforehand — the user found the light
+  settled dimmer and dimmer on every single off/on cycle. Reverted
+  _sync_ep1_level to only touch current_level/on_off, same as before
+  today.
+
+  Final fix: cache on_level from the command actually SENT instead —
+  added to C4DimmerLevelControl.command() (this file) for
+  move_to_level(_with_on_off), guarded to only cache non-zero targets
+  (so off()'s explicit level=0 leaves on_level untouched). This reflects
+  what was actually asked for (by HA or by C4DimmerOnOff's own on()
+  translation) and is immune to ramp timing entirely, since it never
+  depends on any announcement arriving.
+  C4DimmerLevelControlWithOptimisticSync (control4_outlet_dimmer.py,
+  outlet 1) already did the equivalent of this independently in its own
+  command() override, so this change is a no-op duplicate for it, not a
+  behavior change — safe for both devices that share this class
+  hierarchy.
 """
 
 import logging
@@ -298,6 +317,26 @@ class C4DimmerLevelControl(CustomCluster, LevelControl):
             manufacturer=manufacturer, expect_reply=expect_reply,
             tsn=tsn, **kwargs,
         )
+        if command_id in (
+            LevelControl.ServerCommandDefs.move_to_level.id,
+            LevelControl.ServerCommandDefs.move_to_level_with_on_off.id,
+        ):
+            # Cache the requested target level as on_level, but only from
+            # the command actually SENT — not from the device's own
+            # c4.dm.t0c announcements (c4_helpers.py's _sync_ep1_level),
+            # which fire repeatedly while ramping and previously corrupted
+            # on_level with a transient mid-ramp value on every off(),
+            # making the light settle dimmer on each cycle (reverted; see
+            # _sync_ep1_level's docstring). The command-time target is
+            # what the user/HA actually asked for and is immune to ramp
+            # timing, matching the mechanism already proven on the
+            # LOZ-5D1-W outlet dimmer's
+            # C4DimmerLevelControlWithOptimisticSync.
+            level_zcl = args[0] if args else kwargs.get("level")
+            if level_zcl is not None and level_zcl > 0:
+                self._update_attribute(
+                    LevelControl.AttributeDefs.on_level.id, level_zcl
+                )
         return result if result is not None else self._SUCCESS
 
 
