@@ -266,6 +266,8 @@ class C4ButtonCluster(EventableCluster):
                     "field)", data[0],
                 )
                 self._handle_button_event(namespace, data[0])
+        elif namespace.startswith("c4.dm.b") and len(namespace) == 9:
+            self._handle_dm_b_code(namespace)
         elif namespace == "c4.zr.bb":
             # SR260 remote — button begin (key down). data[0] = button id (hex).
             if data:
@@ -295,6 +297,58 @@ class C4ButtonCluster(EventableCluster):
     # ------------------------------------------------------------------
     # Button event handler
     # ------------------------------------------------------------------
+
+    def _handle_dm_b_code(self, namespace):
+        """Handle the c4.dm.b<button_hex><code> family (APD120/LDZ-101).
+
+        CONFIRMED from two clean, isolated real HA debug log captures on
+        an LDZ-101 (one click on each button, then a ~2s hold): unlike
+        every other namespace in this protocol, the button id AND the
+        event code are both encoded directly in the namespace itself
+        (c4.dm.b0c, c4.dm.b1b, ...), with no data fields at all — so this
+        can't reuse _handle_button_event's normal "code after the last
+        dot, button/extra as data fields" shape.
+
+        Two codes confirmed:
+          c — click-begin: fires the instant the button goes down,
+              followed ~1.5-2s later by the usual c4.dm.cc click-count
+              confirmation (see _handle_state_announcement) once the
+              device's click-debounce window closes.
+          b / e — hold-begin / hold-end: 'b' fires immediately on press
+              (same instant as 'c' would for a plain click — the device
+              can't yet know which one it'll become), 'e' fires only
+              once the button is actually released, however long it was
+              held.
+        Since 'c' and 'b' both mark "the button just went down" before
+        the outcome is known, both map to the same "press" action; 'e'
+        maps to LONG_RELEASE, which _fire_button_zha_event already
+        treats as a release (turns the binary_sensor back off), same as
+        the click-count confirmation does for a plain click.
+        """
+        button_hex, code = namespace[7], namespace[8]
+        try:
+            button_id = int(button_hex, 16)
+        except ValueError:
+            _LOGGER.warning("C4 state: invalid button in %r", namespace)
+            return
+        button_name = self.BUTTON_MAP.get(button_id, f"button_{button_id:#04x}")
+
+        if code in ("c", "b"):
+            action = "press"
+        elif code == "e":
+            action = LONG_RELEASE
+        else:
+            _LOGGER.info(
+                "C4 state: unknown b-code %r in %r — data unhandled",
+                code, namespace,
+            )
+            return
+
+        _LOGGER.debug(
+            "C4 button event: button=%s event=%s (namespace=%s)",
+            button_name, action, namespace,
+        )
+        self._fire_button_zha_event(action, button_id, button_name)
 
     def _handle_button_event(self, namespace, button, extra=None):
         button_id = int(button, 16)
