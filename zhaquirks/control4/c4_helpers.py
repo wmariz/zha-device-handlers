@@ -776,6 +776,12 @@ def c4_suppress_level_sync(device, seconds: float) -> None:
     docstring for the full history.
     """
     _LEVEL_SYNC_SUPPRESS_UNTIL[device.ieee] = time.monotonic() + seconds
+    _LOGGER.debug(
+        "C4 suppress: SET dict_id=%s key=%r (type=%s) until=%.3f "
+        "dict_now=%r",
+        id(_LEVEL_SYNC_SUPPRESS_UNTIL), device.ieee, type(device.ieee),
+        _LEVEL_SYNC_SUPPRESS_UNTIL[device.ieee], _LEVEL_SYNC_SUPPRESS_UNTIL,
+    )
 
 
 def _sync_ep1_level(device, level_raw: int, source="unknown"):
@@ -835,6 +841,12 @@ def _sync_ep1_level(device, level_raw: int, source="unknown"):
         onoff_cluster = ep1.in_clusters.get(OnOff.cluster_id)
 
         suppress_until = _LEVEL_SYNC_SUPPRESS_UNTIL.get(device.ieee, 0)
+        _LOGGER.debug(
+            "C4 suppress: GET dict_id=%s key=%r (type=%s) found=%.3f "
+            "now=%.3f dict_now=%r",
+            id(_LEVEL_SYNC_SUPPRESS_UNTIL), device.ieee, type(device.ieee),
+            suppress_until, time.monotonic(), _LEVEL_SYNC_SUPPRESS_UNTIL,
+        )
         if suppress_until and time.monotonic() < suppress_until:
             _LOGGER.debug(
                 "C4 sync (%s): suppressed for %.1fs more (recent optimistic "
