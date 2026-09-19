@@ -1,22 +1,22 @@
 """Per-button RGB LED-color light entities for the Control4 APD120/LDZ-101.
 
-CONFIRMED from a real HC300 controller log: the LDZ-101's per-button LED
-indicator color (shown while the dimmer is on) is set via
-`0s<seq> c4.dm.l<button><o|f> <rrggbb_hex>` — `c4.dm.l0o` for the top
-button's on-color was the only one actually observed transmitting on the
-wire (the other three combos — l0f/l1o/l1f — were requested in Composer
-but never sent, throttled by Composer's own internal debounce). This is
-a different namespace family from c4_led_cluster.py's C4LEDCluster
-(c4.dmx.led), which is the KC120277 scene-controller keypad's protocol
-and is very likely non-functional for this device's own LEDs — hence a
-separate, dedicated module rather than extending that one.
+CONFIRMED from two real HC300 controller logs: the LDZ-101's per-button
+LED indicator color is set via `0s<seq> c4.dm.l<button><o|f>
+<rrggbb_hex>` — all four combos now independently confirmed transmitting
+and ACKed on the wire: `c4.dm.l0o`/`c4.dm.l0f` (top on/off-color) and
+`c4.dm.l1o`/`c4.dm.l1f` (bottom on/off-color), the second capture using
+5s delays between Composer script steps to avoid the throttling that
+hid three of the four combos in the first capture. This is a different
+namespace family from c4_led_cluster.py's C4LEDCluster (c4.dmx.led),
+which is the KC120277 scene-controller keypad's protocol and is very
+likely non-functional for this device's own LEDs — hence a separate,
+dedicated module rather than extending that one.
 
-Per the user's request, only the "on" color is exposed (the LED is only
-driven this way while led_attached is off — see c4_attached_switch.py —
-otherwise the device's own built-in logic drives it), and the bottom
-button's l1o is implemented by analogy with the confirmed top button
-protocol (same shape, unconfirmed on real hardware — button index is
-the only thing that differs from the one command actually captured).
+Per the user's request, only the "on" color is exposed for now (the LED
+is only driven this way while led_attached is off — see
+c4_attached_switch.py — otherwise the device's own built-in logic drives
+it); the confirmed off-color commands (l0f/l1f) are not wired to
+anything yet.
 
 CONFIRMED WRONG on real hardware: a first version gave each button a
 virtual endpoint with just OnOff + Color, expecting ZHA's light
@@ -56,8 +56,8 @@ widely published) to get an rrggbb hex triplet for the wire command.
 Exported:
   C4LedOnOff              — shared OnOff cluster for either LED endpoint
   C4LedLevelControl       — shared LevelControl cluster (brightness = "Y")
-  C4TopLedColorCluster    — top LED color cluster    (c4.dm.l0o)
-  C4BottomLedColorCluster — bottom LED color cluster (c4.dm.l1o, unconfirmed)
+  C4TopLedColorCluster    — top LED color cluster    (c4.dm.l0o, CONFIRMED)
+  C4BottomLedColorCluster — bottom LED color cluster (c4.dm.l1o, CONFIRMED)
   LED_COLOR_EP_MAP        — {"top": ep_id, "bottom": ep_id}
 """
 
@@ -227,7 +227,7 @@ class C4TopLedColorCluster(C4LedColorCluster):
 
 
 class C4BottomLedColorCluster(C4LedColorCluster):
-    """Bottom button LED color — c4.dm.l1o by analogy, UNCONFIRMED."""
+    """Bottom button LED color — CONFIRMED c4.dm.l1o wire command."""
 
     _C4_NAMESPACE = "c4.dm.l1o"
     _C4_LABEL = "bottom_led_color"

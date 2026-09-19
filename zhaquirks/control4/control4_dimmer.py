@@ -219,12 +219,31 @@ History:
   required before ZHA's light-platform discovery treats an endpoint as
   a light at all. Once that was needed anyway, the user pointed out
   Control4 already treats black as "off" for these LEDs, so
-  LevelControl's brightness now doubles as the HSV "V" component
-  instead of carrying separate on/off wire logic: 0% brightness already
-  sends black through the same hue/saturation-to-RGB conversion, and
-  on()/off() just set brightness to 254/0 and resend the current color.
-  Bottom LED (c4.dm.l1o) is UNCONFIRMED — implemented by analogy with
-  the one command actually captured, pending a real-hardware test.
+  LevelControl's brightness now doubles as the CIE "Y" (brightness)
+  component instead of carrying separate on/off wire logic: 0%
+  brightness already sends black through the same xy-to-RGB conversion,
+  and on()/off() just set brightness to 254/0 and resend the current
+  color.
+
+  CONFIRMED WRONG, a second time: color_capabilities declaring
+  Hue_and_saturation (and move_to_hue_and_saturation implemented) made
+  both lights appear with no color control at all, no error either —
+  this zha version's light platform only ever checks the XY_attributes
+  capability bit and has no Hue/Saturation branch at all. Rewritten to
+  advertise XY_attributes and implement move_to_color (CIE 1931 xy +
+  LevelControl's brightness as Y), via the standard xyY -> linear sRGB
+  -> gamma-corrected sRGB pipeline (see c4_led_rgb.py).
+
+  A separate real bug (IndexError: tuple index out of range) meant
+  color picks never reached the wire even after the XY fix: ZHA's own
+  light platform calls the color cluster's move_to_color() with color_x/
+  color_y as keyword arguments, not positional, and the handler only
+  checked args[0]/args[1]. Fixed with a kwargs fallback.
+
+  Bottom LED (c4.dm.l1o/l1f) and top LED off-color (c4.dm.l0f) are now
+  ALSO CONFIRMED, via a second, cleanly-spaced Composer capture — all
+  four combos ACKed on the wire. Only the "on" color is wired to an
+  entity for now, per the user's original request.
 """
 
 import logging
