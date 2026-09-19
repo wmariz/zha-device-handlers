@@ -4,10 +4,13 @@ CONFIRMED on real hardware: outlet 1 (EP1) dims correctly — turning on at
 an arbitrary brightness works, and dragging the brightness slider while
 the light is on updates the level in place (it does not revert to off).
 
-Outlet 2 (synthetic EP11) is STILL UNRESOLVED. The Control4 controller's
-own app shows it as dimmable in hardware, but every attempt at graduated
-brightness for it so far has reverted to off, same as outlet 1's original
-failure. See "History" below for what's been tried and ruled out — please
+Outlet 2 (synthetic EP11): the wire command is now CONFIRMED from a real
+HC-300 controller's own driver log (not inference) — see attempt 9 in
+"History" below. Every attempt before that reported the same revert-to-off
+symptom despite attempt 9's command turning out to be correct on the wire
+(the device echoes back exactly the level sent), so if this still
+misbehaves after attempt 9, the bug is more likely in this quirk's own
+state handling than in the wire format — please
 read it before changing this file again, to avoid repeating a dead end.
 
 History:
@@ -111,11 +114,48 @@ History:
 
   This is a real function signature, not an analogy, but it is still
   inference from a parameter list rather than a captured wire frame — the
-  serialization code itself was not disassembled. If this also fails, the
-  reliable next step is a Wireshark capture of the Control4 app dimming
-  this outlet, to read the true byte order off the wire instead of
-  inferring it from either the driver's C++ signatures or its embedded
-  strings.
+  serialization code itself was not disassembled. Real-hardware testing
+  showed the same revert-to-off symptom yet again.
+
+  Attempt 9 (this version) stopped inferring from the driver and captured
+  the real thing: the user wired the physical LOZ-5D1-W to an actual
+  HC-300 Control4 controller and used Composer's own dimmer UI while
+  watching the controller's driver log (a plain text log, not a packet
+  capture, but it logs every outgoing/incoming Zigbee payload including
+  the raw hex of the ASCII command). Decoding that hex byte-for-byte gives
+  an unambiguous, ground-truth answer for SET_LEVEL:
+
+      Executing command (SET_LEVEL) on driver Light (v2)(13)
+      -> sent:      0sf082 c4.dm.tv 00 00 00
+      -> confirmed: 0t6103 sa c4.dm.tc 00 00        (device echo)
+      -> sent:      0sf083 c4.dm.tv 00 00 64
+      -> confirmed: 0t6104 sa c4.dm.tc 00 64
+      -> sent:      0sf084 c4.dm.tv 00 00 50   (0x50 = 80)
+      -> confirmed: 0t6105 sa c4.dm.tc 00 50
+      -> ... same pattern through 0x3c(60), 0x28(40), 0x14(20) ...
+      -> identical pattern on outlet index 01 ("Light (v2) 2(15)")
+
+  This is the exact `c4.dm.tv <outlet> 00 <level>` command attempts 1, 2,
+  and 4 already tried and reported as failing on real hardware — except
+  now there is proof, from the device's own confirming announcement, that
+  the device correctly accepts and applies every one of these graduated
+  values. The wire format was right all along. Since attempts 1/2/4 sent
+  what appears to be the identical command and reported it not working in
+  Home Assistant, the most likely explanation is a bug in this quirk's own
+  optimistic-update or announcement-parsing logic rather than the command
+  itself — this version adds substantially more debug logging around both
+  (in C4Outlet2DimmerLevelControl.command()/_send_c4_outlet_level and
+  C4DualOutletDimmerButtonCluster._handle_state_announcement/
+  _sync_level_for_outlet_2) so that if it still misbehaves, HA's log will
+  show exactly which half of the round trip is failing.
+
+  The same controller log also gives RAMP_TO_LEVEL's real wire format —
+  `0if088 c4.dm.rtl 00 32 000003e8` decodes to an "interrupt" (0i, not
+  0s/0g) frame with `<outlet> <level_hex2> <time_ms_hex8>` (8 hex digits
+  of milliseconds, not the 4-digit guess in attempt 8) — but this version
+  does not use it: c4.dm.tv alone is sufficient and now fully confirmed,
+  so real device-side ramping is left as a possible future enhancement
+  rather than another source of risk.
 
 Implementation:
   • Outlet 1 (EP1) reuses C4DimmerOnOff / C4DimmerLevelControl UNCHANGED
@@ -129,7 +169,8 @@ Implementation:
     exists because the real APD120 ignores standard On/Off, and there's no
     evidence this text-protocol outlet does), paired with
     C4Outlet2DimmerLevelControl (this file) for brightness, which sends
-    the driver-confirmed `c4.dm.rtl <01> <level> <time>` command.
+    the confirmed `c4.dm.tv <01> 00 <level>` command (same shape as
+    on/off, just with a graduated value).
   • EP197's button/state cluster treats outlet-index-1 c4.dm.tc
     announcements as a graduated level for outlet 2, and defers everything
     else (including any outlet-index-0 announcements) to the base sync, so
@@ -223,55 +264,52 @@ def _c4_pct_to_zcl_level(level_pct: int) -> int:
 # ---------------------------------------------------------------------------
 
 class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
-    """LevelControl for outlet 2 (synthetic EP11), via the driver's RAMP_TO_LEVEL verb.
+    """LevelControl for outlet 2 (synthetic EP11), via the CONFIRMED SET_LEVEL command.
 
-    The verb name c4.dm.rtl ("Ramp To Level") is driver-confirmed — see the
-    module docstring's History section for how it was found and why
-    earlier guesses (c4.dm.tv with a different value/index, a c4.dmx.*
-    verb) are now known to be wrong for this device, not just unconfirmed.
+    CONFIRMED from a real HC-300 controller's own log (not inference this
+    time): the user connected the physical device to a real Control4
+    controller and captured its driver log while using Composer's own
+    dimmer UI. Decoding the logged Zigbee packets byte-for-byte shows:
 
-    The argument ORDER is now also evidence-based rather than guessed by
-    analogy. An unstripped ARM/Linux driver binary pulled from a real
-    HC-1000v2 controller's recovery partition
-    (control4\\drivers\\outlet_ip_control4.c4l — the same driver identified
-    from the Windows side) still has its C++ symbol table, including:
+        Executing command (SET_LEVEL) on driver Light (v2)(13)
+        -> sent:      0sf082 c4.dm.tv 00 00 00
+        -> confirmed: 0t6103 sa c4.dm.tc 00 00       (device echo)
+        -> sent:      0sf083 c4.dm.tv 00 00 64
+        -> confirmed: 0t6104 sa c4.dm.tc 00 64
+        -> sent:      0sf084 c4.dm.tv 00 00 50   (0x50 = 80)
+        -> confirmed: 0t6105 sa c4.dm.tc 00 50
+        -> ... same pattern down to 0x3c(60), 0x28(40), 0x14(20) ...
 
-        _ZN18outlet_ip_control415RampOutletLevelEN8OutletID4TypeEjj
+    and the identical pattern for the second outlet (outlet index 01,
+    "Light (v2) 2(15)" in the log). This is the SAME `c4.dm.tv <outlet> 00
+    <level>` command already confirmed for on/off — it simply also accepts
+    values between 0x00 and 0x64, and the device announces each one back.
+    This is exactly what attempts 1/2/4 in this file's history already
+    tried and reported as failing on real hardware; given the log now
+    proves the device itself accepts and echoes these commands correctly,
+    a prior failure to reflect this in Home Assistant is more likely to
+    have been in this quirk's own state handling than in the wire command
+    — see the module docstring's History for the full reasoning and please
+    report exactly what HA shows if this still misbehaves (with debug logs
+    if possible), since the wire format is no longer the suspect.
 
-    which demangles to:
-
-        outlet_ip_control4::RampOutletLevel(OutletID::Type, unsigned int, unsigned int)
-
-    Three parameters: the outlet selector, then two plain unsigned ints.
-    Paired with the command's own description order ("Ramp to Level
-    INTEGER ... over TIME STRING" — level named before time), the natural
-    reading is RampOutletLevel(outlet, level, time), i.e. LEVEL BEFORE
-    TIME on the wire, the opposite of this class's first version (which
-    also failed identically on real hardware). This class now sends
-    `c4.dm.rtl <outlet> <level_hex2> <time_ms_hex4>`.
-
-    This is stronger evidence than any prior attempt (a real function
-    signature, not an analogy to a sibling device), but it is still
-    inference from a C++ parameter list, not a captured wire frame. If
-    this also fails, the reliable next step is a Wireshark capture of the
-    Control4 app dimming this outlet, to read the true byte order off the
-    wire instead of inferring it — see the module docstring.
-
-    The ZCL transition_time argument HA already provides (ignored by every
-    earlier attempt in this file) is used for <time_ms>, converting ZCL
-    1/10-s units to ms.
+    The same log also confirms RAMP_TO_LEVEL's real wire format —
+    `0i<seq> c4.dm.rtl <outlet> <level_hex2> <time_ms_hex8>` (an
+    "interrupt" frame, 8 hex digits of milliseconds, not the 4-digit
+    hex/"set" frame guessed in the previous revision) — but this class
+    does not use it: c4.dm.tv alone is sufficient to set any level, and
+    every earlier guess at c4.dm.rtl's shape has cost a full hardware test
+    cycle to disprove, so it's deliberately left unused pending a reason
+    to need real device-side ramping.
 
     On/off itself does NOT go through this class — see C4Outlet1OnOff in
     control4_outlet.py, reused unchanged below, which keeps using the
-    confirmed c4.dm.tv on/off transport with the fixed 0x64/0x00 values
-    (also present as dedicated c4.dm.on/c4.dm.of verbs in the driver
-    binary, but c4.dm.tv is already confirmed working — no reason to
-    switch it).
+    confirmed c4.dm.tv on/off transport with the fixed 0x64/0x00 values.
 
     Inherits C4DimmerLevelControl's local caching of on_level/transition-time
     attributes but overrides write_attributes (never forward to the device —
     this protocol has no ZCL WriteAttributes equivalent at all) and
-    move_to_level(_with_on_off) to send c4.dm.rtl instead of a real ZCL
+    move_to_level(_with_on_off) to send c4.dm.tv instead of a real ZCL
     frame, since outlet 2 has no physical endpoint a real frame could reach.
     """
 
@@ -293,7 +331,7 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
         """Send a C4 Get command to query outlet 2's current level."""
         device = self.endpoint.device
         seq = next_c4_seq(device)
-        cmd = f"0g{seq:04x} c4.dm.rtl {self.OUTLET_IDX:02x}"
+        cmd = f"0g{seq:04x} c4.dm.tv {self.OUTLET_IDX:02x} 00"
         data = _build_c4_frame(0, cmd)
 
         _LOGGER.debug("C4 Outlet2DimmerLevel: polling — %s", cmd)
@@ -309,18 +347,13 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
         except Exception as exc:
             _LOGGER.warning("C4 Outlet2DimmerLevel: poll failed: %s", exc)
 
-    async def _send_c4_outlet_level(self, level_pct: int, time_ms: int) -> None:
-        """Send c4.dm.rtl 01 <level> <time_ms> — see class docstring for the
-        RampOutletLevel(OutletID::Type, uint level, uint time) evidence
-        behind this argument order (level before time).
+    async def _send_c4_outlet_level(self, level_pct: int) -> None:
+        """Send c4.dm.tv <outlet> 00 <level> — confirmed from a real
+        controller's log, see class docstring.
         """
         device = self.endpoint.device
         seq = next_c4_seq(device)
-        time_ms = max(0, min(0xFFFF, int(time_ms)))
-        cmd = (
-            f"0s{seq:04x} c4.dm.rtl {self.OUTLET_IDX:02x} "
-            f"{level_pct:02x} {time_ms:04x}"
-        )
+        cmd = f"0s{seq:04x} c4.dm.tv {self.OUTLET_IDX:02x} 00 {level_pct:02x}"
         data = _build_c4_frame(0, cmd)
 
         _LOGGER.debug("C4 Outlet2DimmerLevel: sending %s", cmd)
@@ -332,6 +365,10 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
                 sequence=device.get_sequence(),
                 data=data,
                 expect_reply=False,
+            )
+            _LOGGER.debug(
+                "C4 Outlet2DimmerLevel: device.request() for %s completed "
+                "without raising", cmd,
             )
         except Exception as exc:
             _LOGGER.warning("C4 Outlet2DimmerLevel: send failed: %s", exc)
@@ -350,17 +387,19 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
             LevelControl.ServerCommandDefs.move_to_level_with_on_off.id,
         ):
             level_zcl = args[0] if args else 0
-            transition_tenths = args[1] if len(args) > 1 and args[1] is not None else 0
             level_pct = _zcl_level_to_c4_pct(level_zcl)
-            time_ms = int(transition_tenths) * 100
             _LOGGER.debug(
-                "C4 Outlet2DimmerLevel: move_to_level zcl=%d -> c4_pct=%d, "
-                "transition=%d (1/10s) -> %dms",
-                level_zcl, level_pct, transition_tenths, time_ms,
+                "C4 Outlet2DimmerLevel: move_to_level cmd=0x%02x args=%s "
+                "zcl=%d -> c4_pct=%d",
+                command_id, args, level_zcl, level_pct,
             )
-            await self._send_c4_outlet_level(level_pct, time_ms)
+            await self._send_c4_outlet_level(level_pct)
 
             # Optimistic update — device will confirm via a c4.dm.tc announce
+            _LOGGER.debug(
+                "C4 Outlet2DimmerLevel: optimistic update current_level=%d "
+                "on_off=%s", level_zcl, level_zcl > 0,
+            )
             self._update_attribute(
                 LevelControl.AttributeDefs.current_level.id, level_zcl
             )
@@ -369,9 +408,15 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
                 onoff.update_attribute(
                     OnOff.AttributeDefs.on_off.id, level_zcl > 0
                 )
+            else:
+                _LOGGER.warning(
+                    "C4 Outlet2DimmerLevel: no OnOff cluster found on "
+                    "endpoint %s to optimistically update",
+                    self.endpoint.endpoint_id,
+                )
             return self._SUCCESS
 
-        # No c4.dm.rtl equivalent for move/step/stop — acknowledge and drop
+        # No c4.dm.tv equivalent for move/step/stop — acknowledge and drop
         # rather than forwarding to super().command(), which would send a
         # real ZCL frame this synthetic endpoint has nowhere to deliver.
         _LOGGER.debug(
@@ -404,6 +449,10 @@ class C4DualOutletDimmerButtonCluster(C4DualOutletButtonCluster):
     ep_attribute = "c4_dual_outlet_dimmer_buttons"
 
     def _handle_state_announcement(self, namespace, data):
+        _LOGGER.debug(
+            "C4 dual outlet dimmer: announcement namespace=%r data=%s",
+            namespace, data,
+        )
         if namespace == "c4.dm.tc" and len(data) >= 2:
             try:
                 outlet_idx = int(data[0], 16)
@@ -435,25 +484,44 @@ class C4DualOutletDimmerButtonCluster(C4DualOutletButtonCluster):
     def _sync_level_for_outlet_2(self, level_pct):
         ep_id = OUTLET_EP_MAP.get(1)
         if ep_id is None:
+            _LOGGER.warning(
+                "C4 dual outlet dimmer: OUTLET_EP_MAP has no entry for "
+                "outlet index 1 — cannot sync level"
+            )
             return
         try:
             ep = self.endpoint.device.endpoints.get(ep_id)
             if ep is None:
+                _LOGGER.warning(
+                    "C4 dual outlet dimmer: endpoint %s not found on "
+                    "device — cannot sync outlet 2 level (pct=%d)",
+                    ep_id, level_pct,
+                )
                 return
             level_zcl = _c4_pct_to_zcl_level(level_pct)
             level_cluster = ep.in_clusters.get(LevelControl.cluster_id)
             onoff_cluster = ep.in_clusters.get(OnOff.cluster_id)
             if level_cluster is not None:
                 _LOGGER.debug(
-                    "C4 dual outlet dimmer: outlet 2 level=%d (pct=%d)",
-                    level_zcl, level_pct,
+                    "C4 dual outlet dimmer: outlet 2 (ep %s) level=%d (pct=%d)",
+                    ep_id, level_zcl, level_pct,
                 )
                 level_cluster.update_attribute(
                     LevelControl.AttributeDefs.current_level.id, level_zcl
                 )
+            else:
+                _LOGGER.warning(
+                    "C4 dual outlet dimmer: no LevelControl cluster on "
+                    "ep %s to sync level (pct=%d)", ep_id, level_pct,
+                )
             if onoff_cluster is not None:
                 onoff_cluster.update_attribute(
                     OnOff.AttributeDefs.on_off.id, level_pct > 0
+                )
+            else:
+                _LOGGER.warning(
+                    "C4 dual outlet dimmer: no OnOff cluster on ep %s to "
+                    "sync on/off (pct=%d)", ep_id, level_pct,
                 )
         except Exception:
             _LOGGER.warning(

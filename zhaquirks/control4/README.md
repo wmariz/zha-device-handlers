@@ -21,50 +21,35 @@ controller required.
 | C4-SW120277 | On/Off Wall Switch | Switch |
 | C4-KC120277 | 8-Button Scene Controller | 8 event entities (press, hold, release) |
 | loz-5s1-w | Dual Switched Outlet | 2 switches (one per outlet) |
-| loz-5d1-w | Dual Dimming Outlet *(outlet 1 confirmed, outlet 2 unresolved — see note)* | 2 lights (dimmable, one per outlet) |
+| loz-5d1-w | Dual Dimming Outlet *(outlet 1 confirmed; outlet 2's wire command is confirmed but see note)* | 2 lights (dimmable, one per outlet) |
 | C4-Z2IO-ZP | Zigbee IO Module | 2 switches (relays), 5 binary sensors (contacts), temperature, humidity |
 | C4-SR260 | IR/Zigbee Remote (50 buttons + LCD) | 50 event entities (press, release), battery |
 
-> **loz-5d1-w note:** this quirk (`control4_outlet_dimmer.py`) uses two
-> different transports for its two outlets. Outlet 1 (EP1) sends real ZCL
-> Level Control frames, the same way the confirmed C4-APD120 dimmer does —
-> **confirmed working on real hardware**, including dragging the
-> brightness slider while the light is on. Outlet 2 (synthetic EP11) has
-> no real Zigbee endpoint of its own, so it can't receive a real ZCL frame.
+> **loz-5d1-w note:** outlet 1 (EP1) sends real ZCL Level Control frames,
+> the same way the confirmed C4-APD120 dimmer does — **confirmed working
+> on real hardware**, including dragging the brightness slider while the
+> light is on. Outlet 2 (synthetic EP11) has no real Zigbee endpoint of
+> its own, so it can't receive a real ZCL frame; it speaks the outlet's
+> own `c4.dm.tv <outlet> 00 <level>` text command instead (same shape as
+> the already-confirmed on/off command, just with a graduated value).
 >
-> Several earlier attempts at a graduated level for outlet 2 failed on real
-> hardware (all reverted the light to off): two tried the outlet's confirmed
-> on/off command (`c4.dm.tv`) with a graduated value or a different
-> parameter index, a third guessed a `c4.dmx.lsc` verb by analogy with the
-> fan controller's protocol, and a fourth found the real `c4.dm.rtl`
-> ("Ramp To Level") verb inside the actual compiled Windows driver
-> (`outlet_ip_control4.c4w`, whose embedded command catalog confirms
-> `SET_LEVEL`/`RAMP_TO_LEVEL` as real commands and contains **zero**
-> `c4.dmx.*` strings — retroactively ruling out the third attempt's
-> namespace guess for this driver) but sent it as `<outlet> <time_ms>
-> <level>` and still got the same revert-to-off symptom.
->
-> The current version keeps the verb but swaps the argument order, based on
-> the actual C++ implementation: an **unstripped ARM/Linux driver binary
-> pulled from a real HC-1000v2 controller's recovery partition**
-> (`control4/drivers/outlet_ip_control4.c4l`, the same driver the Windows
-> side names) still has its symbol table, including the mangled C++ name
-> `_ZN18outlet_ip_control415RampOutletLevelEN8OutletID4TypeEjj`, which
-> demangles to `outlet_ip_control4::RampOutletLevel(OutletID::Type,
-> unsigned int, unsigned int)`. Matched against the command description's
-> own word order ("Ramp to Level INTEGER ... over TIME STRING"), this reads
-> as level before time, so this version sends `c4.dm.rtl <outlet> <level>
-> <time_ms>` (reusing the ZCL transition_time HA already provides).
->
-> This is a real function signature, not an analogy — stronger evidence
-> than any earlier attempt — but the serialization code itself was not
-> disassembled, so it is still inference rather than a captured wire frame.
->
-> See the module docstring's "History" section before changing this
-> further. If this also fails, the reliable next step is a Wireshark
-> capture of the Control4 app itself dimming outlet 2, to read the real
-> byte order off the wire instead of inferring it. Please open an issue
-> with a capture (or an HA diagnostics download) if you have this hardware.
+> Several earlier guesses at outlet 2's command (a different value/index
+> within `c4.dm.tv`, a `c4.dmx.lsc` verb by analogy with the fan
+> controller, `c4.dm.rtl`/RAMP_TO_LEVEL with an inferred argument order —
+> see the module docstring's "History" section for the full trail) all
+> reported the same revert-to-off symptom on real hardware. The current
+> `c4.dm.tv` command is no longer a guess: the user connected the physical
+> device to a real HC-300 controller and captured its own driver log while
+> dimming through Composer, and decoding the logged Zigbee payload
+> byte-for-byte shows the controller sending exactly this command with
+> graduated values (`00`, `64`, `50`, `3c`, `28`, `14`, ...) and the device
+> echoing each one back via its own confirming announcement. Since this is
+> the same command earlier attempts already tried and reported as failing,
+> if it still misbehaves the likelier suspect now is this quirk's own
+> state-sync logic rather than the wire command — the code has more debug
+> logging on both the send and receive side to help pin that down. Please
+> open an issue (with HA debug logs, or another capture) if it still
+> doesn't work.
 
 All Control4 Zigbee devices use a proprietary text-based serial protocol
 layered on top of ZigBee APS instead of standard ZCL clusters. These quirks
