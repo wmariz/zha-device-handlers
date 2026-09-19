@@ -1,13 +1,16 @@
 """C4 button clusters — shared across dimmer, switch, scene controller, outlet, remote.
 
 Classes exported:
-  C4ButtonCluster                  — base, used by dimmer
+  C4ButtonCluster                  — base, used by plain switches
+  C4DimmerButtonCluster            — C4-APD120/LDZ-101 dimmer (adds per-button Event entities)
   C4SwitchButtonCluster            — on/off switch variant
   C4SceneControllerButtonCluster   — KC120277 8-button keypad
   C4DualOutletButtonCluster        — LOZ-5S1-W dual outlet
   C4RemoteButtonCluster            — C4-SR260 50-button IR/Zigbee remote
+  _DIMMER_BUTTON_CLUSTERS          — per-button virtual cluster dict for the dimmer (name → class)
   _KC120277_BUTTON_CLUSTERS        — per-button virtual cluster dict (btn_id → class)
   _SR260_BUTTON_CLUSTERS           — per-button virtual cluster dict for SR260
+  _make_dimmer_button_cluster()    — factory for the dimmer's per-button EventableCluster
   _make_kc120277_button_cluster()  — factory for per-button EventableCluster
   _make_sr260_button_cluster()     — factory for SR260 per-button EventableCluster
 """
@@ -41,6 +44,7 @@ import c4_helpers as C4
 from c4_helpers import (
     C4_BUTTON_CLUSTER_ID,
     C4_DISPLAY_CLUSTER_ID,
+    DIMMER_BUTTON_EVENT_EP_MAP,
     DIMMER_BUTTON_MAP,
     DIMMER_EVENT_MAP,
     KC120277_BUTTON_EP_MAP,
@@ -279,17 +283,7 @@ class C4ButtonCluster(EventableCluster):
         button_id = int(button, 16)
         button_name = self.BUTTON_MAP.get(button_id, f"button_{button_id:#04x}")
         event_code = namespace.split('.')[-1] if namespace else "unknown"
-        action = DIMMER_EVENT_MAP.get(event_code, f"unknown_{event_code}")
-
-        if action == "click_count" and extra is not None:
-            if extra == "01":
-                action = SHORT_PRESS
-            elif extra == "02":
-                action = DOUBLE_PRESS
-            elif extra == "03":
-                action = TRIPLE_PRESS
-            else:
-                action = QUADRUPLE_PRESS
+        action = self._resolve_action(event_code, extra)
 
         params = {"event_code": event_code, "button_id": button_id}
         if extra is not None:
@@ -301,7 +295,32 @@ class C4ButtonCluster(EventableCluster):
             "C4 button event: button=%s event=%s", button_name, event_code
         )
         self._sync_state_from_event(event_code, button_id, params)
+        self._fire_button_zha_event(action, button_id, button_name)
 
+    @staticmethod
+    def _resolve_action(event_code, extra):
+        """Map an event_code (+ optional click-count extra) to a zha_event action."""
+        action = DIMMER_EVENT_MAP.get(event_code, f"unknown_{event_code}")
+        if action == "click_count" and extra is not None:
+            if extra == "01":
+                action = SHORT_PRESS
+            elif extra == "02":
+                action = DOUBLE_PRESS
+            elif extra == "03":
+                action = TRIPLE_PRESS
+            else:
+                action = QUADRUPLE_PRESS
+        return action
+
+    def _fire_button_zha_event(self, action, button_id, button_name):
+        """Fire the zha_event for a resolved button action.
+
+        Split out from _handle_button_event so a subclass can redirect
+        where the event fires (e.g. C4DimmerButtonCluster below, which
+        routes to a dedicated per-button virtual endpoint instead of
+        firing on this cluster's own endpoint) without duplicating the
+        action-resolution logic above.
+        """
         self.listener_event(
             "zha_send_event",
             action,
@@ -424,6 +443,101 @@ class C4ButtonCluster(EventableCluster):
                     )
         except Exception:
             _LOGGER.warning("C4 button sync: failed", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Dimmer variant — adds a dedicated Event entity per physical button
+# ---------------------------------------------------------------------------
+
+def _make_dimmer_button_cluster(button_name: str) -> type:
+    """Return a unique EventableCluster class for one dimmer physical button.
+
+    Each class lives on its own virtual endpoint (DIMMER_BUTTON_EVENT_EP_MAP),
+    so ZHA creates one independent Event entity per button — mirroring
+    _make_kc120277_button_cluster above. Physical Zigbee frames never arrive
+    on these endpoints — routing is done by
+    C4DimmerButtonCluster._fire_button_zha_event().
+    """
+
+    class _ButtonCluster(EventableCluster):
+        cluster_id   = C4_BUTTON_CLUSTER_ID
+        name         = f"{button_name.capitalize()} Button"
+        ep_attribute = f"c4_dimmer_btn_{button_name}"
+        _c4_custom_handler = False  # no physical routing
+
+        def handle_message(self, hdr, args):
+            pass  # no physical packets arrive here
+
+        def handle_cluster_request(self, hdr, args, *, dst_addressing=None):
+            pass
+
+    _ButtonCluster.__name__     = f"C4Dimmer{button_name.capitalize()}ButtonCluster"
+    _ButtonCluster.__qualname__ = _ButtonCluster.__name__
+    return _ButtonCluster
+
+
+# One cluster class per dimmer button — keyed by button name ("top"/"bottom")
+_DIMMER_BUTTON_CLUSTERS: dict[str, type] = {
+    btn_name: _make_dimmer_button_cluster(btn_name)
+    for btn_name in DIMMER_BUTTON_EVENT_EP_MAP
+}
+
+
+class C4DimmerButtonCluster(C4ButtonCluster):
+    """C4ButtonCluster, but each button fires its own dedicated Event entity.
+
+    CONFIRMED gap found by the user: device_automation_triggers (fixed
+    earlier — see control4_dimmer.py's module docstring) makes "top
+    pressed"/"bottom pressed"/etc. selectable as an automation trigger,
+    but there was no actual HA *entity* anywhere showing button activity
+    — nothing in Developer Tools -> States, no history, nothing on a
+    dashboard. zha_send_event alone only ever produces a bus event
+    (zha_event), not an entity; the KC120277 scene controller
+    (control4_scene_controller.py) already solves this the same way for
+    its own 8 buttons, via one virtual per-button endpoint each holding
+    a dedicated EventableCluster.
+
+    Overrides _fire_button_zha_event() (not _handle_button_event()) so
+    the dimmer-specific on/off state sync in _sync_state_from_event /
+    _sync_cc_event (unique to this class among C4ButtonCluster's
+    subclasses — the scene controller has no load to sync) keeps
+    running unchanged; only *where the zha_event fires* changes, from
+    this cluster's own endpoint (197) to the matching virtual endpoint
+    in DIMMER_BUTTON_EVENT_EP_MAP. device_automation_triggers
+    (control4_dimmer.py) was updated to match — it now points at the
+    virtual endpoints too, since events no longer fire on EP197 at all.
+    """
+
+    def _fire_button_zha_event(self, action, button_id, button_name):
+        ep_id = DIMMER_BUTTON_EVENT_EP_MAP.get(button_name)
+        if ep_id is None:
+            _LOGGER.warning(
+                "C4 dimmer button: no virtual EP for button %r — add it "
+                "to DIMMER_BUTTON_EVENT_EP_MAP", button_name,
+            )
+            return
+
+        ep = self.endpoint.device.endpoints.get(ep_id)
+        if ep is None:
+            _LOGGER.warning(
+                "C4 dimmer button: virtual EP %d not in device endpoints "
+                "(re-pair after quirk update?)", ep_id,
+            )
+            return
+
+        btn_cluster = ep.in_clusters.get(C4_BUTTON_CLUSTER_ID)
+        if btn_cluster is None:
+            _LOGGER.warning(
+                "C4 dimmer button: no cluster 0x%04X on EP %d",
+                C4_BUTTON_CLUSTER_ID, ep_id,
+            )
+            return
+
+        btn_cluster.listener_event("zha_send_event", action, {ENDPOINT_ID: ep_id})
+        _LOGGER.debug(
+            "C4 dimmer button: fired %r for %s on EP %d",
+            action, button_name, ep_id,
+        )
 
 
 # ---------------------------------------------------------------------------

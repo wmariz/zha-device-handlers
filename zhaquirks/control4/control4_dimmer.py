@@ -136,6 +136,30 @@ History:
   caller (self.endpoint.device, below) rather than looked up through a
   module, so it is genuinely one single object regardless of which
   import of c4_helpers.py happens to be running.
+
+  Missing button-click entity: the user pointed out that after the
+  earlier button-triggers fix (above), automations could still be built
+  from "top pressed" etc., but there was no actual HA *entity* anywhere
+  reflecting button activity — nothing in Developer Tools -> States, no
+  history, nothing to put on a dashboard. zha_send_event alone only
+  produces a bus event (zha_event), never an entity. The KC120277 scene
+  controller (control4_scene_controller.py) already solves the exact
+  same problem for its own 8 buttons: one virtual per-button endpoint
+  each, holding a dedicated EventableCluster, so ZHA creates one Event
+  entity per button. Replicated the same pattern for this dimmer's two
+  buttons: two new virtual endpoints (DIMMER_BUTTON_EVENT_EP_MAP: 198
+  "top", 199 "bottom"), a small per-button EventableCluster factory
+  (_make_dimmer_button_cluster, c4_button_cluster.py), and a new
+  C4DimmerButtonCluster (replacing bare C4ButtonCluster on EP197) that
+  overrides only _fire_button_zha_event() — a new override point split
+  out of C4ButtonCluster._handle_button_event() specifically for this —
+  so the dimmer's own on/off state sync (_sync_state_from_event /
+  _sync_cc_event, unique to this class; the scene controller has no
+  load to sync) keeps running unchanged, and only *where* the
+  zha_event fires changes: from EP197 itself to the matching virtual
+  endpoint. device_automation_triggers was updated to point at the
+  virtual endpoints too, since events no longer fire on EP197 at all
+  once C4DimmerButtonCluster is in use.
 """
 
 import logging
@@ -186,12 +210,13 @@ from c4_helpers import (
     C4_ON_TRANSITION,
     C4_PROFILE_BUTTON,
     C4_PROFILE_NETWORK,
+    DIMMER_BUTTON_EVENT_EP_MAP,
     DIMMER_BUTTON_MAP,
     C4DimmerManufCluster,
     C4ConfigCluster,
 )
 from c4_basic_cluster import C4BasicCluster
-from c4_button_cluster import C4ButtonCluster
+from c4_button_cluster import C4DimmerButtonCluster, _DIMMER_BUTTON_CLUSTERS
 from c4_led_cluster import C4LEDCluster
 from c4_ramp_cluster import C4RampCluster, C4_RAMP_CLUSTER_ID
 from c4_hooks import _C4_MODEL_QUIRK_MAP
@@ -591,7 +616,7 @@ class Control4APD120Dimmer(CustomDevice):
             197: {
                 PROFILE_ID: zha.PROFILE_ID,
                 DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4ButtonCluster],
+                INPUT_CLUSTERS:  [C4DimmerButtonCluster],
                 OUTPUT_CLUSTERS: [],
             },
             3: {
@@ -606,6 +631,17 @@ class Control4APD120Dimmer(CustomDevice):
                 INPUT_CLUSTERS:  [C4RampCluster],
                 OUTPUT_CLUSTERS: [],
             },
+            # Virtual per-button endpoints — one Event entity each in ZHA.
+            # See C4DimmerButtonCluster / DIMMER_BUTTON_EVENT_EP_MAP.
+            **{
+                ep_id: {
+                    PROFILE_ID:      zha.PROFILE_ID,
+                    DEVICE_TYPE:     0x0000,
+                    INPUT_CLUSTERS:  [_DIMMER_BUTTON_CLUSTERS[btn_name]],
+                    OUTPUT_CLUSTERS: [],
+                }
+                for btn_name, ep_id in DIMMER_BUTTON_EVENT_EP_MAP.items()
+            },
         },
     }
 
@@ -616,11 +652,18 @@ class Control4APD120Dimmer(CustomDevice):
     # list entirely, so HA's automation UI never offered them as triggers
     # for this device. "press" (c4.dmx.bp, immediate press-down before a
     # click/hold resolves) is newly wired up in DIMMER_EVENT_MAP to match.
+    #
+    # ENDPOINT_ID points at DIMMER_BUTTON_EVENT_EP_MAP's virtual per-button
+    # endpoints, not at 197 (this cluster's own endpoint) — since
+    # C4DimmerButtonCluster started firing zha_send_event there instead, to
+    # also get a dedicated Event entity per button (see its docstring).
+    # Keyed by _btn_name (not _btn_id): DIMMER_BUTTON_MAP maps two ids
+    # (0x00, 0x01) onto the same "top" button/virtual endpoint.
     device_automation_triggers = {
         (_action, _btn_name): {
             COMMAND: _action,
             CLUSTER_ID: C4_BUTTON_CLUSTER_ID,
-            ENDPOINT_ID: 197,
+            ENDPOINT_ID: DIMMER_BUTTON_EVENT_EP_MAP[_btn_name],
         }
         for _btn_id, _btn_name in DIMMER_BUTTON_MAP.items()
         for _action in (

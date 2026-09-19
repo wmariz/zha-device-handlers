@@ -242,6 +242,24 @@ to Home Assistant automatically.
 Default transition times: 800 ms ramp-on, 2000 ms ramp-off, default on-level
 of ~75%.
 
+**Button events:** the top and bottom paddle buttons each get their own HA
+Event entity (visible in Developer Tools -> States, with history), the same
+way the C4-KC120277 scene controller's buttons do — not just an automation
+trigger. Available actions: `press` (immediate, on physical press-down,
+before a click/hold resolves), `remote_button_short_press` /
+`_double_press` / `_triple_press` / `_quadruple_press` (resolved once
+released), and `remote_button_long_press` / `_long_release` (holding the
+button down).
+
+> **Note:** commanding the light to 100% (the ZCL maximum, 254) settles at
+> ~99% — the device's own firmware appears to compute its displayed
+> percentage as level/255 rather than the ZCL-correct level/254, which no
+> valid ZCL command can work around. Turning on also has a physical
+> rise-time floor of roughly 0.7-1.3s regardless of the requested transition
+> time, consistent with a phase dimmer's soft-start circuitry; turning off
+> reasonably tracks whatever transition time is actually requested. Neither
+> is a bug in this quirk.
+
 ### C4-4SF120 Fan Controller
 
 Exposes a fan entity with five speeds: off, low, medium-low, medium-high, and

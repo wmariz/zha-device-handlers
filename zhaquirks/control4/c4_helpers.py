@@ -124,6 +124,15 @@ DIMMER_BUTTON_MAP = {
     0x05: "bottom",  # OFF button
 }
 
+# Virtual endpoint IDs for the dimmer's per-button Event entities (ZHA-side
+# only, mirroring KC120277_BUTTON_EP_MAP below) — keyed by name, not by the
+# raw button id, since DIMMER_BUTTON_MAP maps two different ids (0x00, 0x01)
+# onto the same "top" button.
+DIMMER_BUTTON_EVENT_EP_MAP = {
+    "top": 198,
+    "bottom": 199,
+}
+
 # C4-KC120277: 8 physical buttons, 0-indexed from top
 KC120277_BUTTON_MAP = {
     0x00: BUTTON_1,
