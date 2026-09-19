@@ -34,6 +34,17 @@ form observed. Added here rather than to C4LEDCluster/the button cluster
 since Composer groups these with the ramp rates as one "Wireless Dimmer"
 hardware-config panel, and the wire transport is identical.
 
+button_attached/led_attached are exposed as writable local (manufacturer-
+specific) Bool ATTRIBUTES rather than ZCL commands. A plain command never
+gets its own HA entity and — being typed uint8_t — rendered as a 0-255
+slider in the ZHA "Issue command" UI instead of a clean toggle. Attributes
+get both a proper True/False control in the Cluster Attributes UI (Bool
+type) and a real ZHA-generated Switch entity (in the same way a writable
+LevelControl attribute like on_level gets auto-exposed as a Number
+entity), which is what a hardware-config toggle should be. Writing the
+attribute sends the wire command as a side effect and caches the result
+locally, since no Get form exists to read the real value back.
+
 Exported:
   C4RampCluster         — cluster with ramp-rate + hardware-config commands
   C4_RAMP_CLUSTER_ID    — cluster ID (0xFC44)
@@ -51,7 +62,14 @@ if _QUIRK_DIR not in sys.path:
 
 from zigpy.quirks import CustomCluster
 import zigpy.types as t
-from zigpy.zcl.foundation import BaseCommandDefs, ZCLCommandDef
+from zigpy.zcl import foundation
+from zigpy.zcl.foundation import (
+    BaseAttributeDefs,
+    BaseCommandDefs,
+    Status as ZCLStatus,
+    ZCLAttributeDef,
+    ZCLCommandDef,
+)
 
 from c4_helpers import (
     C4_PROFILE_BUTTON,
@@ -127,11 +145,17 @@ class C4RampCluster(CustomCluster):
     Dimmer" driver panel.
 
     The cluster caches the current ramp times locally so that
-    C4DimmerOnOff can read them for on/off transition commands. The
-    button/LED-attached toggles are fire-and-forget — no local cache,
-    since no confirmed Get command exists for them.
+    C4DimmerOnOff can read them for on/off transition commands.
+    button_attached/led_attached are writable Bool attributes (see
+    AttributeDefs below) rather than commands: writing one sends the
+    corresponding wire command and caches the value locally, since no
+    confirmed Get command exists for them. ZHA auto-generates a Switch
+    entity for a writable Bool attribute on a quirk cluster, which is
+    the point — a config toggle should be a real entity, not a manually
+    issued cluster command.
 
-    Usage from Home Assistant (via zha.issue_zigbee_cluster_command):
+    Usage from Home Assistant (via zha.issue_zigbee_cluster_command)
+    for the ramp-rate commands:
       service: zha.issue_zigbee_cluster_command
       data:
         ieee: "00:0f:ff:..."
@@ -144,9 +168,17 @@ class C4RampCluster(CustomCluster):
           - 2               # index (RAMP_IDX_ON = on-ramp)
           - 1500            # time_ms (1500 ms)
 
-      # set_button_attached (command: 4) / set_led_attached (command: 5)
-      # both take a single arg:
-      #   args: [1]   # attached=1 (or 0 to detach)
+    button_attached/led_attached are set by writing the attribute
+    instead (e.g. via the ZHA "Clusters" -> Attributes UI, or the
+    auto-generated Switch entity once the device reloads):
+      service: zha.set_zigbee_cluster_attribute
+      data:
+        ieee: "00:0f:ff:..."
+        endpoint_id: 4
+        cluster_id: 0xFC44
+        cluster_type: in
+        attribute: 0        # button_attached (1 = led_attached)
+        value: true
     """
 
     cluster_id = C4_RAMP_CLUSTER_ID
@@ -161,6 +193,33 @@ class C4RampCluster(CustomCluster):
         super().__init__(*args, **kwargs)
         # Initialize cache with defaults
         self._ramp_times = dict(RAMP_DEFAULTS_MS)
+        # Seed button/led attached to the real device's observed factory
+        # default (both attached) so the entity shows a sane value before
+        # any write ever happens, instead of "unknown".
+        self._update_attribute(self.AttributeDefs.button_attached.id, True)
+        self._update_attribute(self.AttributeDefs.led_attached.id, True)
+
+    class AttributeDefs(BaseAttributeDefs):
+        """Local, writable hardware-config attributes (no real ZCL Get)."""
+
+        button_attached = ZCLAttributeDef(
+            id=0x0000,
+            type=t.Bool,
+            access="rw",
+            is_manufacturer_specific=True,
+        )
+        led_attached = ZCLAttributeDef(
+            id=0x0001,
+            type=t.Bool,
+            access="rw",
+            is_manufacturer_specific=True,
+        )
+
+    # attribute id -> (c4 wire namespace, log label)
+    _ATTACHED_ATTRS = {
+        0x0000: ("c4.dm.ba", "button_attached"),
+        0x0001: ("c4.dm.lm", "led_attached"),
+    }
 
     class ServerCommandDefs(BaseCommandDefs):
         """Server commands exposed to ZHA UI and service calls."""
@@ -199,21 +258,49 @@ class C4RampCluster(CustomCluster):
             is_manufacturer_specific=True,
         )
 
-        set_button_attached = ZCLCommandDef(
-            id=0x04,
-            schema={
-                "attached": t.uint8_t,
-            },
-            is_manufacturer_specific=True,
-        )
+    # ------------------------------------------------------------------
+    # Attribute overrides — button_attached/led_attached (local-only,
+    # side-effecting: a write sends the wire command then caches locally)
+    # ------------------------------------------------------------------
 
-        set_led_attached = ZCLCommandDef(
-            id=0x05,
-            schema={
-                "attached": t.uint8_t,
-            },
-            is_manufacturer_specific=True,
-        )
+    async def write_attributes(self, attributes, manufacturer=None):
+        device_attrs = {}
+        for attr, value in attributes.items():
+            attr_def = self.find_attribute(attr) if isinstance(attr, str) else None
+            attr_id = attr_def.id if attr_def is not None else attr
+            if attr_id in self._ATTACHED_ATTRS:
+                namespace, label = self._ATTACHED_ATTRS[attr_id]
+                await self._send_attached_flag(namespace, label, bool(value))
+                self._update_attribute(attr_id, bool(value))
+            else:
+                device_attrs[attr] = value
+
+        if device_attrs:
+            return await super().write_attributes(device_attrs, manufacturer=manufacturer)
+        return [[foundation.WriteAttributesStatusRecord(ZCLStatus.SUCCESS)]]
+
+    async def read_attributes(
+        self, attributes, allow_cache=False, only_cache=False, manufacturer=None,
+    ):
+        local, device_attrs = {}, []
+        for attr in attributes:
+            attr_def = self.find_attribute(attr) if isinstance(attr, str) else None
+            attr_id = attr_def.id if attr_def is not None else attr
+            if attr_id in self._ATTACHED_ATTRS:
+                local[attr_id] = self.get(attr_id, True)
+            else:
+                device_attrs.append(attr)
+
+        success, failure = {}, {}
+        if device_attrs:
+            success, failure = await super().read_attributes(
+                device_attrs,
+                allow_cache=allow_cache,
+                only_cache=only_cache,
+                manufacturer=manufacturer,
+            )
+        success.update(local)
+        return success, failure
 
     # ------------------------------------------------------------------
     # Public accessors for other clusters (C4DimmerOnOff)
@@ -259,22 +346,6 @@ class C4RampCluster(CustomCluster):
         """Set both on-ramp and off-ramp times in one call."""
         await self._send_ramp_set(RAMP_IDX_ON, int(on_time_ms))
         await self._send_ramp_set(RAMP_IDX_OFF, int(off_time_ms))
-
-    async def set_button_attached(self, attached):
-        """Set whether the physical button hardware is attached.
-
-        CONFIRMED from a real HC300 controller log: `c4.dm.ba <0|1>`.
-        """
-        await self._send_attached_flag("c4.dm.ba", "button_attached", int(attached))
-
-    async def set_led_attached(self, attached):
-        """Set whether the LED indicator hardware is attached.
-
-        CONFIRMED from a real HC300 controller log: `c4.dm.lm <0|1>` —
-        the same 0/1 the controller's own UI echoed back as
-        <led_attached>0|1</led_attached> after each send.
-        """
-        await self._send_attached_flag("c4.dm.lm", "led_attached", int(attached))
 
     def handle_cluster_request(self, hdr, args, *, dst_addressing=None):
         """Log any unexpected inbound cluster requests."""
@@ -333,11 +404,13 @@ class C4RampCluster(CustomCluster):
     async def _send_attached_flag(self, namespace: str, label: str, attached: int):
         """Send a `0s<seq> <namespace> <0|1>` hardware-attached toggle.
 
-        Shared transport for set_button_attached/set_led_attached — same
-        C4_PROFILE_BUTTON/C4_CLUSTER_ID/EP1->EP1 send as _send_ramp_set,
-        just a single decimal 0/1 payload instead of an indexed hex value,
-        and no local cache to update (no get_*_attached() accessor exists
-        yet — no confirmed Get command was observed for these).
+        Shared transport for the button_attached/led_attached attribute
+        writes (see write_attributes above) — same C4_PROFILE_BUTTON/
+        C4_CLUSTER_ID/EP1->EP1 send as _send_ramp_set, just a single
+        decimal 0/1 payload instead of an indexed hex value. The caller
+        is responsible for updating the local attribute cache; this
+        method only handles the wire transport, since no confirmed Get
+        command exists to read the real value back.
         """
         device = self.endpoint.device
         attached = 1 if attached else 0
