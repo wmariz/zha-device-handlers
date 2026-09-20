@@ -170,7 +170,50 @@ def _xy_to_rgb_hex(x_raw: int, y_raw: int, level_raw: int) -> str:
     return f"{_gamma_correct(r):02x}{_gamma_correct(g):02x}{_gamma_correct(b):02x}"
 
 
-class C4LedColorCluster(CustomCluster, Color):
+class _C4LocalOnlyReadMixin:
+    """read_attributes() that never touches the wire and never delegates
+    to the base Cluster implementation's own allow_cache/only_cache/
+    _CONSTANT_ATTRIBUTES machinery — CONFIRMED WRONG on real hardware:
+    a _CONSTANT_ATTRIBUTES-declared color_mode never actually came back
+    as resolved through `super().read_attributes(..., only_cache=True)`
+    (zigpy's own debug log kept showing it in the "still needs a real
+    read, skipping" bucket, cycle after cycle, across multiple fix
+    attempts), for reasons not cleanly traceable without the exact
+    installed zigpy/zhaquirks version's source open in front of us.
+
+    None of C4LedOnOff/C4LedLevelControl/C4LedColorCluster have any real
+    device-side ZCL backing at all — every attribute they expose is
+    either a constant or a local mirror this quirk maintains via
+    _update_attribute() — so instead of trying to thread that value
+    through the base class's cache logic, this answers every read
+    directly from self.get(), the same already-proven mechanism
+    C4LedColorCluster._level() has used successfully throughout this
+    entire project to read a sibling cluster's cached value. Mirrors
+    c4_basic_cluster.py's C4BasicCluster.read_attributes() in preserving
+    each requested attribute's original key type (str name or int id) —
+    ZHA's own light platform reads by NAME (see this module's docstring).
+    """
+
+    async def read_attributes(
+        self, attributes, allow_cache=False, only_cache=False, manufacturer=None,
+    ):
+        success: dict = {}
+        failure: dict = {}
+        for attr in attributes:
+            try:
+                attr_def = self.find_attribute(attr)
+            except KeyError:
+                failure[attr] = foundation.Status.UNSUPPORTED_ATTRIBUTE
+                continue
+            value = self.get(attr_def.id, None)
+            if value is not None:
+                success[attr] = value
+            else:
+                failure[attr] = foundation.Status.UNSUPPORTED_ATTRIBUTE
+        return success, failure
+
+
+class C4LedColorCluster(_C4LocalOnlyReadMixin, CustomCluster, Color):
     """Color cluster: translates ZCL CIE xy (+ the sibling LevelControl's
     brightness, as Y) into the confirmed c4.dm.l<button>o <rrggbb> wire
     command.
@@ -193,31 +236,16 @@ class C4LedColorCluster(CustomCluster, Color):
         super().__init__(*args, **kwargs)
         # A reasonable default xy (roughly white) so the entity has a
         # real starting color instead of "unknown" before the first
-        # move_to_color.
+        # move_to_color. color_mode is also seeded directly (belt and
+        # suspenders alongside the _CONSTANT_ATTRIBUTES declaration
+        # above) since self.get() checks _CONSTANT_ATTRIBUTES first
+        # anyway — see _C4LocalOnlyReadMixin.
         self._update_attribute(self.AttributeDefs.current_x.id, 21845)
         self._update_attribute(self.AttributeDefs.current_y.id, 21845)
-        # CONFIRMED via a real log capture: _CONSTANT_ATTRIBUTES above
-        # does NOT satisfy a read_attributes() call for color_mode —
-        # zigpy's own debug log showed it landing in the "still needs a
-        # real read, skipping" bucket instead of being answered from the
-        # constant. Seeding the cache directly makes the allow_cache=True
-        # read_attributes() override below actually find it.
         self._update_attribute(
             self.AttributeDefs.color_mode.id, Color.ColorMode.X_and_Y,
         )
         self._last_move_to_color_time = 0.0
-
-    async def read_attributes(
-        self, attributes, allow_cache=False, only_cache=False, manufacturer=None,
-    ):
-        """Always answer from the local cache — see this module's
-        docstring for why a real over-the-air read would just time out,
-        and why that matters for ZHA's slow periodic color-attribute
-        poll.
-        """
-        return await super().read_attributes(
-            attributes, allow_cache=True, only_cache=True, manufacturer=manufacturer,
-        )
 
     def _level(self) -> int:
         level_cluster = self.endpoint.in_clusters.get(LevelControl.cluster_id)
@@ -338,7 +366,7 @@ class C4BottomLedOffColorCluster(C4LedColorCluster):
     _C4_LABEL = "bottom_led_off_color"
 
 
-class C4LedLevelControl(CustomCluster, LevelControl):
+class C4LedLevelControl(_C4LocalOnlyReadMixin, CustomCluster, LevelControl):
     """Brightness for an LED-color light — doubles as CIE "Y".
 
     Not forwarded to the device as its own command; changing it just
@@ -352,20 +380,6 @@ class C4LedLevelControl(CustomCluster, LevelControl):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._update_attribute(self.AttributeDefs.current_level.id, 254)
-
-    async def read_attributes(
-        self, attributes, allow_cache=False, only_cache=False, manufacturer=None,
-    ):
-        """Always answer from the local cache — see C4LedColorCluster's
-        own read_attributes() for why: this cluster has no real
-        on-device ZCL backing either, and zha's light platform reads
-        OnOff/LevelControl/Color sequentially in one async_update() —
-        a real over-the-air read here would stall (or fail) before
-        that call ever reaches the Color cluster's own fixed read.
-        """
-        return await super().read_attributes(
-            attributes, allow_cache=True, only_cache=True, manufacturer=manufacturer,
-        )
 
     def _color_cluster(self):
         return self.endpoint.in_clusters.get(Color.cluster_id)
@@ -398,7 +412,7 @@ class C4LedLevelControl(CustomCluster, LevelControl):
         return self._SUCCESS
 
 
-class C4LedOnOff(CustomCluster, OnOff):
+class C4LedOnOff(_C4LocalOnlyReadMixin, CustomCluster, OnOff):
     """OnOff for an LED-color light: on/off just drive brightness to
     254/0 and resend the current color — brightness=0 already yields
     black on the wire, Control4's own "off" convention for these LEDs,
@@ -413,16 +427,6 @@ class C4LedOnOff(CustomCluster, OnOff):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._update_attribute(self.AttributeDefs.on_off.id, True)
-
-    async def read_attributes(
-        self, attributes, allow_cache=False, only_cache=False, manufacturer=None,
-    ):
-        """Always answer from the local cache — see C4LedColorCluster's
-        own read_attributes() for why.
-        """
-        return await super().read_attributes(
-            attributes, allow_cache=True, only_cache=True, manufacturer=manufacturer,
-        )
 
     def _level_cluster(self):
         return self.endpoint.in_clusters.get(LevelControl.cluster_id)
