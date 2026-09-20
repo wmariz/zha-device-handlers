@@ -1,9 +1,9 @@
 # Control4 ZHA Quirks
 
 ZHA device handler quirks for Control4 Zigbee devices. These quirks allow
-Control4 dimmers, switches, fan controllers, outlets, scene controllers, and
-IO modules to work with Home Assistant's ZHA integration — no Control4
-controller required.
+Control4 dimmers, switches, fan controllers, outlets, scene controllers,
+keypads, remotes, and IO modules to work with Home Assistant's ZHA
+integration — no Control4 controller required.
 
 > **Disclaimer:** These quirks were developed through independent reverse
 > engineering of Control4's proprietary Zigbee protocol. They are not official
@@ -16,7 +16,7 @@ controller required.
 
 | Model | Type | HA Entities |
 |-------|------|-------------|
-| C4-APD120 | Adaptive Phase Dimmer | Light (dimmable) |
+| C4-APD120 / LDZ-101 / LDZ-102 | Adaptive Phase Dimmer | Light (dimmable), 2 hardware-config switches (button/LED attached), 4 per-button RGB LED lights (top/bottom, on/off-color) |
 | C4-4SF120 | 4-Speed Fan Controller | Fan (off / low / med-low / med-high / high) |
 | C4-SW120277 | On/Off Wall Switch | Switch |
 | C4-KC120277 | 8-Button Scene Controller | 8 event entities (press, hold, release) |
@@ -24,6 +24,7 @@ controller required.
 | loz-5d1-w | Dual Dimming Outlet | 2 lights (dimmable, one per outlet) |
 | C4-Z2IO-ZP | Zigbee IO Module | 2 switches (relays), 5 binary sensors (contacts), temperature, humidity |
 | C4-SR260 | IR/Zigbee Remote (50 buttons + LCD) | 50 event entities (press, release), battery |
+| KPZ-6B1 | 6-Button Zigbee Keypad | 6 binary sensors (press/release), 6 per-button RGB LED lights (current color) |
 
 > **loz-5d1-w note:** outlet 1 (EP1) sends real ZCL Level Control frames,
 > the same way the confirmed C4-APD120 dimmer does. Outlet 2 (synthetic
@@ -158,7 +159,7 @@ keypads:**
 | Reset defaults | 9 x top, 4 x bottom, 9 x top |
 | Leave mesh + factory reset | 13 x top, 4 x bottom, 13 x top |
 
-**6-button keypads (e.g. C4-KC120277):**
+**6-button keypads (e.g. C4-KC120277, KPZ-6B1):**
 
 | Action | Sequence |
 |--------|----------|
@@ -259,6 +260,34 @@ button down).
 > time, consistent with a phase dimmer's soft-start circuitry; turning off
 > reasonably tracks whatever transition time is actually requested. Neither
 > is a bug in this quirk.
+
+**Hardware-config switches** — `button_attached`/`led_attached`, two
+Switch entities (virtual `OnOff`-cluster endpoints 200/201,
+`c4_attached_switch.py`) matching the LDZ-101's own physical DIP-style
+config settings. Confirmed working via a real device ACK (`0r<seq> 000`)
+in an HA debug log.
+
+**Per-button RGB LED lights** — 4 Light entities (`c4_led_rgb.py`,
+virtual endpoints 202/203 "top"/"bottom" on-color, 204/205 "top"/"bottom"
+off-color), driven while `led_attached` is off (otherwise the device's
+own built-in logic drives the LEDs). Getting these entities to appear at
+all — and then to pick the right color model — took three wrong turns
+on real hardware before landing on the working design: a bare
+`OnOff`+`Color` pair gets claimed by the generic Switch platform instead
+of Light; `Color` needs a sibling `LevelControl` cluster before ZHA's
+light-platform discovery will treat the endpoint as a light at all
+(brightness then doubles as the color conversion's Y/brightness
+component, so 0% naturally sends black — Control4's own "off"
+convention for these LEDs); and this `zha` version's light platform
+only ever checks the `XY_attributes` color-capability bit, with no
+Hue/Saturation branch anywhere in it, so `Color` must advertise XY and
+implement `move_to_color` (CIE 1931 xy), not
+`move_to_hue_and_saturation`. See `c4_led_rgb.py`'s own module docstring
+for the full attempt-by-attempt history, including a race condition
+where picking a color sent two wire commands ~150ms apart (the correct
+one, then a stale one) — fixed with a timestamp-suppression window. A
+"Set All LEDs" HA script (all four entities, one RGB) is included — see
+[LED Configuration](#led-configuration) below.
 
 ### C4-4SF120 Fan Controller
 
@@ -491,19 +520,52 @@ garage door use.
 The external temperature probe returns −40 °C as a sentinel when no probe is
 connected. The quirk handles this automatically.
 
+### KPZ-6B1 6-Button Keypad
+
+Exposes 6 binary_sensor entities (press/release, one per button) and 6
+per-button RGB light entities (current color). Full protocol details,
+including a real bug found by pulling the compiled Control4 driver off a
+physical controller's recovery partition, are in
+[`documentation/control4-kpz6b1-keypad-protocol.md`](documentation/control4-kpz6b1-keypad-protocol.md).
+
+**Button events:** each button fires `press` immediately on press-down,
+then one of `remote_button_short_press` / `_double_press` /
+`_triple_press` / `_quadruple_press` (a resolved click) or
+`remote_button_long_press` / `_long_release` (holding the button down) —
+the same action set as the APD120 dimmer's own button events.
+
+**LED colors:** each button's light entity sets its own current color via
+`light.turn_on`. For setting multiple buttons at once, use
+`C4KeypadAllLedCluster`'s two cluster commands (endpoint 197, cluster
+`0xFC48`) instead of six separate `light.turn_on` calls — see the two
+ready-made scripts below.
+
+**"Keypad Managed" is force-disabled automatically** the first time the
+device is seen after pairing (and again after any HA/ZHA restart, since
+the guard is per-session). This is a fix, not a configurable option: an
+earlier version of this quirk force-*enabled* it under the mistaken
+belief that "managed" meant "let ZHA manage the LED" — enabling it
+actually puts the device into a "Push Color"/"Release Color" mode that
+flashes and reverts the LED on every physical touch, discarding whatever
+color was set via a script or the light entity. See the protocol doc
+linked above for the full story if this behavior ever needs revisiting.
+
 ## LED Configuration
 
-Control4 dimmers, switches, and scene controllers have per-button RGB LED
-indicators. You can customize the on-color, off-color, and behavior of each
-LED using the included Home Assistant scripts.
+Control4 dimmers, switches, scene controllers, and keypads have per-button
+RGB LED indicators. Which script to use depends on the device — each
+device family speaks its own LED protocol, so a script written for one
+will not work on another.
 
-### Installing the LED Scripts
+### `control4_led_scripts.yaml` — C4LEDCluster devices (`c4.dmx.led`)
 
-Copy `ha-scripts/control4_led_scripts.yaml` into your Home Assistant scripts
-configuration, or paste its contents into **Settings → Automations & Scenes →
-Scripts → Add Script → Edit in YAML**.
-
-### Available Scripts
+This is the KC120277 scene-controller's own protocol (`C4LEDCluster`,
+cluster `0xFC43`). It is **very likely non-functional on the APD120/
+LDZ-101 dimmer's or the KPZ-6B1 keypad's own LEDs** — those devices speak
+a different, per-device protocol (see below). Copy
+`ha-scripts/control4_led_scripts.yaml` into your Home Assistant scripts
+configuration, or paste its contents into **Settings → Automations &
+Scenes → Scripts → Add Script → Edit in YAML**.
 
 - **control4_set_led_color** — Set the on/off colors for a single button's
   LED. Takes a target device, button ID (1–12), and two RGB color values.
@@ -520,32 +582,58 @@ Scripts → Add Script → Edit in YAML**.
 Colors are specified as 24-bit RGB hex values (e.g., `0x0000FF` for blue,
 `0xFF0000` for red, `0x000000` for off).
 
+### `control4_ldz101_led_rgb_scripts.yaml` — LDZ-101 dimmer *or* KPZ-6B1 keypad
+
+**`control4_ldz101_set_all_leds`** — a single script that targets either
+an APD120/LDZ-101 dimmer's 4 LED light entities (top/bottom, on/off-color)
+or a KPZ-6B1 keypad's 6 buttons, picking the right method automatically
+based on which device you select (the device picker only allows these
+two models). One RGB color field, applied to every LED entity/button on
+the chosen device. For the dimmer this replicates Control4's own
+SET_ALL_LED command exactly; for the keypad it calls
+`C4KeypadAllLedCluster.set_all_colors`.
+
+### `control4_kpz6b1_individual_leds_script.yaml` — KPZ-6B1 keypad only
+
+**`control4_kpz6b1_set_individual_leds`** — device picker restricted to
+KPZ-6B1 keypads, with one color field per button (6 total), calling
+`C4KeypadAllLedCluster.set_individual_colors` to set all 6 to their own
+distinct color in a single wire frame.
+
 ## Architecture
 
 The quirks are organized as follows:
 
 ```
 control4/
-├── control4_dimmer.py           C4-APD120 quirk
+├── control4_dimmer.py           C4-APD120 / LDZ-101 / LDZ-102 quirk
 ├── control4_fan.py              C4-4SF120 quirk
 ├── control4_switch.py           C4-SW120277 quirk
 ├── control4_scene_controller.py C4-KC120277 quirk
 ├── control4_outlet.py           loz-5s1-w quirk
+├── control4_outlet_dimmer.py    loz-5d1-w quirk (dual dimming outlet)
 ├── control4_z2io_zp.py          C4-Z2IO-ZP quirk
 ├── control4_remote.py           C4-SR260 quirk
+├── control4_keypad.py           KPZ-6B1 quirk
 ├── c4_z2io_zp.py                Z2IO-ZP state machine & protocol handler
 ├── c4_basic_cluster.py          Model/manufacturer resolution for C4 devices
-├── c4_button_cluster.py         Button event parsing & state sync
+├── c4_button_cluster.py         Button event parsing & state sync (all devices, incl. KPZ-6B1)
 ├── c4_display_cluster.py        SR260 LCD-message cluster (0xFC47)
-├── c4_led_cluster.py            LED color/mode control (cluster 0xFC43)
+├── c4_led_cluster.py            LED color/mode control (cluster 0xFC43, KC120277 protocol)
+├── c4_led_rgb.py                Per-button RGB light entities (APD120/LDZ-101 dimmer; shared base classes reused by the keypad)
+├── c4_keypad_led_rgb.py         KPZ-6B1 per-button RGB lights + C4KeypadAllLedCluster (0xFC48)
+├── c4_attached_switch.py        button_attached/led_attached hardware-config switches (dimmer)
+├── c4_ramp_cluster.py           Transition-time / hardware-config cluster (dimmer provisioning)
 ├── c4_helpers.py                Constants, frame builders, shared utilities
 ├── c4_hooks.py                  Monkey-patches for quirk discovery & routing
 ├── ha-scripts/
-│   └── control4_led_scripts.yaml
+│   ├── control4_led_scripts.yaml                  KC120277 (C4LEDCluster) LED scripts
+│   ├── control4_ldz101_led_rgb_scripts.yaml        "Set All LEDs" — LDZ-101 dimmer or KPZ-6B1 keypad
+│   └── control4_kpz6b1_individual_leds_script.yaml "Set Individual LEDs" — KPZ-6B1 only
 ├── blueprints/                  HA automation blueprints
 │   ├── c4_sr260_media_player.yaml      SR260 → media-player + remote
 │   └── c4_sr260_menu_dispatcher.yaml   Show a menu, dispatch by selection
-└── documentation/               Protocol documentation (from packet captures)
+└── documentation/               Protocol documentation (from packet captures, HA/ZHA logs, and a real driver binary)
 ```
 
 ### How It Works
