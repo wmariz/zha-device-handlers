@@ -67,6 +67,27 @@ real move_to_color last landed, and C4LedOnOff's on() skips its resend
 if one landed within the last second, since it already sent the right
 value.
 
+CONFIRMED via zha's own source (zha.application.platforms.light):
+a light entity's Color-cluster attributes (current_x/current_y/
+color_mode) are read back into the HA UI ONLY by a periodic poll —
+every 45-75 MINUTES — never by an event listener like brightness/on-off
+get. That poll always passes allow_cache=False (real safe_read()
+call), meaning it normally issues a genuine over-the-air ZCL Read
+Attributes request. This cluster has no real device-side ZCL backing
+at all (color state is purely a local mirror this quirk maintains), so
+without the read_attributes() override below, that periodic read would
+just time out silently — and any code that updates current_x/current_y
+some way other than through this cluster's own move_to_color() (e.g.
+c4_keypad_led_rgb.C4KeypadAllLedCluster's set_all_colors/
+set_individual_colors, which write straight to the wire and only poke
+the cache afterwards) has no way to get the new color into the HA UI
+promptly: nothing will show it until the next slow poll happens to
+land, if ever. Fixed by forcing read_attributes() to always answer
+from the local cache (never the wire) — safe, since there's nothing
+real to read from anyway — which then lets external code force an
+immediate, wire-free re-poll via the "homeassistant.update_entity"
+service right after updating the cache.
+
 Exported:
   C4LedOnOff                 — shared OnOff cluster for any LED endpoint
   C4LedLevelControl          — shared LevelControl cluster (brightness = "Y")
@@ -154,6 +175,8 @@ class C4LedColorCluster(CustomCluster, Color):
     _CONSTANT_ATTRIBUTES = {
         Color.AttributeDefs.color_capabilities.id:
             Color.ColorCapabilities.XY_attributes,
+        Color.AttributeDefs.color_mode.id:
+            Color.ColorMode.X_and_Y,
     }
 
     _C4_NAMESPACE: str = ""
@@ -167,6 +190,18 @@ class C4LedColorCluster(CustomCluster, Color):
         self._update_attribute(self.AttributeDefs.current_x.id, 21845)
         self._update_attribute(self.AttributeDefs.current_y.id, 21845)
         self._last_move_to_color_time = 0.0
+
+    async def read_attributes(
+        self, attributes, allow_cache=False, only_cache=False, manufacturer=None,
+    ):
+        """Always answer from the local cache — see this module's
+        docstring for why a real over-the-air read would just time out,
+        and why that matters for ZHA's slow periodic color-attribute
+        poll.
+        """
+        return await super().read_attributes(
+            attributes, allow_cache=True, only_cache=True, manufacturer=manufacturer,
+        )
 
     def _level(self) -> int:
         level_cluster = self.endpoint.in_clusters.get(LevelControl.cluster_id)
