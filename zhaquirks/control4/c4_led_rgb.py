@@ -12,11 +12,11 @@ which is the KC120277 scene-controller keypad's protocol and is very
 likely non-functional for this device's own LEDs — hence a separate,
 dedicated module rather than extending that one.
 
-Per the user's request, only the "on" color is exposed for now (the LED
-is only driven this way while led_attached is off — see
-c4_attached_switch.py — otherwise the device's own built-in logic drives
-it); the confirmed off-color commands (l0f/l1f) are not wired to
-anything yet.
+Per the user's request, the "on" color is exposed first (the LED is
+only driven this way while led_attached is off — see
+c4_attached_switch.py — otherwise the device's own built-in logic
+drives it), then the "off" color the same way once l0f/l1f were also
+confirmed — four light entities total, one per (button, on/off) pair.
 
 CONFIRMED WRONG on real hardware: a first version gave each button a
 virtual endpoint with just OnOff + Color, expecting ZHA's light
@@ -54,11 +54,14 @@ corrected sRGB pipeline (the same formula used by Philips Hue and
 widely published) to get an rrggbb hex triplet for the wire command.
 
 Exported:
-  C4LedOnOff              — shared OnOff cluster for either LED endpoint
-  C4LedLevelControl       — shared LevelControl cluster (brightness = "Y")
-  C4TopLedColorCluster    — top LED color cluster    (c4.dm.l0o, CONFIRMED)
-  C4BottomLedColorCluster — bottom LED color cluster (c4.dm.l1o, CONFIRMED)
-  LED_COLOR_EP_MAP        — {"top": ep_id, "bottom": ep_id}
+  C4LedOnOff                 — shared OnOff cluster for any LED endpoint
+  C4LedLevelControl          — shared LevelControl cluster (brightness = "Y")
+  C4TopLedColorCluster       — top LED on-color cluster     (c4.dm.l0o, CONFIRMED)
+  C4BottomLedColorCluster    — bottom LED on-color cluster  (c4.dm.l1o, CONFIRMED)
+  C4TopLedOffColorCluster    — top LED off-color cluster    (c4.dm.l0f, CONFIRMED)
+  C4BottomLedOffColorCluster — bottom LED off-color cluster (c4.dm.l1f, CONFIRMED)
+  LED_COLOR_EP_MAP           — {"top": ep_id, "bottom": ep_id} (on-color)
+  LED_OFF_COLOR_EP_MAP       — {"top": ep_id, "bottom": ep_id} (off-color)
 """
 
 import logging
@@ -79,8 +82,11 @@ from c4_helpers import C4_CLUSTER_ID, C4_PROFILE_BUTTON, _build_c4_frame, next_c
 
 _LOGGER = logging.getLogger(__name__)
 
-# top/bottom LED color light — one virtual endpoint each
+# top/bottom LED on-color light — one virtual endpoint each
 LED_COLOR_EP_MAP = {"top": 202, "bottom": 203}
+
+# top/bottom LED off-color light — one virtual endpoint each
+LED_OFF_COLOR_EP_MAP = {"top": 204, "bottom": 205}
 
 
 def _gamma_correct(c: float) -> int:
@@ -231,6 +237,20 @@ class C4BottomLedColorCluster(C4LedColorCluster):
 
     _C4_NAMESPACE = "c4.dm.l1o"
     _C4_LABEL = "bottom_led_color"
+
+
+class C4TopLedOffColorCluster(C4LedColorCluster):
+    """Top button LED off-color — CONFIRMED c4.dm.l0f wire command."""
+
+    _C4_NAMESPACE = "c4.dm.l0f"
+    _C4_LABEL = "top_led_off_color"
+
+
+class C4BottomLedOffColorCluster(C4LedColorCluster):
+    """Bottom button LED off-color — CONFIRMED c4.dm.l1f wire command."""
+
+    _C4_NAMESPACE = "c4.dm.l1f"
+    _C4_LABEL = "bottom_led_off_color"
 
 
 class C4LedLevelControl(CustomCluster, LevelControl):

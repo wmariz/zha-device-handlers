@@ -6,48 +6,114 @@
 # endpoint 3 — the KC120277 scene-controller's protocol, very likely
 # non-functional on the LDZ-101 dimmer's own LEDs), these scripts target the
 # real per-button RGB "light" entities this quirk exposes (c4_led_rgb.py,
-# endpoints 202/203), which speak the LDZ-101's own confirmed
-# c4.dm.l0o/c4.dm.l1o wire protocol.
+# endpoints 202-205), which speak the LDZ-101's own confirmed
+# c4.dm.l0o/l0f/l1o/l1f wire protocol.
 #
 # CONFIRMED from two real HC300 controller logs: Control4's own SET_ALL_LED
-# command sets FOUR wire commands at once — c4.dm.l0o/l0f (top on/off-color)
-# and c4.dm.l1o/l1f (bottom on/off-color) — all to the same RGB. This quirk
-# only exposes the two "on"-color commands as light entities so far (per an
-# explicit scoping decision — the LED only follows these commands while
-# led_attached is off; see c4_attached_switch.py), so
-# control4_ldz101_set_all_leds below only sets the two on-color entities.
-# The off-color commands (l0f/l1f) are confirmed on the wire but not wired to
-# any entity or service yet.
+# command sets all four wire commands — c4.dm.l0o/l0f (top on/off-color) and
+# c4.dm.l1o/l1f (bottom on/off-color) — to the exact same RGB in one action.
 #
 # Prerequisites:
 #   - ZHA integration with the control4 quirks branch loaded
-#   - The two RGB light entities from c4_led_rgb.py present on the target
-#     device (endpoints 202 "top", 203 "bottom")
+#   - The four RGB light entities from c4_led_rgb.py present on the target
+#     device (endpoints 202 "top on", 203 "bottom on", 204 "top off",
+#     205 "bottom off")
 
 
 # ==========================================================================
-# Set All LEDs (on-color) — both buttons, one RGB
+# Set All LEDs — both buttons, on-color AND off-color, one RGB
 # ==========================================================================
 control4_ldz101_set_all_leds:
-  alias: "Control4 LDZ-101: Set All LEDs (on-color)"
+  alias: "Control4 LDZ-101: Set All LEDs"
   description: >-
-    Set both button LEDs' "on" color to the same RGB in one call —
-    replicates the on-color half of Control4's own SET_ALL_LED command.
-    Pick the top and bottom LED light entities for one specific dimmer,
-    then a color.
+    Set all four button LED light entities (top/bottom, on-color and
+    off-color) to the same RGB in one call — replicates Control4's own
+    SET_ALL_LED command exactly. Pick the four LED light entities for
+    one specific dimmer, then a color.
+  icon: mdi:led-strip-variant
+  mode: single
+  fields:
+    top_led_on:
+      name: Top LED (on-color) light entity
+      description: "The dimmer's top-button on-color LED light entity (endpoint 202)"
+      required: true
+      selector:
+        entity:
+          domain: light
+    bottom_led_on:
+      name: Bottom LED (on-color) light entity
+      description: "The dimmer's bottom-button on-color LED light entity (endpoint 203)"
+      required: true
+      selector:
+        entity:
+          domain: light
+    top_led_off:
+      name: Top LED (off-color) light entity
+      description: "The dimmer's top-button off-color LED light entity (endpoint 204)"
+      required: true
+      selector:
+        entity:
+          domain: light
+    bottom_led_off:
+      name: Bottom LED (off-color) light entity
+      description: "The dimmer's bottom-button off-color LED light entity (endpoint 205)"
+      required: true
+      selector:
+        entity:
+          domain: light
+    color:
+      name: Color
+      description: "LED color for all four entities"
+      required: true
+      default: [255, 0, 0]
+      selector:
+        color_rgb:
+  sequence:
+    - service: light.turn_on
+      target:
+        entity_id: "{{ top_led_on }}"
+      data:
+        rgb_color: "{{ color }}"
+    - service: light.turn_on
+      target:
+        entity_id: "{{ bottom_led_on }}"
+      data:
+        rgb_color: "{{ color }}"
+    - service: light.turn_on
+      target:
+        entity_id: "{{ top_led_off }}"
+      data:
+        rgb_color: "{{ color }}"
+    - service: light.turn_on
+      target:
+        entity_id: "{{ bottom_led_off }}"
+      data:
+        rgb_color: "{{ color }}"
+
+
+# ==========================================================================
+# Set All LEDs (on-color only) — both buttons, one RGB
+# ==========================================================================
+control4_ldz101_set_all_leds_on_color:
+  alias: "Control4 LDZ-101: Set All LEDs (on-color only)"
+  description: >-
+    Set just the two on-color LED light entities (top/bottom) to the
+    same RGB — the half of SET_ALL_LED that matters while the dimmer is
+    on. Pick the top and bottom on-color LED light entities, then a
+    color.
   icon: mdi:led-strip-variant
   mode: single
   fields:
     top_led:
-      name: Top LED light entity
-      description: "The dimmer's top-button LED light entity (endpoint 202)"
+      name: Top LED (on-color) light entity
+      description: "The dimmer's top-button on-color LED light entity (endpoint 202)"
       required: true
       selector:
         entity:
           domain: light
     bottom_led:
-      name: Bottom LED light entity
-      description: "The dimmer's bottom-button LED light entity (endpoint 203)"
+      name: Bottom LED (on-color) light entity
+      description: "The dimmer's bottom-button on-color LED light entity (endpoint 203)"
       required: true
       selector:
         entity:

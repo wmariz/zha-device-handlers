@@ -242,8 +242,12 @@ History:
 
   Bottom LED (c4.dm.l1o/l1f) and top LED off-color (c4.dm.l0f) are now
   ALSO CONFIRMED, via a second, cleanly-spaced Composer capture — all
-  four combos ACKed on the wire. Only the "on" color is wired to an
-  entity for now, per the user's original request.
+  four combos ACKed on the wire. Following up, the user asked for the
+  off-color entities too: two more virtual endpoints
+  (LED_OFF_COLOR_EP_MAP: 204 "top", 205 "bottom" — c4_led_rgb.py),
+  identical in structure to the on-color pair, just targeting
+  c4.dm.l0f/l1f instead. Four RGB light entities total now — one per
+  (button, on/off) pair.
 """
 
 import logging
@@ -309,10 +313,13 @@ from c4_attached_switch import (
 )
 from c4_led_rgb import (
     LED_COLOR_EP_MAP,
+    LED_OFF_COLOR_EP_MAP,
     C4LedOnOff,
     C4LedLevelControl,
     C4TopLedColorCluster,
     C4BottomLedColorCluster,
+    C4TopLedOffColorCluster,
+    C4BottomLedOffColorCluster,
 )
 from c4_hooks import _C4_MODEL_QUIRK_MAP
 
@@ -768,6 +775,21 @@ class Control4APD120Dimmer(CustomDevice):
                 PROFILE_ID:      zha.PROFILE_ID,
                 DEVICE_TYPE:     zha.DeviceType.COLOR_DIMMABLE_LIGHT,
                 INPUT_CLUSTERS:  [C4LedOnOff, C4LedLevelControl, C4BottomLedColorCluster],
+                OUTPUT_CLUSTERS: [],
+            },
+            # Virtual per-button LED off-color endpoints — same pattern
+            # as the on-color ones above, targeting the confirmed
+            # c4.dm.l0f/l1f wire commands instead.
+            LED_OFF_COLOR_EP_MAP["top"]: {
+                PROFILE_ID:      zha.PROFILE_ID,
+                DEVICE_TYPE:     zha.DeviceType.COLOR_DIMMABLE_LIGHT,
+                INPUT_CLUSTERS:  [C4LedOnOff, C4LedLevelControl, C4TopLedOffColorCluster],
+                OUTPUT_CLUSTERS: [],
+            },
+            LED_OFF_COLOR_EP_MAP["bottom"]: {
+                PROFILE_ID:      zha.PROFILE_ID,
+                DEVICE_TYPE:     zha.DeviceType.COLOR_DIMMABLE_LIGHT,
+                INPUT_CLUSTERS:  [C4LedOnOff, C4LedLevelControl, C4BottomLedOffColorCluster],
                 OUTPUT_CLUSTERS: [],
             },
         },
