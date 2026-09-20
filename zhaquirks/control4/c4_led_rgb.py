@@ -196,6 +196,15 @@ class C4LedColorCluster(CustomCluster, Color):
         # move_to_color.
         self._update_attribute(self.AttributeDefs.current_x.id, 21845)
         self._update_attribute(self.AttributeDefs.current_y.id, 21845)
+        # CONFIRMED via a real log capture: _CONSTANT_ATTRIBUTES above
+        # does NOT satisfy a read_attributes() call for color_mode —
+        # zigpy's own debug log showed it landing in the "still needs a
+        # real read, skipping" bucket instead of being answered from the
+        # constant. Seeding the cache directly makes the allow_cache=True
+        # read_attributes() override below actually find it.
+        self._update_attribute(
+            self.AttributeDefs.color_mode.id, Color.ColorMode.X_and_Y,
+        )
         self._last_move_to_color_time = 0.0
 
     async def read_attributes(
