@@ -131,22 +131,33 @@ async def _force_light_refresh(device, ep_id: int):
     """
     hass = _get_hass(device)
     if hass is None:
+        _LOGGER.warning(
+            "C4 keypad_all_led: could not force-refresh endpoint %d — "
+            "_get_hass() returned None (no hass/zha_gateway.hass found on "
+            "device.application)",
+            ep_id,
+        )
         return
     try:
         from homeassistant.helpers import entity_registry as er
         unique_id = f"{device.ieee}-{ep_id}"
         entity_id = er.async_get(hass).async_get_entity_id("light", "zha", unique_id)
         if entity_id is None:
-            _LOGGER.debug(
-                "C4 keypad_all_led: no light entity found for unique_id=%s",
+            _LOGGER.warning(
+                "C4 keypad_all_led: no light entity found for unique_id=%s "
+                "— cannot force-refresh",
                 unique_id,
             )
             return
         await hass.services.async_call(
             "homeassistant", "update_entity", {"entity_id": entity_id},
         )
+        _LOGGER.info(
+            "C4 keypad_all_led: forced refresh of %s (endpoint %d)",
+            entity_id, ep_id,
+        )
     except Exception as e:
-        _LOGGER.debug(
+        _LOGGER.warning(
             "C4 keypad_all_led: failed to force-refresh endpoint %d — %s",
             ep_id, e,
         )
