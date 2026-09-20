@@ -1375,30 +1375,40 @@ class C4KeypadButtonCluster(C4ButtonCluster):
         device = self.endpoint.device
         if not getattr(device, "_c4_kpz_managed_sent", False):
             device._c4_kpz_managed_sent = True
-            asyncio.ensure_future(self._ensure_all_buttons_managed())
+            asyncio.ensure_future(self._ensure_all_buttons_unmanaged())
         super().handle_message(hdr, args)
 
-    async def _ensure_all_buttons_managed(self):
-        """Force all 6 buttons to "Keypad Managed" and keep them that way.
+    async def _ensure_all_buttons_unmanaged(self):
+        """Force all 6 buttons OUT of "Keypad Managed" and keep them that way.
 
         CONFIRMED c4.kp.llm <btn_single_hex_digit> <00|01> from six
         separate captured commands (one per button) toggling the
-        "Keypad Managed" checkbox in Composer. This only makes sense
-        inside Control4's own ecosystem (a plain Zigbee/ZHA install has
-        no controller to defer to), so rather than expose it as a
-        switch entity (an earlier, since-reverted design), we send it
-        once per device on first contact and leave it there — matching
-        the user's own framing: "devemos garantir que os 6 botões sejam
-        configurados como keypad managed e assim permaneça."
+        "Keypad Managed" checkbox in Composer.
+
+        CONFIRMED WRONG once (real hardware): this used to force
+        managed=01, on the assumption that "Keypad Managed" meant "let
+        an external controller manage this LED" — the natural reading
+        given no Control4 controller is present in a plain ZHA install.
+        A real Composer capture of the LED property panel disproved
+        that: toggling "Keypad Managed" doesn't just change who's in
+        charge, it changes what the two color properties MEAN — off,
+        they're "On Color"/"Off Color" (a static color tied to a bound
+        device's state); on, they become "Push Color"/"Release Color"
+        (a momentary flash while held, reverting on release). Forcing
+        managed=01 therefore put every button into the exact mode that
+        reverts any color set via c4.kp.lv the instant it's pressed —
+        this was self-inflicted, not inherent firmware behavior. Fixed
+        by forcing managed=00 instead, which should keep whatever color
+        was last set via lv/lo/lf static across physical presses.
         """
         device = self.endpoint.device
         for btn_id in KPZ6B1_BUTTON_MAP:
             seq = next_c4_seq(device)
-            cmd = f"0s{seq:04x} c4.kp.llm {btn_id:x} 01"
+            cmd = f"0s{seq:04x} c4.kp.llm {btn_id:x} 00"
             frame = _build_c4_frame(seq, cmd)
             _LOGGER.info(
                 "C4 keypad (endpoint %d): forcing button %d to keypad-"
-                "managed — cmd: %s",
+                "unmanaged — cmd: %s",
                 self.endpoint.endpoint_id, btn_id, cmd,
             )
             try:
@@ -1413,7 +1423,7 @@ class C4KeypadButtonCluster(C4ButtonCluster):
             except Exception as e:
                 _LOGGER.warning(
                     "C4 keypad (endpoint %d): failed to set button %d "
-                    "keypad-managed — %s",
+                    "keypad-unmanaged — %s",
                     self.endpoint.endpoint_id, btn_id, e,
                 )
             await asyncio.sleep(C4_PROVISION_DELAY)

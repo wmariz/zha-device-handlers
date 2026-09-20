@@ -60,15 +60,26 @@ genuine "SET_ALL_LED_COLOR"/"SET_LED_COLOR" Composer script):
                                captured commands, one per button — note
                                the button index here is a single
                                UNPADDED hex digit "0".."5", unlike lv's
-                               zero-padded "00".."05"). This setting only
-                               makes sense inside Control4's own
-                               ecosystem, so rather than exposing it as a
-                               switch entity (an earlier, since-reverted
-                               design — see c4_button_cluster.py's
-                               C4KeypadButtonCluster.handle_message) all
-                               6 buttons are force-set to "managed" once
-                               per device automatically on first contact,
-                               and left there.
+                               zero-padded "00".."05"). CONFIRMED WRONG
+                               once: this used to force every button to
+                               managed=01 automatically, on the
+                               assumption "managed" meant "an external
+                               controller drives this LED" — the wrong
+                               reading. A real Composer LED-properties
+                               panel capture showed the checkbox instead
+                               changes what the two color properties
+                               MEAN: unmanaged, they're "On Color"/
+                               "Off Color" (a static color tied to a
+                               bound device's state); managed, they
+                               become "Push Color"/"Release Color" (a
+                               momentary flash while held, reverting on
+                               release) — exactly the flash-then-revert
+                               bug seen on real hardware. Fixed by
+                               forcing managed=00 instead (see
+                               c4_button_cluster.py's
+                               C4KeypadButtonCluster.handle_message/
+                               _ensure_all_buttons_unmanaged), once per
+                               device automatically on first contact.
   Also observed but not needed: c4.kp.bhp (a GET-only hold-period
   threshold, informational), c4.kp.of (an init/keepalive signal per
   button).
