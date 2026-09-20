@@ -1,56 +1,80 @@
-# Control4 APD120/LDZ-101 dimmer — RGB LED-color scripts for Home Assistant
+# Control4 LDZ-101 dimmer / KPZ-6B1 keypad — "Set All LEDs" RGB script
 #
-# Add these to your scripts.yaml or paste into the HA Script editor (YAML mode).
+# Add this to your scripts.yaml or paste into the HA Script editor (YAML mode).
 #
 # Unlike control4_led_scripts.yaml (which targets C4LEDCluster/c4.dmx.led on
 # endpoint 3 — the KC120277 scene-controller's protocol, very likely
-# non-functional on the LDZ-101 dimmer's own LEDs), these scripts target the
-# real per-button RGB "light" entities this quirk exposes (c4_led_rgb.py,
-# endpoints 202-205), which speak the LDZ-101's own confirmed
-# c4.dm.l0o/l0f/l1o/l1f wire protocol.
+# non-functional on the LDZ-101/KPZ-6B1's own LEDs), this script targets each
+# device's own confirmed protocol:
+#   - LDZ-101 (Control4 APD120/LDZ-101 dimmer): the four per-button RGB
+#     "light" entities this quirk exposes (c4_led_rgb.py, endpoints 202-205),
+#     which speak the LDZ-101's own confirmed c4.dm.l0o/l0f/l1o/l1f protocol.
+#     CONFIRMED from two real HC300 controller logs: Control4's own
+#     SET_ALL_LED command sets all four wire commands — c4.dm.l0o/l0f
+#     (top on/off-color) and c4.dm.l1o/l1f (bottom on/off-color) — to the
+#     exact same RGB in one action.
+#   - KPZ-6B1 (Control4 6-button keypad): C4KeypadAllLedCluster's
+#     set_all_colors command (c4_keypad_led_rgb.py, endpoint 197, cluster
+#     0xFC48/64584), which sends `c4.kp.lv ff ff <c>x6` in a single wire
+#     frame — CONFIRMED from a real Composer "SET_ALL_LED_COLOR" script
+#     capture, where every button was set to the same color at once.
 #
-# CONFIRMED from two real HC300 controller logs: Control4's own SET_ALL_LED
-# command sets all four wire commands — c4.dm.l0o/l0f (top on/off-color) and
-# c4.dm.l1o/l1f (bottom on/off-color) — to the exact same RGB in one action.
+# The device picker only allows these two models (filtered by manufacturer
+# "Control4" + model "LDZ-101"/"KPZ-6B1" — the model string this quirks
+# package sets on the zigpy device, see c4_basic_cluster.py), so there is no
+# need to pick a device type separately: the script detects which one was
+# selected and issues the right command automatically.
 #
 # Prerequisites:
 #   - ZHA integration with the control4 quirks branch loaded
-#   - The four RGB light entities from c4_led_rgb.py present on the target
-#     device (endpoints 202 "top on", 203 "bottom on", 204 "top off",
+#   - LDZ-101: the four RGB light entities from c4_led_rgb.py present on the
+#     target device (endpoints 202 "top on", 203 "bottom on", 204 "top off",
 #     205 "bottom off")
+#   - KPZ-6B1: C4KeypadAllLedCluster present on endpoint 197 of the target
+#     device (control4_keypad.py)
 
 
 # ==========================================================================
-# Set All LEDs — both buttons, on-color AND off-color, one RGB
+# Set All LEDs — LDZ-101 (both buttons, on/off-color) or KPZ-6B1 (all 6
+# buttons, current color), one RGB
 # ==========================================================================
 control4_ldz101_set_all_leds:
-  alias: "Control4 LDZ-101: Set All LEDs"
+  alias: "Control4: Set All LEDs"
   description: >-
-    Set every LED-color light entity on a Control4 APD120/LDZ-101 dimmer
-    (top/bottom, on-color and off-color) to the same RGB in one call —
-    replicates Control4's own SET_ALL_LED command exactly. Just pick the
-    dimmer device, like the original control4_led_scripts.yaml scripts —
-    the four LED light entities are found automatically by their xy
-    color-mode support, since the main dimmer light doesn't support
-    color and is excluded automatically.
+    Set every LED-color entity on a Control4 APD120/LDZ-101 dimmer or
+    KPZ-6B1 keypad to the same RGB in one call. For the dimmer this
+    replicates Control4's own SET_ALL_LED command exactly (top/bottom,
+    on-color and off-color); for the keypad it uses the confirmed
+    set_all_colors command to set all 6 buttons' current color in a single
+    wire frame. Just pick the device — only LDZ-101/KPZ-6B1 devices are
+    selectable, and the right method is used automatically.
   icon: mdi:led-strip-variant
   mode: single
   fields:
     target_device:
-      name: Control4 LDZ-101 dimmer
-      description: "Select the ZHA device for the dimmer"
+      name: Control4 LDZ-101 dimmer or KPZ-6B1 keypad
+      description: "Select the ZHA device — LDZ-101 dimmer or KPZ-6B1 keypad only"
       required: true
       selector:
         device:
-          integration: zha
+          filter:
+            - integration: zha
+              manufacturer: Control4
+              model: LDZ-101
+            - integration: zha
+              manufacturer: Control4
+              model: KPZ-6B1
     color:
       name: Color
-      description: "LED color for all four LED entities"
+      description: "LED color for every LED entity/button"
       required: true
       default: [255, 0, 0]
       selector:
         color_rgb:
   variables:
+    is_keypad: "{{ device_attr(target_device, 'model') == 'KPZ-6B1' }}"
+    ieee: >-
+      {{ (device_attr(target_device, 'identifiers') | list)[0][1] }}
     led_entities: >-
       {{ device_entities(target_device)
          | select('match', '^light\\.')
@@ -60,8 +84,24 @@ control4_ldz101_set_all_leds:
              | map(attribute='entity_id') | list)
          | list }}
   sequence:
-    - service: light.turn_on
-      target:
-        entity_id: "{{ led_entities }}"
-      data:
-        rgb_color: "{{ color }}"
+    - choose:
+        - conditions: "{{ is_keypad }}"
+          sequence:
+            - service: zha.issue_zigbee_cluster_command
+              data:
+                ieee: "{{ ieee }}"
+                endpoint_id: 197
+                cluster_id: 64584
+                cluster_type: in
+                command: 0
+                command_type: server
+                params:
+                  red: "{{ color[0] | int(255) }}"
+                  green: "{{ color[1] | int(0) }}"
+                  blue: "{{ color[2] | int(0) }}"
+      default:
+        - service: light.turn_on
+          target:
+            entity_id: "{{ led_entities }}"
+          data:
+            rgb_color: "{{ color }}"
