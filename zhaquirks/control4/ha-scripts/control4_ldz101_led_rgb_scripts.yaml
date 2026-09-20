@@ -26,66 +26,42 @@
 control4_ldz101_set_all_leds:
   alias: "Control4 LDZ-101: Set All LEDs"
   description: >-
-    Set all four button LED light entities (top/bottom, on-color and
-    off-color) to the same RGB in one call — replicates Control4's own
-    SET_ALL_LED command exactly. Pick the four LED light entities for
-    one specific dimmer, then a color.
+    Set every LED-color light entity on a Control4 APD120/LDZ-101 dimmer
+    (top/bottom, on-color and off-color) to the same RGB in one call —
+    replicates Control4's own SET_ALL_LED command exactly. Just pick the
+    dimmer device, like the original control4_led_scripts.yaml scripts —
+    the four LED light entities are found automatically by their xy
+    color-mode support, since the main dimmer light doesn't support
+    color and is excluded automatically.
   icon: mdi:led-strip-variant
   mode: single
   fields:
-    top_led_on:
-      name: Top LED (on-color) light entity
-      description: "The dimmer's top-button on-color LED light entity (endpoint 202)"
+    target_device:
+      name: Control4 LDZ-101 dimmer
+      description: "Select the ZHA device for the dimmer"
       required: true
       selector:
-        entity:
-          domain: light
-    bottom_led_on:
-      name: Bottom LED (on-color) light entity
-      description: "The dimmer's bottom-button on-color LED light entity (endpoint 203)"
-      required: true
-      selector:
-        entity:
-          domain: light
-    top_led_off:
-      name: Top LED (off-color) light entity
-      description: "The dimmer's top-button off-color LED light entity (endpoint 204)"
-      required: true
-      selector:
-        entity:
-          domain: light
-    bottom_led_off:
-      name: Bottom LED (off-color) light entity
-      description: "The dimmer's bottom-button off-color LED light entity (endpoint 205)"
-      required: true
-      selector:
-        entity:
-          domain: light
+        device:
+          integration: zha
     color:
       name: Color
-      description: "LED color for all four entities"
+      description: "LED color for all four LED entities"
       required: true
       default: [255, 0, 0]
       selector:
         color_rgb:
+  variables:
+    led_entities: >-
+      {{ device_entities(target_device)
+         | select('match', '^light\\.')
+         | select('in', states.light
+             | selectattr('attributes.supported_color_modes', 'defined')
+             | selectattr('attributes.supported_color_modes', 'contains', 'xy')
+             | map(attribute='entity_id') | list)
+         | list }}
   sequence:
     - service: light.turn_on
       target:
-        entity_id: "{{ top_led_on }}"
-      data:
-        rgb_color: "{{ color }}"
-    - service: light.turn_on
-      target:
-        entity_id: "{{ bottom_led_on }}"
-      data:
-        rgb_color: "{{ color }}"
-    - service: light.turn_on
-      target:
-        entity_id: "{{ top_led_off }}"
-      data:
-        rgb_color: "{{ color }}"
-    - service: light.turn_on
-      target:
-        entity_id: "{{ bottom_led_off }}"
+        entity_id: "{{ led_entities }}"
       data:
         rgb_color: "{{ color }}"
