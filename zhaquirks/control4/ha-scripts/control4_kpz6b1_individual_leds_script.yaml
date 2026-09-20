@@ -81,6 +81,14 @@ control4_kpz6b1_set_individual_leds:
   variables:
     ieee: >-
       {{ (device_attr(target_device, 'identifiers') | list)[0][1] }}
+    led_entities: >-
+      {{ device_entities(target_device)
+         | select('match', '^light\\.')
+         | select('in', states.light
+             | selectattr('attributes.supported_color_modes', 'defined')
+             | selectattr('attributes.supported_color_modes', 'contains', 'xy')
+             | map(attribute='entity_id') | list)
+         | list }}
   sequence:
     - service: zha.issue_zigbee_cluster_command
       data:
@@ -109,3 +117,11 @@ control4_kpz6b1_set_individual_leds:
           red_6: "{{ color_6[0] | int(0) }}"
           green_6: "{{ color_6[1] | int(0) }}"
           blue_6: "{{ color_6[2] | int(0) }}"
+    # ZHA's light platform only re-reads a Color cluster's current_x/
+    # current_y on a 45-75 MINUTE periodic poll — it never reacts to
+    # the raw wire command above. Force that poll to run right now
+    # instead of waiting up to an hour for the light cards to catch up
+    # to the colors just sent.
+    - service: homeassistant.update_entity
+      target:
+        entity_id: "{{ led_entities }}"

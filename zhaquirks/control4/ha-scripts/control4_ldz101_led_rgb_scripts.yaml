@@ -99,6 +99,14 @@ control4_ldz101_set_all_leds:
                   red: "{{ color[0] | int(255) }}"
                   green: "{{ color[1] | int(0) }}"
                   blue: "{{ color[2] | int(0) }}"
+            # ZHA's light platform only re-reads a Color cluster's
+            # current_x/current_y on a 45-75 MINUTE periodic poll — it
+            # never reacts to the raw wire command above. Force that
+            # poll to run right now instead of waiting up to an hour
+            # for the light cards to catch up to the color just sent.
+            - service: homeassistant.update_entity
+              target:
+                entity_id: "{{ led_entities }}"
       default:
         - service: light.turn_on
           target:

@@ -47,10 +47,26 @@ current_level) right after each successful send — necessary but NOT
 sufficient by itself: CONFIRMED via zha's own source, its light platform
 only re-reads Color-cluster attributes on a 45-75 MINUTE periodic poll
 (brightness/on-off update instantly via event listeners; color does not).
-_force_light_refresh() (below) closes that gap by asking HA to run that
-poll immediately via the "homeassistant.update_entity" service, which is
-now safe and wire-free thanks to C4LedColorCluster.read_attributes()
-always answering from cache (see c4_led_rgb.py's docstring).
+
+That poll now succeeds instantly off the local cache instead of timing
+out (C4LedColorCluster.read_attributes() always answers from cache —
+see c4_led_rgb.py's docstring), but something still has to trigger it
+right away instead of waiting up to an hour. A first attempt tried
+forcing that from Python, inside this cluster's own set_all_colors/
+set_individual_colors, via the "homeassistant.update_entity" service —
+CONFIRMED WRONG on real hardware: reaching `hass` from a zigpy device
+object requires walking private, undocumented zha-internals (the
+Gateway holds `hass` indirectly via its `config`, with no reachable
+back-reference from the zigpy ControllerApplication/device side in
+this zha version), so `_get_hass()` always returned None and the
+refresh silently never fired. Fixed for good by moving the refresh out
+of Python entirely, into the calling HA script instead (see
+ha-scripts/control4_ldz101_led_rgb_scripts.yaml's KPZ-6B1 branch and
+control4_kpz6b1_individual_leds_script.yaml) — a script already runs
+inside Home Assistant with native `hass` access, so it can call
+`homeassistant.update_entity` on the affected light entities right
+after the `zha.issue_zigbee_cluster_command` step, no internals-walking
+required.
 
 The physical LED's color was never wrong in any of this — set_all_colors/
 set_individual_colors send the user's exact RGB bytes with zero
@@ -74,7 +90,6 @@ Exported:
                                       (set_all_colors / set_individual_colors)
 """
 
-import asyncio
 import logging
 import os
 import sys
@@ -99,68 +114,6 @@ from c4_led_rgb import C4LedColorCluster
 _LOGGER = logging.getLogger(__name__)
 
 C4_KEYPAD_ALL_LED_CLUSTER_ID = 0xFC48
-
-
-def _get_hass(device):
-    """Same lookup as control4_z2io_zp.py's own _get_hass — duplicated
-    locally rather than imported, per this project's established rule
-    that small stateless helpers are safe to duplicate across quirk
-    modules (see feedback_zigpy_cluster_custom_attrs memory).
-    """
-    app = device.application
-    for attr in ('hass', '_hass'):
-        h = getattr(app, attr, None)
-        if h is not None:
-            return h
-    gw = getattr(app, 'zha_gateway', None)
-    if gw is not None:
-        return getattr(gw, 'hass', None)
-    return None
-
-
-async def _force_light_refresh(device, ep_id: int):
-    """Ask HA to immediately re-poll the light entity at endpoint `ep_id`.
-
-    See c4_led_rgb.py's module docstring: ZHA's light platform only
-    re-reads Color-cluster attributes on a periodic 45-75 MINUTE poll,
-    and C4LedColorCluster.read_attributes() now always answers that
-    poll from the local cache (never the wire). Forcing that poll here,
-    right after set_all_colors/set_individual_colors update the cache,
-    is what makes the HA UI reflect the new color immediately instead
-    of up to an hour later.
-    """
-    hass = _get_hass(device)
-    if hass is None:
-        _LOGGER.warning(
-            "C4 keypad_all_led: could not force-refresh endpoint %d — "
-            "_get_hass() returned None (no hass/zha_gateway.hass found on "
-            "device.application)",
-            ep_id,
-        )
-        return
-    try:
-        from homeassistant.helpers import entity_registry as er
-        unique_id = f"{device.ieee}-{ep_id}"
-        entity_id = er.async_get(hass).async_get_entity_id("light", "zha", unique_id)
-        if entity_id is None:
-            _LOGGER.warning(
-                "C4 keypad_all_led: no light entity found for unique_id=%s "
-                "— cannot force-refresh",
-                unique_id,
-            )
-            return
-        await hass.services.async_call(
-            "homeassistant", "update_entity", {"entity_id": entity_id},
-        )
-        _LOGGER.info(
-            "C4 keypad_all_led: forced refresh of %s (endpoint %d)",
-            entity_id, ep_id,
-        )
-    except Exception as e:
-        _LOGGER.warning(
-            "C4 keypad_all_led: failed to force-refresh endpoint %d — %s",
-            ep_id, e,
-        )
 
 
 def _rgb_to_xy_level(red: int, green: int, blue: int):
@@ -392,9 +345,6 @@ class C4KeypadAllLedCluster(CustomCluster):
 
         for btn_id, (r, g, b) in zip(KPZ6B1_BUTTON_MAP, rgb_values):
             self._sync_button_entity(btn_id, r, g, b)
-            ep_id = KPZ6B1_LED_EP_MAP.get(btn_id)
-            if ep_id is not None:
-                asyncio.ensure_future(_force_light_refresh(device, ep_id))
 
     async def set_all_colors(self, red, green, blue):
         """Set all 6 buttons to the SAME (red, green, blue) color."""
