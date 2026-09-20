@@ -15,14 +15,21 @@ module now exposes only `lv`, in two forms:
 
   - Single button:  `c4.kp.lv <btn_2digit_hex> <rrggbb>`
   - All 6 at once:   `c4.kp.lv ff ff <c1> <c2> <c3> <c4> <c5> <c6>`
-    (a literal "ff ff" sentinel pair, then the 6 buttons' RGB values in
-    order — confirmed from the same Composer "SET_ALL_LED_COLOR" capture).
+    (a literal "ff ff" sentinel pair, then 6 RGB values, one per button —
+    confirmed from the same Composer "SET_ALL_LED_COLOR" capture; every
+    captured all-at-once command sent the SAME color 6 times, matching
+    the Composer action's own wording, "Set all LED current colors to
+    <color>" — a single color for every button, not 6 independent ones).
 
 The all-at-once form is exposed as its own manufacturer-specific cluster
 (C4KeypadAllLedCluster, cluster_id 0xFC48 — the next free C4 cluster ID;
 see the registry comment in c4_helpers.py) rather than as a 6th light
 attribute, since it is materially faster than 6 sequential single-button
-writes (one wire frame instead of six) and has no natural per-entity home.
+writes (one wire frame instead of six) and has no natural per-entity
+home. Its command takes a single (red, green, blue) triplet — not 6 —
+and repeats it across all 6 slots on the wire, matching the real-world
+use case (and the captured protocol) exactly; per-button-distinct colors
+already have their own path via the 6 single-button light entities.
 
 Per-button light entities reuse C4LedOnOff/C4LedLevelControl from
 c4_led_rgb.py as-is (they are already fully generic — endpoint-relative
@@ -132,9 +139,9 @@ class C4KeypadAllLedCluster(CustomCluster):
         command: 0          # set_all_colors
         command_type: server
         args:
-          - 255 - 0 - 0   # button 1 red, green, blue
-          - 0 - 255 - 0   # button 2 ...
-          - ...           # buttons 3-6
+          - 255   # red
+          - 0     # green
+          - 0     # blue
     """
 
     cluster_id = C4_KEYPAD_ALL_LED_CLUSTER_ID
@@ -148,45 +155,26 @@ class C4KeypadAllLedCluster(CustomCluster):
         set_all_colors = ZCLCommandDef(
             id=0x00,
             schema={
-                "red_1": t.uint8_t, "green_1": t.uint8_t, "blue_1": t.uint8_t,
-                "red_2": t.uint8_t, "green_2": t.uint8_t, "blue_2": t.uint8_t,
-                "red_3": t.uint8_t, "green_3": t.uint8_t, "blue_3": t.uint8_t,
-                "red_4": t.uint8_t, "green_4": t.uint8_t, "blue_4": t.uint8_t,
-                "red_5": t.uint8_t, "green_5": t.uint8_t, "blue_5": t.uint8_t,
-                "red_6": t.uint8_t, "green_6": t.uint8_t, "blue_6": t.uint8_t,
+                "red": t.uint8_t,
+                "green": t.uint8_t,
+                "blue": t.uint8_t,
             },
             is_manufacturer_specific=True,
         )
 
-    async def set_all_colors(
-        self,
-        red_1, green_1, blue_1,
-        red_2, green_2, blue_2,
-        red_3, green_3, blue_3,
-        red_4, green_4, blue_4,
-        red_5, green_5, blue_5,
-        red_6, green_6, blue_6,
-    ):
-        """Send `0s<seq> c4.kp.lv ff ff <c1>..<c6>` in one wire frame."""
-        colors = [
-            f"{int(r):02x}{int(g):02x}{int(b):02x}"
-            for r, g, b in (
-                (red_1, green_1, blue_1),
-                (red_2, green_2, blue_2),
-                (red_3, green_3, blue_3),
-                (red_4, green_4, blue_4),
-                (red_5, green_5, blue_5),
-                (red_6, green_6, blue_6),
-            )
-        ]
+    async def set_all_colors(self, red, green, blue):
+        """Send `0s<seq> c4.kp.lv ff ff <c>x6` in one wire frame."""
+        color_hex = f"{int(red):02x}{int(green):02x}{int(blue):02x}"
+        colors = [color_hex] * 6
 
         device = self.endpoint.device
         seq = next_c4_seq(device)
         cmd = f"0s{seq:04x} c4.kp.lv ff ff " + " ".join(colors)
 
         _LOGGER.info(
-            "C4 keypad_all_led (endpoint %d): setting colors=%s — cmd: %s",
-            self.endpoint.endpoint_id, colors, cmd,
+            "C4 keypad_all_led (endpoint %d): setting all buttons to "
+            "color=%s — cmd: %s",
+            self.endpoint.endpoint_id, color_hex, cmd,
         )
 
         frame = _build_c4_frame(seq, cmd)
@@ -201,9 +189,9 @@ class C4KeypadAllLedCluster(CustomCluster):
             )
         except Exception as e:
             _LOGGER.warning(
-                "C4 keypad_all_led (endpoint %d): failed to set colors=%s "
-                "— %s",
-                self.endpoint.endpoint_id, colors, e,
+                "C4 keypad_all_led (endpoint %d): failed to set all "
+                "buttons to color=%s — %s",
+                self.endpoint.endpoint_id, color_hex, e,
             )
 
     def handle_cluster_request(self, hdr, args, *, dst_addressing=None):
