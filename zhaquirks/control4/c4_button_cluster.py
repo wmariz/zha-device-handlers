@@ -48,7 +48,10 @@ import c4_helpers as C4
 from c4_helpers import (
     APD120_BUTTON_MAP,
     C4_BUTTON_CLUSTER_ID,
+    C4_CLUSTER_ID,
     C4_DISPLAY_CLUSTER_ID,
+    C4_PROFILE_BUTTON,
+    C4_PROVISION_DELAY,
     DIMMER_BUTTON_EVENT_EP_MAP,
     DIMMER_BUTTON_MAP,
     DIMMER_EVENT_MAP,
@@ -60,11 +63,13 @@ from c4_helpers import (
     OUTLET_EP_MAP,
     SR260_BUTTON_EP_MAP,
     SR260_BUTTON_MAP,
+    _build_c4_frame,
     _c4_send_clear_display,
     _c4_send_list_items_response,
     _c4_send_room_info,
     _sync_ep1_level,
     _sync_ep1_onoff,
+    next_c4_seq,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -1365,6 +1370,53 @@ class C4KeypadButtonCluster(C4ButtonCluster):
 
     BUTTON_MAP = KPZ6B1_BUTTON_MAP
     EVENT_MAP  = KEYPAD_EVENT_MAP
+
+    def handle_message(self, hdr, args):
+        device = self.endpoint.device
+        if not getattr(device, "_c4_kpz_managed_sent", False):
+            device._c4_kpz_managed_sent = True
+            asyncio.ensure_future(self._ensure_all_buttons_managed())
+        super().handle_message(hdr, args)
+
+    async def _ensure_all_buttons_managed(self):
+        """Force all 6 buttons to "Keypad Managed" and keep them that way.
+
+        CONFIRMED c4.kp.llm <btn_single_hex_digit> <00|01> from six
+        separate captured commands (one per button) toggling the
+        "Keypad Managed" checkbox in Composer. This only makes sense
+        inside Control4's own ecosystem (a plain Zigbee/ZHA install has
+        no controller to defer to), so rather than expose it as a
+        switch entity (an earlier, since-reverted design), we send it
+        once per device on first contact and leave it there — matching
+        the user's own framing: "devemos garantir que os 6 botões sejam
+        configurados como keypad managed e assim permaneça."
+        """
+        device = self.endpoint.device
+        for btn_id in KPZ6B1_BUTTON_MAP:
+            seq = next_c4_seq(device)
+            cmd = f"0s{seq:04x} c4.kp.llm {btn_id:x} 01"
+            frame = _build_c4_frame(seq, cmd)
+            _LOGGER.info(
+                "C4 keypad (endpoint %d): forcing button %d to keypad-"
+                "managed — cmd: %s",
+                self.endpoint.endpoint_id, btn_id, cmd,
+            )
+            try:
+                await device.request(
+                    profile=C4_PROFILE_BUTTON,
+                    cluster=C4_CLUSTER_ID,
+                    src_ep=1, dst_ep=1,
+                    sequence=device.get_sequence(),
+                    data=frame,
+                    expect_reply=False,
+                )
+            except Exception as e:
+                _LOGGER.warning(
+                    "C4 keypad (endpoint %d): failed to set button %d "
+                    "keypad-managed — %s",
+                    self.endpoint.endpoint_id, btn_id, e,
+                )
+            await asyncio.sleep(C4_PROVISION_DELAY)
 
     def _fire_button_zha_event(self, action, button_id, button_name):
         ep_id = KPZ6B1_BUTTON_EP_MAP.get(button_id)

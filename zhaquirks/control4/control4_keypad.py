@@ -13,7 +13,7 @@ own module docstring for the full history of each fix below):
     one living on its own virtual endpoint, matching
     control4_z2io_zp.py's own working C4ContactCluster pattern.
 
-  - Per-button LED "on" color entities use OnOff + LevelControl + a Color
+  - Per-button LED color entities use OnOff + LevelControl + a Color
     cluster advertising XY_attributes (not Hue_and_saturation — this
     zha version's light platform only ever checks the XY capability bit
     and has no HS branch at all), with LevelControl's brightness doubling
@@ -23,8 +23,9 @@ own module docstring for the full history of each fix below):
     C4LedLevelControl/C4LedColorCluster) for the full history, including
     the on()-resend race condition already fixed there.
 
-Protocol CONFIRMED from a real HC300 controller log (pairing + button
-presses + LED color changes in Composer):
+Protocol CONFIRMED from TWO real HC300 controller logs (pairing + button
+presses + LED color changes in Composer, then a second capture of a
+genuine "SET_ALL_LED_COLOR"/"SET_LED_COLOR" Composer script):
   Model: reported as "c4:control4_keypad:KPZ-6B1" -> sniffed model
   string "KPZ-6B1" (see c4_helpers.py's _c4_sniff_model).
 
@@ -39,30 +40,43 @@ presses + LED color changes in Composer):
   Button id is a single hex digit, 0-5 (not embedded in the namespace
   like the dimmer's c4.dm.b<n><code> — always a separate data field).
 
-  LED color (namespace family c4.kp.l*):
-    c4.kp.lo <btn> <rrggbb>  — on-color   (CONFIRMED, wired to an entity)
-    c4.kp.lf <btn> <rrggbb>  — off-color  (CONFIRMED, not wired to
-                               anything yet — same "on-color first" scope
-                               already applied to the dimmer)
+  LED color (namespace family c4.kp.l*) — the FIRST log showed
+  `c4.kp.lo`/`c4.kp.lf` (on-color/off-color) ACKed on the wire, but the
+  SECOND log (a real Composer script) revealed the command Control4's
+  own scripts actually use is `c4.kp.lv` ("current" color — sets the
+  LED immediately, independent of on/off state, confirmed via the
+  ButtonStatus XML's <LEDCurColor> field). Since `lv` is strictly more
+  useful and the on/off-scoped commands are not needed for this device,
+  only `lv` is wired here, in two forms (see c4_keypad_led_rgb.py):
+    c4.kp.lv <btn_2digit_hex> <rrggbb>                — single button
+    c4.kp.lv ff ff <c1> <c2> <c3> <c4> <c5> <c6>      — all 6 at once
+                                                          (literal "ff ff"
+                                                          sentinel, then
+                                                          buttons 1-6 in
+                                                          order)
     c4.kp.llm <btn> <00|01>  — "keypad managed" toggle, matching the
                                "Keypad Managed" checkbox seen per-button
-                               in Composer (CONFIRMED, wired to a Switch
-                               entity — c4_keypad_managed_switch.py; same
-                               idea as led_attached on the dimmer,
-                               c4_attached_switch.py). Note the button
-                               index here is a single UNPADDED hex digit
-                               ("0".."5"), unlike lo/lf's zero-padded
-                               "00".."05" — confirmed from six separate
-                               captured commands, one per button.
-  Also observed but not needed: c4.kp.lv (a live/local LED color
-  override, used for Composer's own identify-blink UI feedback — not a
-  stored on/off color), c4.kp.bhp (a GET-only hold-period threshold,
-  informational), c4.kp.of (an init/keepalive signal per button).
+                               in Composer (CONFIRMED from six separate
+                               captured commands, one per button — note
+                               the button index here is a single
+                               UNPADDED hex digit "0".."5", unlike lv's
+                               zero-padded "00".."05"). This setting only
+                               makes sense inside Control4's own
+                               ecosystem, so rather than exposing it as a
+                               switch entity (an earlier, since-reverted
+                               design — see c4_button_cluster.py's
+                               C4KeypadButtonCluster.handle_message) all
+                               6 buttons are force-set to "managed" once
+                               per device automatically on first contact,
+                               and left there.
+  Also observed but not needed: c4.kp.bhp (a GET-only hold-period
+  threshold, informational), c4.kp.of (an init/keepalive signal per
+  button).
 
   NOT YET CONFIRMED: "Follow Bound Color", the other per-button checkbox
   seen alongside "Keypad Managed" in Composer. It stayed True throughout
-  the captured log — never toggled — so there is no wire command for it
-  yet, and no entity is exposed for it.
+  both captured logs — never toggled — so there is no wire command for
+  it yet, and no entity is exposed for it.
 
 EP layout (mirrors control4_scene_controller.py's KC120277, since
 c4_hooks.py's Patch 1 injects the same EP2/196/197 defaults for any C4
@@ -70,10 +84,10 @@ device regardless of model):
   1        — ZHA Non-Color Scene Controller (no light entity)
   2        — virtual, C4ConfigCluster
   196      — C4 network, C4ConfigCluster
-  197      — C4 button, C4KeypadButtonCluster (routing hub only)
+  197      — C4 button, C4KeypadButtonCluster + C4KeypadAllLedCluster
+             (routing hub + "set all 6 LED colors" service call)
   200-205  — virtual per-button binary_sensor entities (press/release)
-  210-215  — virtual per-button RGB light entities (on-color)
-  220-225  — virtual per-button Switch entities ("Keypad Managed")
+  210-215  — virtual per-button RGB light entities (current color)
 
 Uses SKIP_CONFIGURATION to prevent ZHA from attempting bind/configure on
 this C4 proprietary device. The coordinator handshake is handled
@@ -129,8 +143,7 @@ from c4_helpers import (
 from c4_basic_cluster import C4BasicCluster
 from c4_button_cluster import C4KeypadButtonCluster, _KPZ6B1_BUTTON_CLUSTERS
 from c4_led_rgb import C4LedOnOff, C4LedLevelControl
-from c4_keypad_led_rgb import _KEYPAD_LED_COLOR_CLUSTERS
-from c4_keypad_managed_switch import KEYPAD_MANAGED_EP_MAP, _KEYPAD_MANAGED_CLUSTERS
+from c4_keypad_led_rgb import _KEYPAD_LED_COLOR_CLUSTERS, C4KeypadAllLedCluster
 from c4_hooks import _C4_MODEL_QUIRK_MAP
 
 _LOGGER = logging.getLogger(__name__)
@@ -212,7 +225,7 @@ class Control4KPZ6B1Keypad(CustomDevice):
             197: {
                 PROFILE_ID:      zha.PROFILE_ID,
                 DEVICE_TYPE:     0x0000,
-                INPUT_CLUSTERS:  [C4KeypadButtonCluster],
+                INPUT_CLUSTERS:  [C4KeypadButtonCluster, C4KeypadAllLedCluster],
                 OUTPUT_CLUSTERS: [],
             },
             # Virtual per-button endpoints — one binary_sensor entity
@@ -228,7 +241,7 @@ class Control4KPZ6B1Keypad(CustomDevice):
                 for btn_id, ep_id in KPZ6B1_BUTTON_EP_MAP.items()
             },
             # Virtual per-button LED-color endpoints — one RGB light
-            # entity each in ZHA (on-color). See c4_keypad_led_rgb.py.
+            # entity each in ZHA (current color). See c4_keypad_led_rgb.py.
             # DEVICE_TYPE matters here (unlike the button endpoints
             # above): ZHA's light-vs-switch platform tiebreak for an
             # OnOff cluster with Level/Color siblings apparently
@@ -245,17 +258,6 @@ class Control4KPZ6B1Keypad(CustomDevice):
                     OUTPUT_CLUSTERS: [],
                 }
                 for btn_id, ep_id in KPZ6B1_LED_EP_MAP.items()
-            },
-            # Virtual per-button "Keypad Managed" endpoints — one Switch
-            # entity each in ZHA. See c4_keypad_managed_switch.py.
-            **{
-                ep_id: {
-                    PROFILE_ID:      zha.PROFILE_ID,
-                    DEVICE_TYPE:     0x0000,
-                    INPUT_CLUSTERS:  [_KEYPAD_MANAGED_CLUSTERS[btn_id]],
-                    OUTPUT_CLUSTERS: [],
-                }
-                for btn_id, ep_id in KEYPAD_MANAGED_EP_MAP.items()
             },
         },
     }
