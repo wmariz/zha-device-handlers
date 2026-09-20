@@ -53,6 +53,20 @@ Y), converting through the standard xyY -> linear sRGB -> gamma-
 corrected sRGB pipeline (the same formula used by Philips Hue and
 widely published) to get an rrggbb hex triplet for the wire command.
 
+CONFIRMED WRONG on real hardware, a third time: picking a color sent
+TWO wire commands ~150ms apart — the correct one, then a second one
+reverting to the stale pre-pick color. HA issues an on/level command
+alongside move_to_color for the same light.turn_on(rgb_color=...) call;
+C4LedOnOff's own "resend the current color" side effect (needed so a
+plain on/off toggle with no explicit color still does something) read
+current_x/current_y before this cluster's own move_to_color handler had
+updated them, racing it. Fixed with the same timestamp-suppression
+technique already proven elsewhere in this device
+(c4_helpers.c4_suppress_level_sync): C4LedColorCluster tracks when a
+real move_to_color last landed, and C4LedOnOff's on() skips its resend
+if one landed within the last second, since it already sent the right
+value.
+
 Exported:
   C4LedOnOff                 — shared OnOff cluster for any LED endpoint
   C4LedLevelControl          — shared LevelControl cluster (brightness = "Y")
@@ -67,6 +81,7 @@ Exported:
 import logging
 import os
 import sys
+import time
 
 _QUIRK_DIR = os.path.dirname(os.path.abspath(__file__))
 if _QUIRK_DIR not in sys.path:
@@ -151,12 +166,30 @@ class C4LedColorCluster(CustomCluster, Color):
         # move_to_color.
         self._update_attribute(self.AttributeDefs.current_x.id, 21845)
         self._update_attribute(self.AttributeDefs.current_y.id, 21845)
+        self._last_move_to_color_time = 0.0
 
     def _level(self) -> int:
         level_cluster = self.endpoint.in_clusters.get(LevelControl.cluster_id)
         if level_cluster is None:
             return 254
         return level_cluster.get(LevelControl.AttributeDefs.current_level.id, 254)
+
+    def recently_set_explicitly(self, window: float = 1.0) -> bool:
+        """True if a real move_to_color landed within the last `window`s.
+
+        CONFIRMED on real hardware: picking a color sends two wire
+        commands — the correct one from move_to_color, then a second one
+        ~150ms later with the stale pre-pick color. HA's light platform
+        issues an on/level command alongside move_to_color for the same
+        light.turn_on(rgb_color=...) call, and C4LedOnOff/
+        C4LedLevelControl's own "resend the current color" side effect
+        (needed for a plain on/off toggle with no explicit color) races
+        it — it reads current_x/current_y before this cluster's own
+        move_to_color handler has updated them, sending the old value
+        right after the correct one. Callers check this before resending
+        so a real, very recent color pick always wins.
+        """
+        return (time.monotonic() - self._last_move_to_color_time) < window
 
     async def command(
         self,
@@ -188,6 +221,7 @@ class C4LedColorCluster(CustomCluster, Color):
             color_y = self.get(self.AttributeDefs.current_y.id, 21845)
         self._update_attribute(self.AttributeDefs.current_x.id, color_x)
         self._update_attribute(self.AttributeDefs.current_y.id, color_y)
+        self._last_move_to_color_time = time.monotonic()
         await self._send_current_color()
         return foundation.GeneralCommand.Default_Response, ZCLStatus.SUCCESS
 
@@ -351,7 +385,21 @@ class C4LedOnOff(CustomCluster, OnOff):
 
         color = self._color_cluster()
         if color is not None:
-            await color._send_current_color()
+            # CONFIRMED on real hardware: HA issues an on/level command
+            # alongside move_to_color for the same light.turn_on(rgb_
+            # color=...) call. Resending here unconditionally raced that
+            # real pick — this handler read current_x/current_y before
+            # move_to_color's own handler had updated them, sending the
+            # stale pre-pick color ~150ms after the correct one. Skip
+            # the resend when a real color command landed moments ago;
+            # it already sent the right value.
+            if new_state and color.recently_set_explicitly():
+                _LOGGER.debug(
+                    "C4 %s: skipping on() color resend — a real "
+                    "move_to_color landed moments ago", color._C4_LABEL,
+                )
+            else:
+                await color._send_current_color()
 
         self._update_attribute(self.AttributeDefs.on_off.id, new_state)
         return self._SUCCESS
