@@ -88,6 +88,13 @@ real to read from anyway — which then lets external code force an
 immediate, wire-free re-poll via the "homeassistant.update_entity"
 service right after updating the cache.
 
+That same async_update() reads OnOff, LevelControl, and Color
+SEQUENTIALLY in one call, and none of the three clusters on this
+endpoint has any real device-side ZCL backing — so C4LedOnOff and
+C4LedLevelControl need the exact same read_attributes() override, or
+their own real-wire reads would stall/fail before the call chain ever
+reaches the (already-fixed) Color read.
+
 Exported:
   C4LedOnOff                 — shared OnOff cluster for any LED endpoint
   C4LedLevelControl          — shared LevelControl cluster (brightness = "Y")
@@ -337,6 +344,20 @@ class C4LedLevelControl(CustomCluster, LevelControl):
         super().__init__(*args, **kwargs)
         self._update_attribute(self.AttributeDefs.current_level.id, 254)
 
+    async def read_attributes(
+        self, attributes, allow_cache=False, only_cache=False, manufacturer=None,
+    ):
+        """Always answer from the local cache — see C4LedColorCluster's
+        own read_attributes() for why: this cluster has no real
+        on-device ZCL backing either, and zha's light platform reads
+        OnOff/LevelControl/Color sequentially in one async_update() —
+        a real over-the-air read here would stall (or fail) before
+        that call ever reaches the Color cluster's own fixed read.
+        """
+        return await super().read_attributes(
+            attributes, allow_cache=True, only_cache=True, manufacturer=manufacturer,
+        )
+
     def _color_cluster(self):
         return self.endpoint.in_clusters.get(Color.cluster_id)
 
@@ -383,6 +404,16 @@ class C4LedOnOff(CustomCluster, OnOff):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._update_attribute(self.AttributeDefs.on_off.id, True)
+
+    async def read_attributes(
+        self, attributes, allow_cache=False, only_cache=False, manufacturer=None,
+    ):
+        """Always answer from the local cache — see C4LedColorCluster's
+        own read_attributes() for why.
+        """
+        return await super().read_attributes(
+            attributes, allow_cache=True, only_cache=True, manufacturer=manufacturer,
+        )
 
     def _level_cluster(self):
         return self.endpoint.in_clusters.get(LevelControl.cluster_id)
