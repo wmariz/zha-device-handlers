@@ -7,12 +7,15 @@ Classes exported:
   C4SceneControllerButtonCluster   — KC120277 8-button keypad
   C4DualOutletButtonCluster        — LOZ-5S1-W dual outlet
   C4RemoteButtonCluster            — C4-SR260 50-button IR/Zigbee remote
+  C4KeypadButtonCluster            — C4-KPZ-6B1 6-button keypad (adds per-button binary_sensor entities)
   _DIMMER_BUTTON_CLUSTERS          — per-button virtual cluster dict for the dimmer (name → class)
   _KC120277_BUTTON_CLUSTERS        — per-button virtual cluster dict (btn_id → class)
   _SR260_BUTTON_CLUSTERS           — per-button virtual cluster dict for SR260
+  _KPZ6B1_BUTTON_CLUSTERS          — per-button virtual cluster dict for the KPZ-6B1
   _make_dimmer_button_cluster()    — factory for the dimmer's per-button BinaryInput cluster
   _make_kc120277_button_cluster()  — factory for per-button EventableCluster
   _make_sr260_button_cluster()     — factory for SR260 per-button EventableCluster
+  _make_keypad_button_cluster()    — factory for the KPZ-6B1's per-button BinaryInput cluster
 """
 
 import logging
@@ -51,6 +54,9 @@ from c4_helpers import (
     DIMMER_EVENT_MAP,
     KC120277_BUTTON_EP_MAP,
     KC120277_BUTTON_MAP,
+    KEYPAD_EVENT_MAP,
+    KPZ6B1_BUTTON_EP_MAP,
+    KPZ6B1_BUTTON_MAP,
     OUTLET_EP_MAP,
     SR260_BUTTON_EP_MAP,
     SR260_BUTTON_MAP,
@@ -269,6 +275,22 @@ class C4ButtonCluster(EventableCluster):
                 self._handle_button_event(namespace, data[0])
         elif namespace.startswith("c4.dm.b") and len(namespace) == 9:
             self._handle_dm_b_code(namespace)
+        elif namespace in ("c4.kp.bb", "c4.kp.bh", "c4.kp.be"):
+            # KPZ-6B1 keypad — CONFIRMED from a real HC300 controller log:
+            # bb=press-begin, bh=hold (fires while held), be=hold-end
+            # (release after a hold). data[0] = button id (hex, 0-5).
+            if data:
+                self._handle_button_event(namespace, data[0])
+        elif namespace == "c4.kp.bc":
+            # KPZ-6B1 — click complete (quick release, before the count is
+            # known). No separate action needed: the always-following
+            # c4.kp.cc carries the resolved click count.
+            _LOGGER.debug("C4 state: keypad click, button = %s", data[0] if data else "?")
+        elif namespace == "c4.kp.cc":
+            # KPZ-6B1 — click count confirmation, same shape as c4.dmx.cc/
+            # c4.dm.cc (button, click count).
+            if len(data) >= 2:
+                self._handle_button_event(namespace, data[0], data[1])
         elif namespace == "c4.zr.bb":
             # SR260 remote — button begin (key down). data[0] = button id (hex).
             if data:
@@ -369,10 +391,16 @@ class C4ButtonCluster(EventableCluster):
         self._sync_state_from_event(event_code, button_id, params)
         self._fire_button_zha_event(action, button_id, button_name)
 
-    @staticmethod
-    def _resolve_action(event_code, extra):
+    # Overridable per-subclass (e.g. C4KeypadButtonCluster's KEYPAD_EVENT_MAP)
+    # — "bb" means something different on the KPZ-6B1 (press-begin) than it
+    # does here for the SR260 (a complete short press), so a shared map
+    # across every C4ButtonCluster subclass isn't safe once a new device
+    # reuses a letter code with different semantics.
+    EVENT_MAP = DIMMER_EVENT_MAP
+
+    def _resolve_action(self, event_code, extra):
         """Map an event_code (+ optional click-count extra) to a zha_event action."""
-        action = DIMMER_EVENT_MAP.get(event_code, f"unknown_{event_code}")
+        action = self.EVENT_MAP.get(event_code, f"unknown_{event_code}")
         if action == "click_count" and extra is not None:
             if extra == "01":
                 action = SHORT_PRESS
@@ -1270,4 +1298,108 @@ class C4RemoteButtonCluster(C4ButtonCluster):
         )
         _LOGGER.debug(
             "C4 SR260: fired %r for %s on EP %d", action, button_name, ep_id,
+        )
+
+
+# ---------------------------------------------------------------------------
+# KPZ-6B1 keypad variant — per-button binary_sensor (press/release)
+# ---------------------------------------------------------------------------
+
+def _make_keypad_button_cluster(btn_id: int) -> type:
+    """Return a BinaryInput-based cluster for one KPZ-6B1 physical button.
+
+    Mirrors _make_dimmer_button_cluster exactly (same CONFIRMED fix:
+    ep_attribute MUST stay BinaryInput's own inherited default for ZHA's
+    ClusterHandler discovery to create a binary_sensor entity — per-button
+    uniqueness comes from each one living on its own virtual endpoint,
+    not from ep_attribute). Physical Zigbee frames never arrive here —
+    routing is done by C4KeypadButtonCluster._fire_button_zha_event().
+    """
+
+    class _ButtonCluster(CustomCluster, BinaryInput):
+        cluster_id   = BinaryInput.cluster_id
+        name         = f"Button {btn_id + 1}"
+        _c4_custom_handler = False  # no physical routing
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._update_attribute(
+                BinaryInput.AttributeDefs.present_value.id, False,
+            )
+
+        def handle_message(self, hdr, args):
+            pass  # no physical packets arrive here
+
+        def handle_cluster_request(self, hdr, args, *, dst_addressing=None):
+            pass
+
+        def set_pressed(self, pressed: bool):
+            """Set present_value — True while held, False once released."""
+            self._update_attribute(
+                BinaryInput.AttributeDefs.present_value.id, pressed,
+            )
+
+    _ButtonCluster.__name__     = f"C4Keypad{btn_id}ButtonCluster"
+    _ButtonCluster.__qualname__ = _ButtonCluster.__name__
+    return _ButtonCluster
+
+
+# One cluster class per keypad button — keyed by button id (0-5)
+_KPZ6B1_BUTTON_CLUSTERS: dict[int, type] = {
+    btn_id: _make_keypad_button_cluster(btn_id) for btn_id in KPZ6B1_BUTTON_MAP
+}
+
+
+class C4KeypadButtonCluster(C4ButtonCluster):
+    """C4ButtonCluster for the KPZ-6B1 — each button gets a binary_sensor.
+
+    Reuses the exact pattern already CONFIRMED working on the APD120/
+    LDZ-101 dimmer: BUTTON_MAP + EVENT_MAP overridden for this device's
+    own confirmed c4.kp.* protocol (see c4_helpers.py's KEYPAD_EVENT_MAP),
+    and _fire_button_zha_event() overridden to route to the matching
+    virtual per-button endpoint instead of firing on this cluster's own
+    endpoint — present_value goes True on "press" (c4.kp.bb) and False
+    once the press resolves (a simple click via c4.kp.cc, or a hold
+    ending via c4.kp.be).
+    """
+
+    BUTTON_MAP = KPZ6B1_BUTTON_MAP
+    EVENT_MAP  = KEYPAD_EVENT_MAP
+
+    def _fire_button_zha_event(self, action, button_id, button_name):
+        ep_id = KPZ6B1_BUTTON_EP_MAP.get(button_id)
+        if ep_id is None:
+            _LOGGER.warning(
+                "C4 keypad: no virtual EP for button %r — add it to "
+                "KPZ6B1_BUTTON_EP_MAP", button_id,
+            )
+            return
+
+        ep = self.endpoint.device.endpoints.get(ep_id)
+        if ep is None:
+            _LOGGER.warning(
+                "C4 keypad: virtual EP %d not in device endpoints "
+                "(re-pair after quirk update?)", ep_id,
+            )
+            return
+
+        btn_cluster = ep.in_clusters.get(BinaryInput.cluster_id)
+        if btn_cluster is None:
+            _LOGGER.warning(
+                "C4 keypad: no cluster 0x%04X on EP %d",
+                BinaryInput.cluster_id, ep_id,
+            )
+            return
+
+        btn_cluster.listener_event("zha_send_event", action, {ENDPOINT_ID: ep_id})
+        if action == "press":
+            btn_cluster.set_pressed(True)
+        elif action in (
+            SHORT_PRESS, DOUBLE_PRESS, TRIPLE_PRESS, QUADRUPLE_PRESS,
+            LONG_RELEASE,
+        ):
+            btn_cluster.set_pressed(False)
+        _LOGGER.debug(
+            "C4 keypad button: fired %r for %s on EP %d",
+            action, button_name, ep_id,
         )

@@ -185,6 +185,42 @@ KC120277_BUTTON_EP_MAP: dict[int, int] = {
     btn_id: 200 + btn_id for btn_id in range(8)
 }
 
+# C4-KPZ-6B1: 6-button keypad, 0-indexed
+KPZ6B1_BUTTON_MAP = {
+    0x00: BUTTON_1,
+    0x01: BUTTON_2,
+    0x02: BUTTON_3,
+    0x03: BUTTON_4,
+    0x04: BUTTON_5,
+    0x05: BUTTON_6,
+}
+
+# Virtual endpoint IDs for KPZ-6B1 per-button binary_sensor (press/release)
+# and RGB light (on-color) entities.
+KPZ6B1_BUTTON_EP_MAP: dict[int, int] = {
+    btn_id: 200 + btn_id for btn_id in KPZ6B1_BUTTON_MAP
+}
+KPZ6B1_LED_EP_MAP: dict[int, int] = {
+    btn_id: 210 + btn_id for btn_id in KPZ6B1_BUTTON_MAP
+}
+
+# CONFIRMED from a real HC300 controller log: the KPZ-6B1 uses its own
+# c4.kp.* namespace family for button presses — bb=press-begin (fires the
+# instant a button goes down, before the device knows if it'll resolve to
+# a click or a hold), cc=click-count confirmation (same shape as
+# c4.dmx.cc/c4.dm.cc), bh=hold (fires while held), be=hold-end (release
+# after a hold). Deliberately a SEPARATE map from DIMMER_EVENT_MAP: "bb"
+# means something different here (press-begin) than it does for the
+# SR260 (a complete short press) — sharing one map across every
+# C4ButtonCluster subclass would silently misfire once a second device
+# reused a letter code with different semantics.
+KEYPAD_EVENT_MAP = {
+    "bb": "press",
+    "cc": "click_count",
+    "bh": LONG_PRESS,
+    "be": LONG_RELEASE,
+}
+
 # C4-SR260: 50 button codes (0x00..0x31) — see
 # documentation/control4-sr260-remote-protocol.md for the layout.
 SR260_BUTTON_MAP: dict[int, str] = {
