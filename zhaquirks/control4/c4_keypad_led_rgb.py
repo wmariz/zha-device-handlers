@@ -93,19 +93,32 @@ C4_KEYPAD_ALL_LED_CLUSTER_ID = 0xFC48
 def _rgb_to_xy_level(red: int, green: int, blue: int):
     """sRGB (0-255 each) -> (CIE x, CIE y, level), all in ZCL raw units.
 
-    Exact inverse of c4_led_rgb._xy_to_rgb_hex's xyY -> linear sRGB ->
-    gamma-corrected sRGB pipeline (same sRGB/D65 matrices, run backwards):
-    gamma-expand each channel, convert to CIE XYZ, then to xy chromaticity
-    + Y (brightness, reused as LevelControl's current_level, 0-254).
+    CONFIRMED WRONG once: an earlier version of this function used the
+    standard/narrow sRGB D65 XYZ matrix — the exact inverse of
+    c4_led_rgb._xy_to_rgb_hex's own matrix, which is what actually goes
+    out on the wire (so the physical LED was never affected). But Home
+    Assistant's own light platform renders an xy-mode entity's displayed
+    color using ITS OWN xy<->rgb conversion (homeassistant.util.color),
+    which uses a DIFFERENT matrix — the "Wide RGB D65" formula also used
+    by the Philips Hue SDK — not the narrow sRGB one. Feeding that
+    function's inverse's output back through HA's own (different)
+    forward formula produced a visibly wrong color in the HA UI (the
+    physical device was always correct, only the on-screen card was
+    off). Fixed by matching HA's own matrix exactly here, so the value
+    written to current_x/current_y round-trips correctly through HA's
+    own renderer.
     """
-    def _inv_gamma(c: int) -> float:
+    def _gamma_expand(c: int) -> float:
         c = c / 255.0
         return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
 
-    r, g, b = _inv_gamma(red), _inv_gamma(green), _inv_gamma(blue)
-    x_lin = r * 0.4124 + g * 0.3576 + b * 0.1805
-    y_lin = r * 0.2126 + g * 0.7152 + b * 0.0722
-    z_lin = r * 0.0193 + g * 0.1192 + b * 0.9505
+    r, g, b = _gamma_expand(red), _gamma_expand(green), _gamma_expand(blue)
+
+    # Wide RGB D65 conversion formula — matches Home Assistant's
+    # color_RGB_to_xy_brightness() (homeassistant/util/color.py) exactly.
+    x_lin = r * 0.664511 + g * 0.154324 + b * 0.162028
+    y_lin = r * 0.283881 + g * 0.668433 + b * 0.047685
+    z_lin = r * 0.000088 + g * 0.072310 + b * 0.986039
 
     total = x_lin + y_lin + z_lin
     if total <= 0:
