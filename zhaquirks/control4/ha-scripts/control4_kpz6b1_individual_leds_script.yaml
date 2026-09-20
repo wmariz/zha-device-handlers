@@ -1,0 +1,111 @@
+# Control4 KPZ-6B1 keypad — "Set Individual LEDs" RGB script
+#
+# Add this to your scripts.yaml or paste into the HA Script editor (YAML mode).
+#
+# Calls C4KeypadAllLedCluster's set_individual_colors command
+# (c4_keypad_led_rgb.py, endpoint 197, cluster 0xFC48/64584), which sends
+# `c4.kp.lv ff ff <c1> <c2> <c3> <c4> <c5> <c6>` in a single wire frame with
+# 6 independently chosen colors — CONFIRMED wire format from a real Composer
+# "SET_ALL_LED_COLOR" capture (every captured real-world example repeated
+# one color 6x; this command instead fills each of the 6 slots with its own
+# picked color, for the case where each button should show a different LED
+# color set in one shot instead of one call per button).
+#
+# The device picker only allows KPZ-6B1 devices (filtered by manufacturer
+# "Control4" + model "KPZ-6B1" — the model string this quirks package sets
+# on the zigpy device, see c4_basic_cluster.py).
+#
+# Prerequisites:
+#   - ZHA integration with the control4 quirks branch loaded
+#   - C4KeypadAllLedCluster present on endpoint 197 of the target device
+#     (control4_keypad.py)
+
+
+# ==========================================================================
+# Set Individual LEDs — KPZ-6B1, one color per button, all 6 in one frame
+# ==========================================================================
+control4_kpz6b1_set_individual_leds:
+  alias: "Control4 KPZ-6B1: Set Individual LEDs"
+  description: >-
+    Set each of the 6 KPZ-6B1 keypad buttons to its own LED current color,
+    all in a single wire frame — pick a device and a color per button.
+  icon: mdi:led-strip-variant
+  mode: single
+  fields:
+    target_device:
+      name: Control4 KPZ-6B1 keypad
+      description: "Select the ZHA device — KPZ-6B1 keypad only"
+      required: true
+      selector:
+        device:
+          filter:
+            - integration: zha
+              manufacturer: Control4
+              model: KPZ-6B1
+    color_1:
+      name: "Button 1 — Color"
+      required: true
+      default: [255, 0, 0]
+      selector:
+        color_rgb:
+    color_2:
+      name: "Button 2 — Color"
+      required: true
+      default: [0, 255, 0]
+      selector:
+        color_rgb:
+    color_3:
+      name: "Button 3 — Color"
+      required: true
+      default: [0, 0, 255]
+      selector:
+        color_rgb:
+    color_4:
+      name: "Button 4 — Color"
+      required: true
+      default: [255, 255, 0]
+      selector:
+        color_rgb:
+    color_5:
+      name: "Button 5 — Color"
+      required: true
+      default: [0, 255, 255]
+      selector:
+        color_rgb:
+    color_6:
+      name: "Button 6 — Color"
+      required: true
+      default: [255, 0, 255]
+      selector:
+        color_rgb:
+  variables:
+    ieee: >-
+      {{ (device_attr(target_device, 'identifiers') | list)[0][1] }}
+  sequence:
+    - service: zha.issue_zigbee_cluster_command
+      data:
+        ieee: "{{ ieee }}"
+        endpoint_id: 197
+        cluster_id: 64584
+        cluster_type: in
+        command: 1
+        command_type: server
+        params:
+          red_1: "{{ color_1[0] | int(0) }}"
+          green_1: "{{ color_1[1] | int(0) }}"
+          blue_1: "{{ color_1[2] | int(0) }}"
+          red_2: "{{ color_2[0] | int(0) }}"
+          green_2: "{{ color_2[1] | int(0) }}"
+          blue_2: "{{ color_2[2] | int(0) }}"
+          red_3: "{{ color_3[0] | int(0) }}"
+          green_3: "{{ color_3[1] | int(0) }}"
+          blue_3: "{{ color_3[2] | int(0) }}"
+          red_4: "{{ color_4[0] | int(0) }}"
+          green_4: "{{ color_4[1] | int(0) }}"
+          blue_4: "{{ color_4[2] | int(0) }}"
+          red_5: "{{ color_5[0] | int(0) }}"
+          green_5: "{{ color_5[1] | int(0) }}"
+          blue_5: "{{ color_5[2] | int(0) }}"
+          red_6: "{{ color_6[0] | int(0) }}"
+          green_6: "{{ color_6[1] | int(0) }}"
+          blue_6: "{{ color_6[2] | int(0) }}"
