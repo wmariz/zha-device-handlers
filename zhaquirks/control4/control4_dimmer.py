@@ -709,6 +709,7 @@ _c4_apd120_entry = (
         endpoint_id=_top_ep_id,
         cluster_id=BinaryInput.cluster_id,
         new_fallback_name="Button Top",
+        new_entity_registry_enabled_default=False,
     )
 )
 _bottom_ep_id = DIMMER_BUTTON_EVENT_EP_MAP["bottom"]
@@ -720,6 +721,7 @@ _c4_apd120_entry = (
         endpoint_id=_bottom_ep_id,
         cluster_id=BinaryInput.cluster_id,
         new_fallback_name="Button Bottom",
+        new_entity_registry_enabled_default=False,
     )
 )
 
@@ -766,6 +768,7 @@ for _ep_id, _color_cls, _led_label in (
             endpoint_id=_ep_id,
             cluster_id=Color.cluster_id,
             new_fallback_name=_led_label,
+            new_entity_registry_enabled_default=False,
         )
     )
 

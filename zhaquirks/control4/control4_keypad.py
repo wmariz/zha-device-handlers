@@ -194,7 +194,8 @@ for _btn_id, _ep_id in KPZ6B1_BUTTON_EP_MAP.items():
         .change_entity_metadata(
             endpoint_id=_ep_id,
             cluster_id=BinaryInput.cluster_id,
-            new_fallback_name=f"Botão {_btn_id + 1}",
+            new_fallback_name=f"Button {_btn_id + 1}",
+            new_entity_registry_enabled_default=False,
         )
     )
 
@@ -218,7 +219,8 @@ for _btn_id, _ep_id in KPZ6B1_LED_EP_MAP.items():
         .change_entity_metadata(
             endpoint_id=_ep_id,
             cluster_id=Color.cluster_id,
-            new_fallback_name=f"Led {_btn_id + 1}",
+            new_fallback_name=f"LED {_btn_id + 1}",
+            new_entity_registry_enabled_default=False,
         )
     )
 
