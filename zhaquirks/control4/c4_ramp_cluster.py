@@ -204,11 +204,13 @@ class C4RampCluster(_C4LocalOnlyReadMixin, CustomCluster):
 
     # Delays (seconds) between retries of _push_ramp_defaults() after the
     # first (immediate) attempt — see that method's docstring for why a
-    # retry is needed at all. Real-hardware logs show the
-    # "ApplicationController is not running" failure window lasting
-    # roughly 1-2 seconds after an HA restart; these delays comfortably
-    # cover that with margin for a slower-starting system.
-    _RAMP_DEFAULTS_RETRY_DELAYS = (3, 8, 20)
+    # retry is needed at all. CONFIRMED on real hardware (HA debug log)
+    # that a shorter (3, 8, 20) schedule wasn't always enough — one boot
+    # took ~35s for the ApplicationController to come up, 2s past that
+    # schedule's ~31s total budget, and the push gave up right before it
+    # would have succeeded. This schedule's cumulative offsets are
+    # 0/5/20/50/110s, comfortably outlasting that observed case.
+    _RAMP_DEFAULTS_RETRY_DELAYS = (5, 15, 30, 60)
 
     class AttributeDefs(BaseAttributeDefs):
         """Purely local attributes — see class docstring."""
@@ -300,11 +302,42 @@ class C4RampCluster(_C4LocalOnlyReadMixin, CustomCluster):
         reached the device on a normal boot despite this method existing.
         Retries with increasing delays (_RAMP_DEFAULTS_RETRY_DELAYS) until
         both sends report success, rather than firing once and giving up.
+
+        Also CONFIRMED (user report + reading zigpy/appdb.py directly):
+        a value the user explicitly sets during one HA session did not
+        survive a restart, always reverting to the 750 ms default — not
+        because zigpy fails to persist it (its appdb persists ANY
+        _update_attribute() call generically, via AttributeUpdatedEvent,
+        for any cluster/attribute), but because __init__ above always
+        seeds self._ramp_times with the hardcoded default BEFORE zigpy's
+        own restore pass has necessarily run (appdb.load() clears every
+        quirked cluster's attribute cache and repopulates it from the
+        database in two passes that happen to straddle device/quirk
+        resolution — this __init__ runs in between them), and this
+        method used to blindly push self._ramp_times' hardcoded value
+        regardless, both overwriting the correctly-restored in-memory
+        cache AND re-persisting 750 back to the database on every
+        successful send — a self-reinforcing loop that made a custom
+        value impossible to keep. Now checks self.get() for both
+        attributes on every attempt (not just once): by the time a
+        retry actually fires, zigpy's local SQLite restore (fast, no
+        relation to how long the zigbee radio itself takes to come up)
+        will certainly have completed, so any already-restored value is
+        adopted into self._ramp_times before pushing, instead of being
+        clobbered by the hardcoded default.
         """
         delays = (0,) + self._RAMP_DEFAULTS_RETRY_DELAYS
         for attempt, delay in enumerate(delays):
             if delay:
                 await asyncio.sleep(delay)
+
+            cached_on = self.get(self.AttributeDefs.on_ramp_ms.id)
+            if cached_on is not None:
+                self._ramp_times[RAMP_IDX_ON] = int(cached_on)
+            cached_off = self.get(self.AttributeDefs.off_ramp_ms.id)
+            if cached_off is not None:
+                self._ramp_times[RAMP_IDX_OFF] = int(cached_off)
+
             on_ok = await self._send_ramp_set(
                 RAMP_IDX_ON, self._ramp_times[RAMP_IDX_ON]
             )
