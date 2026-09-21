@@ -68,11 +68,30 @@ C4_CONFIG_CLUSTER_ID = 0xFC41  # ZHA-side virtual cluster for C4 config (avoids 
 C4_BUTTON_CLUSTER_ID = 0xFC42  # ZHA-side virtual cluster for button events
 
 # ---------------------------------------------------------------------------
-# Transition times and defaults (from Rev E provisioning capture)
+# Transition times and defaults
 # ---------------------------------------------------------------------------
-C4_ON_TRANSITION   = 8    # 800 ms (1/10-s units) — nearest to 750 ms device on-ramp
-C4_OFF_TRANSITION  = 20   # 2000 ms — matches device off-ramp exactly
+# "Attempt 22": replaces the old C4_ON_TRANSITION (8 tenths/800ms) /
+# C4_OFF_TRANSITION (20 tenths/2000ms) split — a single 750ms default for
+# both, per explicit user request ("750ms is Control4's own default"),
+# used as the fallback when the standard on_transition_time/
+# off_transition_time Number config entities (ZHA-standard LevelControl
+# attributes) have never been set. See read_transition_tenths() below.
+C4_DEFAULT_TRANSITION_TENTHS = 8  # 750 ms in ZCL 1/10-second units
 C4_DEFAULT_ON_LEVEL = 191 # ~75 % of 254
+
+# A move_to_level(_with_on_off) call ALWAYS carries a transition_time —
+# even a plain dashboard brightness-slider drag with no explicit
+# `transition:` still gets one, computed by zha's light platform from
+# self._zha_config_transition (defaulting to _DEFAULT_MIN_TRANSITION_TIME
+# = 0.1 s = 1 tenth — confirmed by reading zha/application/platforms/
+# light/__init__.py directly). So transition_time alone can't tell "the
+# user/automation explicitly asked for this transition" apart from "zha's
+# own filler value" — only a call meaningfully ABOVE that filler is
+# treated as an explicit override; anything at/near it falls back to
+# read_transition_tenths() instead. 2 tenths (200 ms) sits above zha's
+# 1-tenth filler with a small margin and comfortably below any sane
+# configured transition time.
+EXPLICIT_TRANSITION_THRESHOLD_TENTHS = 2
 
 # Delay between provisioning commands sent during bind()
 C4_PROVISION_DELAY = 0.05  # seconds
@@ -478,6 +497,43 @@ async def _send_many_to_one_route_request(app) -> None:
 # ---------------------------------------------------------------------------
 # Device / attribute state sync helpers
 # ---------------------------------------------------------------------------
+
+def read_transition_tenths(level_cluster, direction: str) -> int:
+    """Read on_transition_time/off_transition_time (standard ZCL
+    LevelControl attributes, 1/10-second units) from a device's own
+    LevelControl cluster, falling back to C4_DEFAULT_TRANSITION_TENTHS
+    if the attribute has never been set.
+
+    "Attempt 22": replaces the earlier custom "Ramp Rate Up/Down"
+    Number entities (backed by a dedicated C4RampCluster on a virtual
+    endpoint, c4_ramp_cluster.py) with ZHA's own standard, already-
+    auto-discovered on_transition_time/off_transition_time entities —
+    both C4DimmerOnOff's on()/off() (redirecting into a real ZCL
+    move_to_level_with_on_off frame) and a direct move_to_level(_with_
+    on_off) call (e.g. a slider drag) now read from here, so there is
+    exactly one place per device to configure ramp timing instead of
+    two. Motivation: reading the real driver and real-hardware debug
+    logs confirmed the c4.dm.tv-backed custom mechanism never actually
+    influenced dimming behavior — a real move_to_level_with_on_off ZCL
+    command's own transition_time argument is what the device animates
+    against, not any device-side provisioning table. These attributes
+    are already cached locally and persisted via zigpy's own appdb (any
+    _update_attribute() call is persisted generically) with no custom
+    push/retry logic needed, unlike the old mechanism's hard-won
+    ApplicationController-readiness dance.
+
+    direction is "up" (on_transition_time) or "down"
+    (off_transition_time).
+    """
+    if level_cluster is None:
+        return C4_DEFAULT_TRANSITION_TENTHS
+    attr_id = (
+        LevelControl.AttributeDefs.on_transition_time.id if direction == "up"
+        else LevelControl.AttributeDefs.off_transition_time.id
+    )
+    value = level_cluster.get(attr_id)
+    return int(value) if value is not None else C4_DEFAULT_TRANSITION_TENTHS
+
 
 def _c4_persist_device(device, source="unknown"):
     """Trigger zigpy DB persistence for a device after model/manufacturer update."""

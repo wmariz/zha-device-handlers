@@ -241,7 +241,8 @@ uses adaptive phase dimming and reports real-time power telemetry. Physical
 button presses on the device are handled locally and the state is synced back
 to Home Assistant automatically.
 
-Default transition times: 800 ms ramp-on, 2000 ms ramp-off, default on-level
+Default transition time: 750 ms for both on and off (configurable via the
+standard Off/On/Off-On Transition Time Number entities), default on-level
 of ~75%.
 
 **Button events:** the top and bottom paddle buttons each get their own HA
@@ -364,19 +365,18 @@ Copy either file into your Home Assistant scripts configuration, or paste
 its contents into **Settings → Automations & Scenes → Scripts → Add
 Script → Edit in YAML**.
 
-## Ramp Rate Configuration (LDZ-101 dimmer)
+## Ramp Rate Configuration
 
-`ha-scripts/control4_ramp_scripts.yaml` — two scripts targeting
-`C4RampCluster` (endpoint 4, cluster `0xFC44`) for adjusting the LDZ-101's
-transition times:
-
-- **control4_set_ramp_rate** — set a single ramp time (on-ramp, off-ramp,
-  fast, or one of two slow-fade slots) from a dropdown.
-- **control4_set_on_off_ramps** — set both the on-ramp and off-ramp times
-  at once.
-
-Defaults confirmed from the device's own provisioning capture: 750 ms
-on-ramp, 2000 ms off-ramp, 100 ms fast ramp, 5000 ms slow fades.
+Every dimmable light (LDZ-101, and both outlets of the LOZ-5D1-W) exposes
+ZHA's own standard **Off/On/Off-On Transition Time** Number config
+entities — no separate script or custom cluster needed. These are
+genuine ZCL LevelControl attributes: setting them changes the
+`transition_time` argument every on()/off()/dim command sends, which is
+what actually controls how the real device ramps. An earlier custom
+"Ramp Rate Up/Down" mechanism (a dedicated cluster polling/pushing a
+device-side provisioning table via `c4.dm.tv`) was removed after
+confirming that table was never consulted by real dimming commands in
+the first place.
 
 ## Architecture
 
@@ -394,13 +394,11 @@ control4/
 ├── c4_led_rgb.py                Per-button RGB light entities (LDZ-101 dimmer; shared base classes reused by the keypad)
 ├── c4_keypad_led_rgb.py         KPZ-6B1 per-button RGB lights + C4KeypadAllLedCluster (0xFC48)
 ├── c4_attached_switch.py        button_attached/led_attached hardware-config switches (dimmer)
-├── c4_ramp_cluster.py           Transition-time / hardware-config cluster (dimmer provisioning)
-├── c4_helpers.py                Constants, frame builders, shared utilities
+├── c4_helpers.py                Constants, frame builders, shared utilities (incl. read_transition_tenths())
 ├── c4_hooks.py                  Monkey-patches for quirk discovery & routing
 ├── ha-scripts/
 │   ├── control4_ldz101_led_rgb_scripts.yaml        "Set All LEDs" — LDZ-101 dimmer or KPZ-6B1 keypad
-│   ├── control4_kpz6b1_individual_leds_script.yaml "Set Individual LEDs" — KPZ-6B1 only
-│   └── control4_ramp_scripts.yaml                  Ramp/transition-time scripts — LDZ-101 dimmer only
+│   └── control4_kpz6b1_individual_leds_script.yaml "Set Individual LEDs" — KPZ-6B1 only
 └── documentation/               Protocol documentation (from packet captures, HA/ZHA logs, and a real driver binary)
 ```
 

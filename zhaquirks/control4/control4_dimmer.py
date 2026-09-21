@@ -248,6 +248,22 @@ History:
   identical in structure to the on-color pair, just targeting
   c4.dm.l0f/l1f instead. Four RGB light entities total now — one per
   (button, on/off) pair.
+
+  "Attempt 22" (see control4_outlet_dimmer.py's module docstring for
+  the fuller cross-device history): removed the custom EP4 virtual
+  endpoint and its "Ramp Rate Up"/"Ramp Rate Down" Number entities
+  entirely. Real-hardware debug logs and reading zha's own light
+  platform confirmed the c4.dm.tv-backed C4RampCluster mechanism these
+  entities drove never actually influenced dimming behavior in the
+  first place — a real move_to_level_with_on_off ZCL command's own
+  transition_time argument is what the device animates against, not
+  any device-side provisioning table c4.dm.tv could set. Now reads the
+  ZHA-standard on_transition_time/off_transition_time Number config
+  entities directly (already locally cached via C4DimmerLevelControl's
+  _LOCAL_ATTRS, just previously hidden) — one config surface instead
+  of two, no custom persistence/retry logic needed since these are
+  ordinary ZCL attributes zigpy's own appdb already persists generically.
+  See read_transition_tenths() in c4_helpers.py.
 """
 
 import logging
@@ -284,20 +300,15 @@ import c4_hooks
 from c4_helpers import (
     APD120_BUTTON_MAP,
     C4_DEFAULT_ON_LEVEL,
-    C4_OFF_TRANSITION,
-    C4_ON_TRANSITION,
     DIMMER_BUTTON_EVENT_EP_MAP,
+    EXPLICIT_TRANSITION_THRESHOLD_TENTHS,
     C4DimmerManufCluster,
     C4ConfigCluster,
+    read_transition_tenths,
     strip_c4_endpoint,
 )
 from c4_basic_cluster import C4BasicCluster
 from c4_button_cluster import C4DimmerButtonCluster, _DIMMER_BUTTON_CLUSTERS
-from c4_ramp_cluster import (
-    C4RampCluster,
-    EXPLICIT_TRANSITION_THRESHOLD_TENTHS,
-    find_ramp_cluster,
-)
 from c4_attached_switch import (
     ATTACHED_SWITCH_EP_MAP,
     C4ButtonAttachedOnOff,
@@ -332,48 +343,23 @@ class C4DimmerOnOff(CustomCluster, OnOff):
     cluster_id = OnOff.cluster_id
     _SUCCESS   = (foundation.GeneralCommand.Default_Response, ZCLStatus.SUCCESS)
 
-    def _get_ramp_cluster(self):
-        """Find the C4RampCluster on EP 4, if available."""
-        try:
-            return find_ramp_cluster(self.endpoint.device)
-        except Exception:
-            return None
-
     def _get_on_transition(self) -> int:
-        """Return the on-ramp time in ZCL 1/10-second units."""
-        ramp = self._get_ramp_cluster()
-        if ramp is not None:
-            tenths = ramp.get_on_ramp_tenths()
-            _LOGGER.debug(
-                "C4 OnOff: on-ramp from C4RampCluster cache = %d tenths "
-                "(%d ms cached, NOT read from the real device — see "
-                "c4_ramp_cluster.py's docstring)",
-                tenths, ramp.get_ramp_ms(0x02),
-            )
-            return tenths
-        _LOGGER.debug(
-            "C4 OnOff: no C4RampCluster found on EP4 — falling back to "
-            "hardcoded C4_ON_TRANSITION=%d tenths", C4_ON_TRANSITION,
-        )
-        return C4_ON_TRANSITION
+        """Return the on-ramp time in ZCL 1/10-second units, from the
+        standard on_transition_time Number config entity — see
+        read_transition_tenths() (c4_helpers.py), "Attempt 22".
+        """
+        tenths = read_transition_tenths(self.endpoint.level, "up")
+        _LOGGER.debug("C4 OnOff: on_transition_time = %d tenths", tenths)
+        return tenths
 
     def _get_off_transition(self) -> int:
-        """Return the off-ramp time in ZCL 1/10-second units."""
-        ramp = self._get_ramp_cluster()
-        if ramp is not None:
-            tenths = ramp.get_off_ramp_tenths()
-            _LOGGER.debug(
-                "C4 OnOff: off-ramp from C4RampCluster cache = %d tenths "
-                "(%d ms cached, NOT read from the real device — see "
-                "c4_ramp_cluster.py's docstring)",
-                tenths, ramp.get_ramp_ms(0x03),
-            )
-            return tenths
-        _LOGGER.debug(
-            "C4 OnOff: no C4RampCluster found on EP4 — falling back to "
-            "hardcoded C4_OFF_TRANSITION=%d tenths", C4_OFF_TRANSITION,
-        )
-        return C4_OFF_TRANSITION
+        """Return the off-ramp time in ZCL 1/10-second units, from the
+        standard off_transition_time Number config entity — see
+        read_transition_tenths() (c4_helpers.py), "Attempt 22".
+        """
+        tenths = read_transition_tenths(self.endpoint.level, "down")
+        _LOGGER.debug("C4 OnOff: off_transition_time = %d tenths", tenths)
+        return tenths
 
     async def command(
         self,
@@ -527,21 +513,27 @@ class C4DimmerLevelControl(CustomCluster, LevelControl):
         ):
             # CONFIRMED gap on real hardware: a plain on()/off() toggle
             # ramps (C4DimmerOnOff already injects
-            # _get_on_transition()/_get_off_transition() from the cached
-            # Ramp Rate — see this file's C4DimmerOnOff.command()), but
-            # dragging the brightness slider did not, because
-            # move_to_level(_with_on_off) reaches this cluster directly
-            # and gets forwarded to the real device as genuine ZCL
-            # passthrough with whatever transition_time HA computed —
-            # which, for a plain slider drag with no explicit
-            # `transition:`, is zha's own ~0.1s filler default (see
-            # EXPLICIT_TRANSITION_THRESHOLD_TENTHS's own comment,
-            # c4_ramp_cluster.py), not the user's configured Ramp Rate.
-            # Injects the cached Ramp Rate here too, mirroring
-            # control4_outlet_dimmer.py's C4DimmerLevelControlWithOptimistic
-            # Sync — an automation's own explicit transition_time still
-            # reaches the device unmodified, since this only overrides
-            # values at/below the threshold.
+            # _get_on_transition()/_get_off_transition() — see this
+            # file's C4DimmerOnOff.command()), but dragging the
+            # brightness slider did not, because move_to_level(_with_
+            # on_off) reaches this cluster directly and gets forwarded
+            # to the real device as genuine ZCL passthrough with
+            # whatever transition_time HA computed — which, for a plain
+            # slider drag with no explicit `transition:`, is zha's own
+            # ~0.1s filler default (see EXPLICIT_TRANSITION_THRESHOLD_
+            # TENTHS's own comment, c4_ramp_cluster.py), not a
+            # meaningful transition. Injects the SAME
+            # on_transition_time/off_transition_time standard Number
+            # config entities C4DimmerOnOff already reads (see
+            # "Attempt 22" in the module docstring: this used to read a
+            # separate custom "Ramp Rate Up/Down" pair from a dedicated
+            # EP4 cluster — dropped in favor of ZHA's own standard
+            # entities once it became clear the c4.dm.tv-backed custom
+            # mechanism never actually influenced real dimming behavior,
+            # which is controlled entirely by this ZCL command's own
+            # transition_time argument). An automation's own explicit
+            # transition_time still reaches the device unmodified, since
+            # this only overrides values at/below the threshold.
             if args:
                 _inject_level_zcl = args[0]
             elif "level" in kwargs:
@@ -560,26 +552,23 @@ class C4DimmerLevelControl(CustomCluster, LevelControl):
                 _inject_transition_tenths is None
                 or _inject_transition_tenths <= EXPLICIT_TRANSITION_THRESHOLD_TENTHS
             ):
-                _inject_ramp = find_ramp_cluster(self.endpoint.device)
-                if _inject_ramp is not None:
-                    _inject_current_zcl = self.get("current_level") or 0
-                    _inject_new_transition = (
-                        _inject_ramp.get_on_ramp_tenths()
-                        if _inject_level_zcl >= _inject_current_zcl
-                        else _inject_ramp.get_off_ramp_tenths()
-                    )
-                    _LOGGER.debug(
-                        "C4 Level: injecting cached Ramp Rate "
-                        "transition_time=%d tenths (caller gave %s)",
-                        _inject_new_transition, _inject_transition_tenths,
-                    )
-                    if len(args) > 1:
-                        args = (args[0], _inject_new_transition) + args[2:]
-                    elif args:
-                        args = (args[0], _inject_new_transition)
-                    else:
-                        kwargs = dict(kwargs)
-                        kwargs["transition_time"] = _inject_new_transition
+                _inject_current_zcl = self.get("current_level") or 0
+                _inject_new_transition = read_transition_tenths(
+                    self,
+                    "up" if _inject_level_zcl >= _inject_current_zcl else "down",
+                )
+                _LOGGER.debug(
+                    "C4 Level: injecting on/off_transition_time="
+                    "%d tenths (caller gave %s)",
+                    _inject_new_transition, _inject_transition_tenths,
+                )
+                if len(args) > 1:
+                    args = (args[0], _inject_new_transition) + args[2:]
+                elif args:
+                    args = (args[0], _inject_new_transition)
+                else:
+                    kwargs = dict(kwargs)
+                    kwargs["transition_time"] = _inject_new_transition
 
             # Diagnostic only (no behavior change): this is the ONLY place
             # that logs what gets sent when HA/ZHA calls LevelControl
@@ -670,7 +659,7 @@ class C4DimmerLevelControl(CustomCluster, LevelControl):
 # forced from the C4 proprietary profile to the ZHA profile, matching the
 # original CustomDevice replacement dict.
 #
-# EP2, EP4, and every virtual per-button/LED/attached-switch endpoint below
+# EP2 and every virtual per-button/LED/attached-switch endpoint below
 # never existed in the old signature at all — same "declared only in
 # replacement" virtual-endpoint pattern, added via adds_endpoint() instead
 # of replaces_endpoint(). The LED-color endpoints' DEVICE_TYPE (unlike
@@ -693,26 +682,16 @@ _c4_apd120_entry = (
     .adds(Scenes, endpoint_id=1)
     .adds(C4DimmerOnOff, endpoint_id=1)
     .adds(C4DimmerLevelControl, endpoint_id=1)
-    # ZHA auto-creates "On Level" and "Off/On/Off-On Transition Time"
-    # Number config entities for any LevelControl cluster — on_level and
-    # the transition-time attrs are purely local caches here (see
-    # C4DimmerLevelControl/C4RampCluster), never meant to be user-facing.
-    # Hidden the same way as on the LOZ-5D1-W outlets.
+    # ZHA auto-creates an "On Level" Number config entity for any
+    # LevelControl cluster — on_level is a purely local cache here (see
+    # C4DimmerLevelControl), never meant to be user-facing. The standard
+    # Off/On/Off-On Transition Time entities are deliberately left
+    # VISIBLE ("Attempt 22") — they're now this device's one and only
+    # ramp-rate config surface, replacing the old custom "Ramp Rate
+    # Up/Down" pair. See read_transition_tenths() (c4_helpers.py).
     .prevent_default_entity_creation(
         endpoint_id=1, cluster_id=LevelControl.cluster_id,
         unique_id_suffix="on_level",
-    )
-    .prevent_default_entity_creation(
-        endpoint_id=1, cluster_id=LevelControl.cluster_id,
-        unique_id_suffix="on_transition_time",
-    )
-    .prevent_default_entity_creation(
-        endpoint_id=1, cluster_id=LevelControl.cluster_id,
-        unique_id_suffix="off_transition_time",
-    )
-    .prevent_default_entity_creation(
-        endpoint_id=1, cluster_id=LevelControl.cluster_id,
-        unique_id_suffix="on_off_transition_time",
     )
     # --- EP2: ZHA-side-only virtual config endpoint (not on the wire) ---
     .adds_endpoint(2, profile_id=zha.PROFILE_ID, device_type=0x0000)
@@ -724,34 +703,6 @@ _c4_apd120_entry = strip_c4_endpoint(_c4_apd120_entry, 196).adds(
 )
 _c4_apd120_entry = strip_c4_endpoint(_c4_apd120_entry, 197).adds(
     C4DimmerButtonCluster, endpoint_id=197
-)
-_c4_apd120_entry = (
-    _c4_apd120_entry
-    # --- EP4: virtual ramp-rate config endpoint ---
-    .adds_endpoint(4, profile_id=zha.PROFILE_ID, device_type=0x0000)
-    .adds(C4RampCluster, endpoint_id=4)
-    .number(
-        attribute_name=C4RampCluster.AttributeDefs.on_ramp_ms.name,
-        cluster_id=C4RampCluster.cluster_id,
-        endpoint_id=4,
-        min_value=0,
-        max_value=65535,
-        step=1,
-        unit="ms",
-        translation_key="ramp_rate_up",
-        fallback_name="Ramp Rate Up",
-    )
-    .number(
-        attribute_name=C4RampCluster.AttributeDefs.off_ramp_ms.name,
-        cluster_id=C4RampCluster.cluster_id,
-        endpoint_id=4,
-        min_value=0,
-        max_value=65535,
-        step=1,
-        unit="ms",
-        translation_key="ramp_rate_down",
-        fallback_name="Ramp Rate Down",
-    )
 )
 
 # Virtual per-button endpoints — one Event/binary_sensor entity each in ZHA.
