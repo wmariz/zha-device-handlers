@@ -1,20 +1,14 @@
-"""C4 button clusters — shared across dimmer, switch, scene controller, outlet, remote.
+"""C4 button clusters — shared across dimmer, switch, outlet, keypad.
 
 Classes exported:
   C4ButtonCluster                  — base, used by plain switches
   C4DimmerButtonCluster            — C4-APD120/LDZ-101 dimmer (adds per-button binary_sensor entities)
   C4SwitchButtonCluster            — on/off switch variant
-  C4SceneControllerButtonCluster   — KC120277 8-button keypad
   C4DualOutletButtonCluster        — LOZ-5S1-W dual outlet
-  C4RemoteButtonCluster            — C4-SR260 50-button IR/Zigbee remote
   C4KeypadButtonCluster            — C4-KPZ-6B1 6-button keypad (adds per-button binary_sensor entities)
   _DIMMER_BUTTON_CLUSTERS          — per-button virtual cluster dict for the dimmer (name → class)
-  _KC120277_BUTTON_CLUSTERS        — per-button virtual cluster dict (btn_id → class)
-  _SR260_BUTTON_CLUSTERS           — per-button virtual cluster dict for SR260
   _KPZ6B1_BUTTON_CLUSTERS          — per-button virtual cluster dict for the KPZ-6B1
   _make_dimmer_button_cluster()    — factory for the dimmer's per-button BinaryInput cluster
-  _make_kc120277_button_cluster()  — factory for per-button EventableCluster
-  _make_sr260_button_cluster()     — factory for SR260 per-button EventableCluster
   _make_keypad_button_cluster()    — factory for the KPZ-6B1's per-button BinaryInput cluster
 """
 
@@ -34,10 +28,8 @@ from zhaquirks.const import (
     BUTTON,
     DOUBLE_PRESS,
     ENDPOINT_ID,
-    LONG_PRESS,
     LONG_RELEASE,
     SHORT_PRESS,
-    SHORT_RELEASE,
     TRIPLE_PRESS,
     QUADRUPLE_PRESS,
 )
@@ -49,67 +41,22 @@ from c4_helpers import (
     APD120_BUTTON_MAP,
     C4_BUTTON_CLUSTER_ID,
     C4_CLUSTER_ID,
-    C4_DISPLAY_CLUSTER_ID,
     C4_PROFILE_BUTTON,
     C4_PROVISION_DELAY,
     DIMMER_BUTTON_EVENT_EP_MAP,
     DIMMER_BUTTON_MAP,
     DIMMER_EVENT_MAP,
-    KC120277_BUTTON_EP_MAP,
-    KC120277_BUTTON_MAP,
     KEYPAD_EVENT_MAP,
     KPZ6B1_BUTTON_EP_MAP,
     KPZ6B1_BUTTON_MAP,
     OUTLET_EP_MAP,
-    SR260_BUTTON_EP_MAP,
-    SR260_BUTTON_MAP,
     _build_c4_frame,
-    _c4_send_clear_display,
-    _c4_send_list_items_response,
-    _c4_send_room_info,
     _sync_ep1_level,
     _sync_ep1_onoff,
     next_c4_seq,
 )
 
 _LOGGER = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Factory: one EventableCluster class per KC120277 physical button
-# ---------------------------------------------------------------------------
-
-def _make_kc120277_button_cluster(button_num: int) -> type:
-    """Return a unique EventableCluster class for one KC120277 physical button.
-
-    Each class lives on its own virtual endpoint (EP 200+button_num), so ZHA
-    creates one independent Event entity per button.  Physical Zigbee frames
-    never arrive on these endpoints — routing is done by
-    C4SceneControllerButtonCluster._handle_button_event().
-    """
-
-    class _ButtonCluster(EventableCluster):
-        cluster_id   = C4_BUTTON_CLUSTER_ID
-        name         = f"Button {button_num + 1}"
-        ep_attribute = f"c4_scene_btn_{button_num}"
-        _c4_custom_handler = False  # no physical routing
-
-        def handle_message(self, hdr, args):
-            pass  # no physical packets arrive here
-
-        def handle_cluster_request(self, hdr, args, *, dst_addressing=None):
-            pass
-
-    _ButtonCluster.__name__     = f"C4SceneButton{button_num}Cluster"
-    _ButtonCluster.__qualname__ = f"C4SceneButton{button_num}Cluster"
-    return _ButtonCluster
-
-
-# One cluster class per button — keyed by button_id (0–7)
-_KC120277_BUTTON_CLUSTERS: dict[int, type] = {
-    btn_id: _make_kc120277_button_cluster(btn_id)
-    for btn_id in KC120277_BUTTON_MAP
-}
 
 
 # ---------------------------------------------------------------------------
@@ -753,81 +700,6 @@ class C4SwitchButtonCluster(C4ButtonCluster):
 
 
 # ---------------------------------------------------------------------------
-# Scene controller variant
-# ---------------------------------------------------------------------------
-
-class C4SceneControllerButtonCluster(C4ButtonCluster):
-    """Button events for C4-KC120277; routes to per-button virtual endpoints."""
-
-    name         = "Control4 Scene Controller Button Events"
-    ep_attribute = "c4_scene_controller_buttons"
-    BUTTON_MAP   = KC120277_BUTTON_MAP
-
-    def _handle_light_state(self, fields):
-        _LOGGER.debug("C4 scene ctrl: ignoring c4.dmx.ls (no load)")
-
-    def _sync_state_from_event(self, event_code, button_id, params):
-        pass  # no EP 1 clusters to sync on a scene controller
-
-    def _sync_cc_event(self, button_id, click_count):
-        pass
-
-    def _handle_button_event(self, namespace, button, extra=None):
-        try:
-            button_id = int(button, 16)
-        except (ValueError, TypeError):
-            _LOGGER.warning("C4 scene ctrl: invalid button hex %r", button)
-            return
-
-        event_code = namespace.split(".")[-1] if namespace else "unknown"
-        action = DIMMER_EVENT_MAP.get(event_code, f"unknown_{event_code}")
-        if action == "click_count" and extra is not None:
-            if extra == "01":
-                action = SHORT_PRESS
-            elif extra == "02":
-                action = DOUBLE_PRESS
-            elif extra == "03":
-                action = TRIPLE_PRESS
-            else:
-                action = QUADRUPLE_PRESS
-
-        _LOGGER.debug(
-            "C4 scene ctrl: button_id=0x%02x event=%s action=%s extra=%s",
-            button_id, event_code, action, extra,
-        )
-
-        ep_id = KC120277_BUTTON_EP_MAP.get(button_id)
-        if ep_id is None:
-            _LOGGER.warning(
-                "C4 scene ctrl: button_id=0x%02x has no virtual EP — "
-                "add it to KC120277_BUTTON_EP_MAP", button_id,
-            )
-            return
-
-        ep = self.endpoint.device.endpoints.get(ep_id)
-        if ep is None:
-            _LOGGER.warning(
-                "C4 scene ctrl: virtual EP %d not in device endpoints "
-                "(re-pair after quirk update?)", ep_id,
-            )
-            return
-
-        btn_cluster = ep.in_clusters.get(C4_BUTTON_CLUSTER_ID)
-        if btn_cluster is None:
-            _LOGGER.warning(
-                "C4 scene ctrl: no cluster 0x%04X on EP %d",
-                C4_BUTTON_CLUSTER_ID, ep_id,
-            )
-            return
-
-        btn_cluster.listener_event("zha_send_event", action, {ENDPOINT_ID: ep_id})
-        _LOGGER.debug(
-            "C4 scene ctrl: fired %r on EP %d cluster %s",
-            action, ep_id, type(btn_cluster).__name__,
-        )
-
-
-# ---------------------------------------------------------------------------
 # Dual outlet variant
 # ---------------------------------------------------------------------------
 
@@ -900,410 +772,6 @@ class C4DualOutletButtonCluster(C4SwitchButtonCluster):
     def _sync_cc_event(self, button_id, click_count):
         # On dual outlet devices, cc button_id is the outlet index
         self._sync_onoff_for_outlet(button_id, click_count == 1)
-
-
-# ---------------------------------------------------------------------------
-# SR260 remote variant
-# ---------------------------------------------------------------------------
-
-def _make_sr260_button_cluster(button_id: int, button_name: str) -> type:
-    """Return a unique EventableCluster class for one SR260 physical button.
-
-    Each class lives on its own virtual endpoint (EP 100+button_id), so ZHA
-    creates one independent Event entity per button.  Physical Zigbee frames
-    never arrive on these endpoints — routing is done by
-    C4RemoteButtonCluster._fire_button_event().
-    """
-
-    class _ButtonCluster(EventableCluster):
-        cluster_id   = C4_BUTTON_CLUSTER_ID
-        name         = f"SR260 {button_name}"
-        ep_attribute = f"c4_sr260_btn_{button_id:02x}"
-        _c4_custom_handler = False  # no physical routing
-
-        def handle_message(self, hdr, args):
-            pass
-
-        def handle_cluster_request(self, hdr, args, *, dst_addressing=None):
-            pass
-
-    _ButtonCluster.__name__     = f"C4SR260Button{button_id:02X}Cluster"
-    _ButtonCluster.__qualname__ = _ButtonCluster.__name__
-    return _ButtonCluster
-
-
-# One cluster class per SR260 button — keyed by button_id (0x00..0x31)
-_SR260_BUTTON_CLUSTERS: dict[int, type] = {
-    btn_id: _make_sr260_button_cluster(btn_id, name)
-    for btn_id, name in SR260_BUTTON_MAP.items()
-}
-
-
-class C4RemoteButtonCluster(C4ButtonCluster):
-    """Button events for C4-SR260 IR/Zigbee remote.
-
-    The SR260 uses the c4.zr.* / c4.ln.* namespaces (not c4.dmx.* like
-    keypads).  Each physical press emits a `bb` (button-begin) followed by
-    a `be` (button-end) — there is no separate hold/click-count protocol;
-    duration is left to the receiver.
-
-    Event mapping:
-      c4.zr.bb <btn> ...                →  SHORT_PRESS    on virtual EP 100+btn
-      c4.zr.bh <btn> ...                →  LONG_PRESS     on virtual EP 100+btn
-                                           (one per bh message — the SR260
-                                            re-sends bh repeatedly while a
-                                            button is held, which lets
-                                            automations auto-repeat their
-                                            action; observed `c4.zr.bh 0c
-                                            0000 0000` for held Vol+).
-      c4.zr.be <btn> ...                →  SHORT_RELEASE  on virtual EP 100+btn
-      c4.ln.is  <listID> <selIdx> ...   →  menu_select zha_event (with item label)
-                                           + push ri "<item>" "" then le
-      c4.ln.ise <listID> <selIdx> ...   →  (no-op — release of the matching is)
-      c4.ln.cn  <listID> <selIdx>       →  menu_cancel zha_event (with title)
-                                           + send c4.ln.le to dismiss the menu
-
-    `is`/`ise`/`cn` replace `bb`/`be` for Select (`0x10`) and Cancel
-    (`0x18`) while a list is on screen — the SR260 does not emit the
-    HID-layer button events when an LCD list is up.  The cluster does NOT
-    synthesize SHORT_PRESS / SHORT_RELEASE on the Select / Cancel virtual
-    EPs in that case: when a menu is up the user is interacting with the
-    menu, not with the underlying media device, so firing a parallel
-    button event would cause double-actions (e.g. dismissing the menu
-    AND sending a Back keystroke to the TV).  Bind your menu logic to
-    the `menu_select` / `menu_cancel` zha_events instead.
-
-    On every `is`, the cluster also pushes `c4.ln.ri "<selected item>" ""`
-    followed by `c4.ln.le`, so the LCD shows the chosen item as the
-    display text once the list overlay closes — mirroring the official
-    controller's `is → ri → ise → le` sequence.
-
-    Other observed namespaces are logged and ignored (mot/tm/loc/bl/ln.*) —
-    a quirk that wants to drive the LCD or sync the clock can subclass and
-    override `_handle_state_announcement`.
-    """
-
-    name         = "Control4 SR260 Remote Button Events"
-    ep_attribute = "c4_remote_buttons"
-    BUTTON_MAP   = SR260_BUTTON_MAP
-
-    def _handle_light_state(self, fields):
-        pass  # no load on a remote
-
-    def _sync_state_from_event(self, event_code, button_id, params):
-        pass
-
-    def _sync_cc_event(self, button_id, click_count):
-        pass
-
-    def _process_raw(self, hdr, args):
-        """Intercept SR260 LCD `c4.ln.gi` page requests, then defer to base.
-
-        The remote sends `0i<seq> c4.ln.gi <list_id> <offset> <count> 00`
-        when it needs item labels for the active menu.  We answer it with
-        a `0r<seq> 000 "<icon><item0>" ...\r\n` response built from the
-        cached items on the display cluster (EP 1, cluster
-        C4_DISPLAY_CLUSTER_ID).  Everything else falls through to the
-        base class's `sa` / "raw frame" dispatch.
-        """
-        raw_bytes = None
-        if isinstance(args, (bytes, bytearray)):
-            raw_bytes = bytes(args)
-        elif args and isinstance(args, (list, tuple)):
-            if isinstance(args[0], (bytes, bytearray)):
-                raw_bytes = bytes(args[0])
-            elif isinstance(args[0], int):
-                raw_bytes = bytes(args)
-            elif isinstance(args[0], (list, tuple)):
-                raw_bytes = bytes(args[0])
-
-        if raw_bytes is not None:
-            text = raw_bytes.decode("ascii", errors="replace").strip()
-            cmd = text.split()
-            if (
-                len(cmd) >= 5
-                and cmd[0].startswith("0i")
-                and cmd[1] == "c4.ln.gi"
-            ):
-                try:
-                    seq = cmd[0][2:]
-                    list_id = int(cmd[2], 16)
-                    offset = int(cmd[3], 16)
-                    count = int(cmd[4], 16)
-                except ValueError:
-                    pass
-                else:
-                    _LOGGER.debug(
-                        "C4 SR260: gi request list=0x%04X offset=%d count=%d "
-                        "seq=%s",
-                        list_id, offset, count, seq,
-                    )
-                    asyncio.ensure_future(
-                        self._answer_gi_request(list_id, offset, count, seq)
-                    )
-                    return
-
-        super()._process_raw(hdr, args)
-
-    async def _answer_gi_request(
-        self, list_id: int, offset: int, count: int, seq: str,
-    ) -> None:
-        """Reply to a `c4.ln.gi` request with the cached items, if any."""
-        display = self._get_display_cluster()
-        if display is None:
-            _LOGGER.debug(
-                "C4 SR260: gi for list 0x%04X but no display cluster — ignoring",
-                list_id,
-            )
-            return
-
-        menu = getattr(display, "_active_menu", None)
-        if menu is None or menu.get("list_id") != list_id:
-            _LOGGER.debug(
-                "C4 SR260: gi for list 0x%04X but active menu is %r — "
-                "ignoring", list_id, menu,
-            )
-            return
-
-        items_all = list(menu.get("items") or [])
-        slice_end = offset + count if count else len(items_all)
-        items = items_all[offset:slice_end]
-        try:
-            await _c4_send_list_items_response(
-                self.endpoint.device, seq, items,
-            )
-        except Exception:
-            _LOGGER.warning(
-                "C4 SR260: gi response send failed", exc_info=True,
-            )
-
-    def _get_display_cluster(self):
-        ep1 = self.endpoint.device.endpoints.get(1)
-        if ep1 is None:
-            return None
-        return ep1.in_clusters.get(C4_DISPLAY_CLUSTER_ID)
-
-    def _handle_state_announcement(self, namespace, data):
-        if namespace == "c4.zr.bb" and data:
-            self._fire_button_event(data[0], SHORT_PRESS)
-        elif namespace == "c4.zr.bh" and data:
-            # Button-hold: SR260 re-sends `c4.zr.bh <btn> 0000 0000` every
-            # ~100ms while a button is held down (after the initial bb).
-            # Fire LONG_PRESS per message so HA automations can auto-repeat
-            # their action — e.g. volume_up bumps the volume on every tick.
-            self._fire_button_event(data[0], LONG_PRESS)
-        elif namespace == "c4.zr.be" and data:
-            self._fire_button_event(data[0], SHORT_RELEASE)
-        elif namespace == "c4.ln.is" and data:
-            # Item-select begin: user pressed OK on a highlighted list item.
-            # When a list is on screen the SR260 emits this in place of
-            # `bb 0x10` — fire menu_select with the resolved item (which
-            # also dismisses the LCD list via `c4.ln.le`).  Do NOT also
-            # fire SHORT_PRESS on the Select EP: when a menu is up the
-            # user's intent is to choose a menu item, not to send a
-            # Select keystroke to the underlying media device.
-            list_id = self._parse_hex(data, 0)
-            sel_idx = self._parse_hex(data, 1)
-            self._fire_menu_select(list_id, sel_idx)
-        elif namespace == "c4.ln.ise" and data:
-            # Item-select end: release of the matching `is` (replaces be 0x10).
-            # No-op for the same reason as `is` — see above.
-            pass
-        elif namespace == "c4.ln.cn":
-            # Cancel pressed while a list is on screen.  The SR260 emits
-            # `c4.ln.cn <listID> <selIdx>` in place of `bb 0x18`/`be 0x18`
-            # — there is no parallel HID-layer event.  Fire `menu_cancel`
-            # (so dispatcher automations waiting on the menu can exit
-            # cleanly without waiting for selection_timeout) and dismiss
-            # the LCD list.  Do NOT also fire SHORT_PRESS on the Cancel
-            # EP: when a menu is up the user's intent is to dismiss it,
-            # not to send a Back keystroke to the underlying media device.
-            # Captured in sniff/test-case-press-cancel-while-menu-up.txt
-            # frame 38785.
-            list_id = self._parse_hex(data, 0)
-            sel_idx = self._parse_hex(data, 1)
-            self._fire_menu_cancel(list_id, sel_idx)
-        elif namespace == "c4.zr.mot":
-            # SR260 woke from sleep due to motion / pickup.  Fire a
-            # zha_event so HA automations can react (e.g. turn on a
-            # light when the remote is picked up).
-            self.listener_event(
-                "zha_send_event",
-                "motion_wake",
-                {ENDPOINT_ID: self.endpoint.endpoint_id},
-            )
-            _LOGGER.debug(
-                "C4 SR260 [%s]: motion_wake fired",
-                self.endpoint.device.ieee,
-            )
-        elif namespace == "c4.zr.bl":
-            _LOGGER.debug("C4 SR260: backlight event %s", data)
-        elif namespace.startswith("c4.ln.") or namespace in (
-            "c4.zr.tm", "c4.zr.loc",
-        ):
-            _LOGGER.debug(
-                "C4 SR260: ignoring screen / config command %s %s",
-                namespace, data,
-            )
-        else:
-            _LOGGER.info(
-                "C4 SR260: unhandled namespace %s data=%s", namespace, data
-            )
-
-    @staticmethod
-    def _parse_hex(data, idx: int) -> int:
-        if len(data) <= idx:
-            return 0
-        try:
-            return int(data[idx], 16)
-        except (TypeError, ValueError):
-            return 0
-
-    def _fire_menu_select(self, list_id: int, sel_idx: int) -> None:
-        """Fire `menu_select` zha_event, update LCD labels, dismiss list.
-
-        After firing the zha_event, pushes `c4.ln.ri "<item>" ""` so the
-        SR260 LCD shows the selected item as the display text — then
-        sends `c4.ln.le` to close the list overlay so the label becomes
-        visible.  Mirrors the official Control4 controller's
-        `is → ri → ise → le` sequence (see
-        documentation/control4-sr260-remote-protocol.md).
-        """
-        display = self._get_display_cluster()
-        item = None
-        title = ""
-        if display is not None:
-            menu = getattr(display, "_active_menu", None)
-            if menu is not None and menu.get("list_id") == list_id:
-                items = menu.get("items") or []
-                item = items[sel_idx] if 0 <= sel_idx < len(items) else None
-                title = menu.get("title") or ""
-            display._active_menu = None
-
-        self.listener_event(
-            "zha_send_event",
-            "menu_select",
-            {
-                "list_id": list_id,
-                "selected_index": sel_idx,
-                "item": item,
-                "title": title,
-                ENDPOINT_ID: self.endpoint.endpoint_id,
-            },
-        )
-        _LOGGER.info(
-            "C4 SR260: menu_select list=0x%04X idx=%d item=%r",
-            list_id, sel_idx, item,
-        )
-
-        asyncio.ensure_future(self._show_selection_and_close(item or ""))
-
-    def _fire_menu_cancel(self, list_id: int, sel_idx: int) -> None:
-        """Fire `menu_cancel` zha_event and dismiss the LCD list.
-
-        Mirrors `_fire_menu_select` but for the cancel path: pulls the
-        title from the active menu (if any), clears the cached menu,
-        schedules a `c4.ln.le` send, and emits a `menu_cancel` zha_event
-        carrying the same shape as `menu_select` minus the chosen item.
-        Dispatcher automations should listen for both `menu_select` and
-        `menu_cancel` so a Cancel exits the wait_for_trigger immediately
-        instead of blocking until `selection_timeout`.
-        """
-        display = self._get_display_cluster()
-        title = ""
-        if display is not None:
-            menu = getattr(display, "_active_menu", None)
-            if menu is not None and menu.get("list_id") == list_id:
-                title = menu.get("title") or ""
-            display._active_menu = None
-
-        self.listener_event(
-            "zha_send_event",
-            "menu_cancel",
-            {
-                "list_id": list_id,
-                "selected_index": sel_idx,
-                "title": title,
-                ENDPOINT_ID: self.endpoint.endpoint_id,
-            },
-        )
-        _LOGGER.info(
-            "C4 SR260: menu_cancel list=0x%04X idx=%d title=%r",
-            list_id, sel_idx, title,
-        )
-
-        asyncio.ensure_future(self._clear_lcd_after_select())
-
-    def _dismiss_lcd_list(self) -> None:
-        """Clear cached menu state and schedule a `c4.ln.le` send."""
-        display = self._get_display_cluster()
-        if display is not None:
-            display._active_menu = None
-        asyncio.ensure_future(self._clear_lcd_after_select())
-
-    async def _show_selection_and_close(self, item: str) -> None:
-        """Push `ri "<item>" ""` then `le` to dismiss the list."""
-        device = self.endpoint.device
-        try:
-            await _c4_send_room_info(device, item, "")
-        except Exception:
-            _LOGGER.debug(
-                "C4 SR260: post-select c4.ln.ri send failed", exc_info=True,
-            )
-        try:
-            await _c4_send_clear_display(device)
-        except Exception:
-            _LOGGER.debug(
-                "C4 SR260: post-select c4.ln.le send failed", exc_info=True,
-            )
-
-    async def _clear_lcd_after_select(self) -> None:
-        try:
-            await _c4_send_clear_display(self.endpoint.device)
-        except Exception:
-            _LOGGER.debug(
-                "C4 SR260: post-select c4.ln.le send failed", exc_info=True,
-            )
-
-    def _fire_button_event(self, button_hex: str, action: str) -> None:
-        try:
-            button_id = int(button_hex, 16)
-        except (ValueError, TypeError):
-            _LOGGER.warning("C4 SR260: invalid button hex %r", button_hex)
-            return
-
-        ep_id = SR260_BUTTON_EP_MAP.get(button_id)
-        if ep_id is None:
-            _LOGGER.warning(
-                "C4 SR260: unknown button 0x%02x (no entry in SR260_BUTTON_EP_MAP)",
-                button_id,
-            )
-            return
-
-        ep = self.endpoint.device.endpoints.get(ep_id)
-        if ep is None:
-            _LOGGER.warning(
-                "C4 SR260: virtual EP %d not in device endpoints "
-                "(re-pair after quirk update?)", ep_id,
-            )
-            return
-
-        btn_cluster = ep.in_clusters.get(C4_BUTTON_CLUSTER_ID)
-        if btn_cluster is None:
-            _LOGGER.warning(
-                "C4 SR260: no cluster 0x%04X on EP %d",
-                C4_BUTTON_CLUSTER_ID, ep_id,
-            )
-            return
-
-        button_name = SR260_BUTTON_MAP.get(button_id, f"button_{button_id:#04x}")
-        btn_cluster.listener_event(
-            "zha_send_event", action,
-            {BUTTON: button_name, ENDPOINT_ID: ep_id},
-        )
-        _LOGGER.debug(
-            "C4 SR260: fired %r for %s on EP %d", action, button_name, ep_id,
-        )
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 
 Shared clusters defined here (used by 2+ device files):
   C4DimmerManufCluster  — EP 1 manufacturer cluster (all devices)
-  C4ConfigCluster       — EP 2 / EP 196 config cluster (dimmer, switch, scene controller)
+  C4ConfigCluster       — EP 2 / EP 196 config cluster (dimmer, switch)
 """
 
 import asyncio
@@ -41,20 +41,10 @@ from zhaquirks.const import (
     MODELS_INFO,
     OUTPUT_CLUSTERS,
     PROFILE_ID,
-    SHORT_PRESS,
-    SHORT_RELEASE,
     TRIPLE_PRESS,
     TURN_OFF,
     TURN_ON,
 )
-
-# zhaquirks.const only defines BUTTON_1..BUTTON_6 in some releases.
-# Define the higher buttons locally so this module imports on every version.
-try:  # pragma: no cover
-    from zhaquirks.const import BUTTON_7, BUTTON_8
-except ImportError:  # pragma: no cover
-    BUTTON_7 = "button_7"
-    BUTTON_8 = "button_8"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -70,7 +60,6 @@ C4_MANUF_CLUSTER    = 0xFFFF
 C4_CLUSTER_ID       = 0x0001   # C4 serial-over-ZigBee cluster (wire ID)
 C4_CONFIG_CLUSTER_ID = 0xFC41  # ZHA-side virtual cluster for C4 config (avoids PowerConfiguration clash)
 C4_BUTTON_CLUSTER_ID = 0xFC42  # ZHA-side virtual cluster for button events
-C4_DISPLAY_CLUSTER_ID = 0xFC47  # ZHA-side virtual cluster for SR260 LCD message / menu
 
 # ---------------------------------------------------------------------------
 # Transition times and defaults (from Rev E provisioning capture)
@@ -143,24 +132,11 @@ APD120_BUTTON_MAP = {
 }
 
 # Virtual endpoint IDs for the dimmer's per-button Event entities (ZHA-side
-# only, mirroring KC120277_BUTTON_EP_MAP below) — keyed by name, not by the
-# raw button id, since DIMMER_BUTTON_MAP maps two different ids (0x00, 0x01)
-# onto the same "top" button.
+# only) — keyed by name, not by the raw button id, since DIMMER_BUTTON_MAP
+# maps two different ids (0x00, 0x01) onto the same "top" button.
 DIMMER_BUTTON_EVENT_EP_MAP = {
     "top": 198,
     "bottom": 199,
-}
-
-# C4-KC120277: 8 physical buttons, 0-indexed from top
-KC120277_BUTTON_MAP = {
-    0x00: BUTTON_1,
-    0x01: BUTTON_2,
-    0x02: BUTTON_3,
-    0x03: BUTTON_4,
-    0x04: BUTTON_5,
-    0x05: BUTTON_6,
-    0x06: BUTTON_7,
-    0x07: BUTTON_8,
 }
 
 DIMMER_EVENT_MAP = {
@@ -175,14 +151,6 @@ DIMMER_EVENT_MAP = {
     "hc": LONG_PRESS,
     "he": LONG_RELEASE,
     "cc": "click_count",
-    # SR260 remote button-begin / button-end events (c4.zr.bb / c4.zr.be)
-    "bb": SHORT_PRESS,
-    "be": SHORT_RELEASE,
-}
-
-# Virtual endpoint IDs for KC120277 per-button Event entities (ZHA-side only)
-KC120277_BUTTON_EP_MAP: dict[int, int] = {
-    btn_id: 200 + btn_id for btn_id in range(8)
 }
 
 # C4-KPZ-6B1: 6-button keypad, 0-indexed
@@ -219,67 +187,6 @@ KEYPAD_EVENT_MAP = {
     "cc": "click_count",
     "bh": LONG_PRESS,
     "be": LONG_RELEASE,
-}
-
-# C4-SR260: 50 button codes (0x00..0x31) — see
-# documentation/control4-sr260-remote-protocol.md for the layout.
-SR260_BUTTON_MAP: dict[int, str] = {
-    0x00: "room_off",
-    0x01: "watch",
-    0x02: "control4",
-    0x03: "listen",
-    0x04: "list",
-    0x05: "i",
-    0x06: "ii",
-    0x07: "iii",
-    0x08: "guide",
-    0x09: "page_up",
-    0x0a: "page_down",
-    0x0b: "prev",
-    0x0c: "volume_up",
-    0x0d: "up",
-    0x0e: "channel_up",
-    0x0f: "left",
-    0x10: "select",
-    0x11: "right",
-    0x12: "volume_down",
-    0x13: "down",
-    0x14: "channel_down",
-    0x15: "volume_mute",
-    0x16: "info",
-    0x17: "menu",
-    0x18: "cancel",
-    0x19: "reverse",
-    0x1a: "dvr",
-    0x1b: "forward",
-    0x1c: "skip_back",
-    0x1d: "play",
-    0x1e: "skip_forward",
-    0x1f: "record",
-    0x20: "pause",
-    0x21: "stop",
-    0x22: "red",
-    0x23: "green",
-    0x24: "yellow",
-    0x25: "blue",
-    0x26: "digit_1",
-    0x27: "digit_2",
-    0x28: "digit_3",
-    0x29: "digit_4",
-    0x2a: "digit_5",
-    0x2b: "digit_6",
-    0x2c: "digit_7",
-    0x2d: "digit_8",
-    0x2e: "digit_9",
-    0x2f: "star",
-    0x30: "digit_0",
-    0x31: "hash",
-}
-
-# Virtual endpoint IDs for SR260 per-button Event entities (EPs 100..149,
-# all within Zigbee's 1..240 application range).
-SR260_BUTTON_EP_MAP: dict[int, int] = {
-    btn_id: 100 + btn_id for btn_id in SR260_BUTTON_MAP
 }
 
 # LOZ-5S1-W: outlet index → endpoint id
@@ -404,252 +311,6 @@ def _build_c4_frame(seq_num, ascii_cmd: str) -> bytes:
     commands encode identically to ASCII.
     """
     return (ascii_cmd + "\r\n").encode("latin-1")
-
-
-# ---------------------------------------------------------------------------
-# SR260 LCD: display-message helpers (c4.ln.dm / c4.ln.le)
-# ---------------------------------------------------------------------------
-#
-# The SR260 remote shows a single-line message on its LCD when the controller
-# sends:
-#     0i<seq> c4.ln.dm <icon:u8> "<message>"\r\n
-# and clears it (closes the splash) with:
-#     0i<seq> c4.ln.le\r\n
-#
-# Observed in the init capture as `c4.ln.dm 5a "Loading Room..."`.  The icon
-# byte is part of the same glyph table used for list-item label prefixes; 0x5a
-# is the controller's default for transient splashes.
-#
-# Both verbs are sent on profile C4_PROFILE_BUTTON (0xC25C), cluster 0x0001,
-# EP 1→1 — the same transport the dimmer / fan / LED quirks use for their
-# 0s commands.  The remote does not return an Init response, so requests are
-# fire-and-forget (expect_reply=False).
-
-# Default icon byte for c4.ln.dm splashes.  0x5a is what the official C4
-# controller used in the captured init sequence.
-C4_DISPLAY_DEFAULT_ICON = 0x5A
-
-
-async def _c4_send_display_message(
-    device, message: str, icon: int = C4_DISPLAY_DEFAULT_ICON,
-) -> None:
-    """Push a one-line message to a Control4 device's LCD.
-
-    Sends `0i<seq> c4.ln.dm <icon> "<message>"\r\n` on the C4 button profile.
-    Embedded `"` is stripped and `\r` / `\n` are replaced with spaces so the
-    framing isn't broken.  Empty `message` is rejected — call
-    `_c4_send_clear_display` to dismiss an existing splash.
-    """
-    if not isinstance(message, str) or not message:
-        raise ValueError("c4.ln.dm: message must be a non-empty string")
-
-    # The frame is line-terminated with \r\n and quote-delimited, so any of
-    # those three characters in the body would corrupt parsing.
-    sanitised = (
-        message.replace("\r", " ").replace("\n", " ").replace('"', "")
-    )
-
-    seq = next_c4_seq(device)
-    cmd = f'0i{seq:04x} c4.ln.dm {icon:02x} "{sanitised}"'
-    data = _build_c4_frame(seq, cmd)
-
-    _LOGGER.debug(
-        "C4 display: send dm icon=0x%02x msg=%r seq=0x%04x", icon, sanitised, seq,
-    )
-    await device.request(
-        profile=C4_PROFILE_BUTTON,
-        cluster=C4_CLUSTER_ID,
-        src_ep=1, dst_ep=1,
-        sequence=device.get_sequence(),
-        data=data,
-        expect_reply=False,
-    )
-
-
-async def _c4_send_clear_display(device) -> None:
-    """Dismiss an active LCD splash / list view via `0i<seq> c4.ln.le\r\n`."""
-    seq = next_c4_seq(device)
-    cmd = f"0i{seq:04x} c4.ln.le"
-    data = _build_c4_frame(seq, cmd)
-
-    _LOGGER.debug("C4 display: send le (clear) seq=0x%04x", seq)
-    await device.request(
-        profile=C4_PROFILE_BUTTON,
-        cluster=C4_CLUSTER_ID,
-        src_ep=1, dst_ep=1,
-        sequence=device.get_sequence(),
-        data=data,
-        expect_reply=False,
-    )
-
-
-async def _c4_send_room_info(device, room: str, source: str = "") -> None:
-    """Set the SR260 LCD's room title (row 1) and active source (row 2).
-
-    Sends `0s<seq> c4.ln.ri "<room>" "<source>"\r\n` on the C4 button profile.
-    Both args are sanitised the same way as `_c4_send_display_message`'s
-    message body — embedded `"` is stripped and `\r` / `\n` are replaced
-    with spaces so the framing isn't broken.
-
-    `source` may be empty (`""`) when no source is active — observed in
-    init captures as `c4.ln.ri "Screen Porch" ""`.
-    """
-    def _sanitise(s: str) -> str:
-        return (
-            (s or "").replace("\r", " ").replace("\n", " ").replace('"', "")
-        )
-
-    room_s = _sanitise(room)
-    source_s = _sanitise(source)
-
-    seq = next_c4_seq(device)
-    cmd = f'0s{seq:04x} c4.ln.ri "{room_s}" "{source_s}"'
-    data = _build_c4_frame(seq, cmd)
-
-    _LOGGER.debug(
-        "C4 display: send ri room=%r source=%r seq=0x%04x",
-        room_s, source_s, seq,
-    )
-    await device.request(
-        profile=C4_PROFILE_BUTTON,
-        cluster=C4_CLUSTER_ID,
-        src_ep=1, dst_ep=1,
-        sequence=device.get_sequence(),
-        data=data,
-        expect_reply=False,
-    )
-
-
-async def _c4_send_list_header(
-    device, list_id: int, count: int, sel_idx: int, title: str,
-    icon: int = 0x81,
-) -> None:
-    """Send `0i<seq> c4.ln.sl <list_id> <count> <sel_idx> "<icon><title>"\r\n`.
-
-    Establishes a menu / list on the SR260's LCD.  The remote will respond
-    with one or more `c4.ln.gi` page requests asking for the actual item
-    labels, which the controller answers with `_c4_send_list_items_response`.
-
-    All three integer args are 16-bit (sent as 4 hex digits).  `title` is
-    sanitised the same way `_c4_send_display_message` sanitises its message
-    so the framing stays parseable.
-
-    `icon` is a 1-byte glyph code prefixed inside the quoted title (default
-    `0x81`, the byte the official Control4 controller uses for the "Watch"
-    header — see documentation/control4-sr260-remote-protocol.md).  Same
-    glyph table as `c4.ln.dm` / list-item labels.
-    """
-    if not 0 <= list_id <= 0xFFFF:
-        raise ValueError(f"list_id out of range: {list_id}")
-    if not 0 <= count <= 0xFFFF:
-        raise ValueError(f"count out of range: {count}")
-    if not 0 <= sel_idx <= 0xFFFF:
-        raise ValueError(f"sel_idx out of range: {sel_idx}")
-    if not 0 <= icon <= 0xFF:
-        raise ValueError(f"icon out of range: {icon}")
-
-    sanitised = (
-        (title or "").replace("\r", " ").replace("\n", " ").replace('"', "")
-    )
-
-    seq = next_c4_seq(device)
-    cmd = (
-        f'0i{seq:04x} c4.ln.sl {list_id:04x} {count:04x} {sel_idx:04x} '
-        f'"{chr(icon)}{sanitised}"'
-    )
-    data = _build_c4_frame(seq, cmd)
-
-    _LOGGER.debug(
-        "C4 display: send sl id=0x%04x count=%d sel=%d icon=0x%02x "
-        "title=%r seq=0x%04x",
-        list_id, count, sel_idx, icon, sanitised, seq,
-    )
-    await device.request(
-        profile=C4_PROFILE_BUTTON,
-        cluster=C4_CLUSTER_ID,
-        src_ep=1, dst_ep=1,
-        sequence=device.get_sequence(),
-        data=data,
-        expect_reply=False,
-    )
-
-
-async def _c4_send_list_items_response(
-    device, request_seq: str, items, icon: int = 0x01,
-) -> None:
-    """Reply to a `c4.ln.gi` request with the requested item labels.
-
-    The reply form (from captures) is:
-        0r<seq> 000 "<icon><item0>" "<icon><item1>" ...\r\n
-    where `<seq>` mirrors the seq from the request so the remote can
-    correlate, and `<icon>` is a 1-byte glyph code prefixed to each label
-    (default `0x01`, the "media tile" icon).
-
-    `items` is an iterable of strings.  Embedded `"` is stripped so the
-    quoting stays well-formed; `\r` / `\n` are replaced with spaces so the
-    line terminator isn't broken.
-
-    The encoded frame must fit in a single Zigbee APS payload — bellows
-    raises `MESSAGE_TOO_LONG` (status 56) above ~75 bytes once NWK
-    encryption overhead is added.  We greedily fit as many items as we can
-    and trust the remote to re-page (issue another `gi` for the remainder)
-    — the same chunking the official Control4 controller does, e.g. it
-    returns only 3 of 4 requested items in the watch-menu capture and the
-    SR260 follows up with `gi <listID> 0003 0001` for the missing one.
-    """
-    icon_byte = icon & 0xFF
-    icon_char = chr(icon_byte)
-    parts: list[str] = []
-    for raw in items:
-        s = str(raw if raw is not None else "")
-        s = s.replace("\r", " ").replace("\n", " ").replace('"', "")
-        parts.append(f'"{icon_char}{s}"')
-
-    # Conservative cap — empirically, ~70 bytes fits reliably; bellows
-    # rejects above ~75 once NWK security overhead is added.
-    MAX_FRAME_LEN = 70
-
-    header = f"0r{request_seq} 000"
-    # Pre-count: header + CRLF (2 bytes appended by _build_c4_frame).
-    running_len = len(header) + 2
-    fit_count = 0
-    for part in parts:
-        # +1 for the space separator between header/parts.
-        candidate_len = running_len + 1 + len(part)
-        if candidate_len > MAX_FRAME_LEN:
-            break
-        running_len = candidate_len
-        fit_count += 1
-
-    if fit_count > 0:
-        body = " ".join(parts[:fit_count])
-        cmd = f"{header} {body}"
-    else:
-        # Even one item overflows.  Send the bare OK token so the remote
-        # gets a syntactically valid response and re-pages (or gives up).
-        cmd = header
-    data = _build_c4_frame(0, cmd)
-
-    if fit_count < len(parts):
-        _LOGGER.debug(
-            "C4 display: send gi response seq=%s items=%d/%d (chunked) "
-            "icon=0x%02X len=%d",
-            request_seq, fit_count, len(parts), icon_byte, len(data),
-        )
-    else:
-        _LOGGER.debug(
-            "C4 display: send gi response seq=%s items=%d icon=0x%02X len=%d",
-            request_seq, fit_count, icon_byte, len(data),
-        )
-
-    await device.request(
-        profile=C4_PROFILE_BUTTON,
-        cluster=C4_CLUSTER_ID,
-        src_ep=1, dst_ep=1,
-        sequence=device.get_sequence(),
-        data=data,
-        expect_reply=False,
-    )
 
 
 async def _c4_send_controller_identity(device, source="unknown", zcl_seq=None):
@@ -1094,7 +755,7 @@ class C4DimmerManufCluster(CustomCluster):
 class C4ConfigCluster(CustomCluster):
     """Config/identity cluster on C4 proprietary endpoints (EP 2, EP 196).
 
-    Used by: C4-APD120 dimmer, C4-SW120 switch, C4-KC120277 scene controller.
+    Used by: C4-APD120 dimmer, C4-SW120 switch.
     The outlet variant (C4OutletConfigCluster) lives in control4_outlet.py.
 
     Uses a manufacturer-specific cluster ID (0xFC41) instead of the wire
