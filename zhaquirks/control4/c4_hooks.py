@@ -68,15 +68,50 @@ _C4_MODEL_QUIRK_MAP: dict = {}
 
 
 def _c4_wrap_device(quirk_obj, device):
-    """Wrap `device` with a C4 quirk, old-style class or QuirkBuilder v2 entry.
+    """Wrap `device` with a C4 quirk — three possible shapes in _C4_MODEL_QUIRK_MAP:
 
-    Device modules are being migrated one at a time from legacy CustomDevice
-    subclasses (constructed directly) to QuirkBuilder v2 QuirksV2RegistryEntry
-    objects (built via QuirkBuilder(...).add_to_registry(), applied via their
-    own .create_device(device) method) — this lets _C4_MODEL_QUIRK_MAP hold a
-    mix of both during the migration without touching every call site again
-    each time a device file is converted.
+    1. Legacy CustomDevice subclass (constructed directly) — devices not yet
+       migrated to QuirkBuilder v2.
+
+    2. Bare zigpy's QuirksV2RegistryEntry (zigpy.quirks.v2, pre-2.x zigpy),
+       applied via its own .create_device(device) method.
+
+    3. CONFIRMED on real hardware (HA 2026.9.3, zigpy 2.2.0, zha 2.2.2):
+       QuirkBuilder(...).add_to_registry() here actually returns a
+       zha.quirks.QuirkRegistryEntry — a dataclass with NO create_device()
+       method at all. Its `zigpy_transforms` field is a tuple of callables,
+       each taking a zigpy Device and returning a (possibly different)
+       zigpy Device; applying the quirk means threading `device` through
+       all of them in order — exactly what zha.quirks.DeviceRegistry.resolve()
+       does internally for normal (non-C4) devices. Marks the resolved
+       device with zha.quirks.QUIRK_REGISTRY_ENTRY_ATTR afterward, mirroring
+       resolve()'s own bookkeeping, so nothing downstream mistakes it for
+       an unresolved device and tries to resolve it again.
+
+       Originally missed because QuirkBuilder itself is still imported from
+       zigpy.quirks.v2 in every device file — but on this zigpy version
+       that's a deprecation shim re-exporting zhaquirks.builder.QuirkBuilder,
+       whose add_to_registry() builds a zha.quirks.QuirkRegistryEntry, not
+       zigpy's own (differently-named, differently-shaped) v2 registry
+       entry class. hasattr(..., "create_device") silently returned False
+       for it, and the AttributeError from the case-2 branch's
+       manufacturer_model_metadata access (see _c4_quirk_label) was being
+       swallowed by Patch 3b/3's own try/except and falling back to
+       zha's *standard* manufacturer+model resolve() — which happened to
+       still find our entry (device.model/.manufacturer get set just
+       before this call), masking the bug for most entities but not
+       reliably for all of them.
     """
+    if hasattr(quirk_obj, "zigpy_transforms"):
+        resolved = device
+        for transform in quirk_obj.zigpy_transforms:
+            resolved = transform(resolved)
+        try:
+            from zha.quirks import QUIRK_REGISTRY_ENTRY_ATTR
+            setattr(resolved, QUIRK_REGISTRY_ENTRY_ATTR, quirk_obj)
+        except Exception:
+            pass
+        return resolved
     if hasattr(quirk_obj, "create_device"):
         return quirk_obj.create_device(device)
     return quirk_obj(device._application, device.ieee, device.nwk, device)
@@ -84,6 +119,8 @@ def _c4_wrap_device(quirk_obj, device):
 
 def _c4_quirk_label(quirk_obj) -> str:
     """Human-readable name for a quirk map value, for logging only."""
+    if hasattr(quirk_obj, "zigpy_transforms"):
+        return f"{quirk_obj.device_match!r} (zha QuirkRegistryEntry)"
     if hasattr(quirk_obj, "create_device"):
         primary = quirk_obj.manufacturer_model_metadata[0]
         return f"{primary.manufacturer}/{primary.model} (v2)"
