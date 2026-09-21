@@ -264,6 +264,7 @@ from zigpy.quirks.v2 import EntityType, QuirkBuilder
 from zigpy.zcl import foundation
 from zigpy.zcl.foundation import Status as ZCLStatus
 from zigpy.zcl.clusters.general import Basic, BinaryInput, Groups, LevelControl, OnOff, Scenes
+from zigpy.zcl.clusters.lighting import Color
 
 from zhaquirks.const import (
     CLUSTER_ID,
@@ -704,12 +705,22 @@ _c4_apd120_entry = (
     .replaces_endpoint(_top_ep_id, profile_id=zha.PROFILE_ID, device_type=0x0000)
     .removes(Basic.cluster_id, endpoint_id=_top_ep_id)
     .adds(_DIMMER_BUTTON_CLUSTERS["top"], endpoint_id=_top_ep_id)
+    .change_entity_metadata(
+        endpoint_id=_top_ep_id,
+        cluster_id=BinaryInput.cluster_id,
+        new_fallback_name="Top Button",
+    )
 )
 _bottom_ep_id = DIMMER_BUTTON_EVENT_EP_MAP["bottom"]
 _c4_apd120_entry = (
     _c4_apd120_entry
     .adds_endpoint(_bottom_ep_id, profile_id=zha.PROFILE_ID, device_type=0x0000)
     .adds(_DIMMER_BUTTON_CLUSTERS["bottom"], endpoint_id=_bottom_ep_id)
+    .change_entity_metadata(
+        endpoint_id=_bottom_ep_id,
+        cluster_id=BinaryInput.cluster_id,
+        new_fallback_name="Bottom Button",
+    )
 )
 
 # Virtual button/led-attached endpoints — one Switch entity each in ZHA,
@@ -735,11 +746,11 @@ for _attach_name, _attach_cls, _attach_label in (
 
 # Virtual per-button LED-color/off-color endpoints — one RGB light entity
 # each in ZHA. See c4_led_rgb.py.
-for _ep_id, _color_cls in (
-    (LED_COLOR_EP_MAP["top"], C4TopLedColorCluster),
-    (LED_COLOR_EP_MAP["bottom"], C4BottomLedColorCluster),
-    (LED_OFF_COLOR_EP_MAP["top"], C4TopLedOffColorCluster),
-    (LED_OFF_COLOR_EP_MAP["bottom"], C4BottomLedOffColorCluster),
+for _ep_id, _color_cls, _led_label in (
+    (LED_COLOR_EP_MAP["top"], C4TopLedColorCluster, "Top LED"),
+    (LED_COLOR_EP_MAP["bottom"], C4BottomLedColorCluster, "Bottom LED"),
+    (LED_OFF_COLOR_EP_MAP["top"], C4TopLedOffColorCluster, "Top LED Off Color"),
+    (LED_OFF_COLOR_EP_MAP["bottom"], C4BottomLedOffColorCluster, "Bottom LED Off Color"),
 ):
     _c4_apd120_entry = (
         _c4_apd120_entry
@@ -751,6 +762,11 @@ for _ep_id, _color_cls in (
         .adds(C4LedOnOff, endpoint_id=_ep_id)
         .adds(C4LedLevelControl, endpoint_id=_ep_id)
         .adds(_color_cls, endpoint_id=_ep_id)
+        .change_entity_metadata(
+            endpoint_id=_ep_id,
+            cluster_id=Color.cluster_id,
+            new_fallback_name=_led_label,
+        )
     )
 
 # CONFIRMED vs. dead: "click"/"release" never fired (nothing in

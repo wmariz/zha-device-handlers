@@ -117,6 +117,7 @@ if _QUIRK_DIR not in sys.path:
 from zigpy.profiles import zha
 from zigpy.quirks.v2 import QuirkBuilder
 from zigpy.zcl.clusters.general import BinaryInput
+from zigpy.zcl.clusters.lighting import Color
 
 from zhaquirks.const import (
     CLUSTER_ID,
@@ -190,6 +191,11 @@ for _btn_id, _ep_id in KPZ6B1_BUTTON_EP_MAP.items():
         _c4_kpz6b1_entry
         .adds_endpoint(_ep_id, profile_id=zha.PROFILE_ID, device_type=0x0000)
         .adds(_KPZ6B1_BUTTON_CLUSTERS[_btn_id], endpoint_id=_ep_id)
+        .change_entity_metadata(
+            endpoint_id=_ep_id,
+            cluster_id=BinaryInput.cluster_id,
+            new_fallback_name=f"Button {_btn_id + 1}",
+        )
     )
 
 # Virtual per-button LED-color endpoints — one RGB light entity each in ZHA
@@ -209,6 +215,11 @@ for _btn_id, _ep_id in KPZ6B1_LED_EP_MAP.items():
         .adds(C4LedOnOff, endpoint_id=_ep_id)
         .adds(C4LedLevelControl, endpoint_id=_ep_id)
         .adds(_KEYPAD_LED_COLOR_CLUSTERS[_btn_id], endpoint_id=_ep_id)
+        .change_entity_metadata(
+            endpoint_id=_ep_id,
+            cluster_id=Color.cluster_id,
+            new_fallback_name=f"Button {_btn_id + 1} LED",
+        )
     )
 
 # One trigger entry per (action, button_name). CLUSTER_ID must match the
