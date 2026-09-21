@@ -663,6 +663,27 @@ _c4_apd120_entry = (
     .adds(Scenes, endpoint_id=1)
     .adds(C4DimmerOnOff, endpoint_id=1)
     .adds(C4DimmerLevelControl, endpoint_id=1)
+    # ZHA auto-creates "On Level" and "Off/On/Off-On Transition Time"
+    # Number config entities for any LevelControl cluster — on_level and
+    # the transition-time attrs are purely local caches here (see
+    # C4DimmerLevelControl/C4RampCluster), never meant to be user-facing.
+    # Hidden the same way as on the LOZ-5D1-W outlets.
+    .prevent_default_entity_creation(
+        endpoint_id=1, cluster_id=LevelControl.cluster_id,
+        unique_id_suffix="on_level",
+    )
+    .prevent_default_entity_creation(
+        endpoint_id=1, cluster_id=LevelControl.cluster_id,
+        unique_id_suffix="on_transition_time",
+    )
+    .prevent_default_entity_creation(
+        endpoint_id=1, cluster_id=LevelControl.cluster_id,
+        unique_id_suffix="off_transition_time",
+    )
+    .prevent_default_entity_creation(
+        endpoint_id=1, cluster_id=LevelControl.cluster_id,
+        unique_id_suffix="on_off_transition_time",
+    )
     # --- EP2: ZHA-side-only virtual config endpoint (not on the wire) ---
     .adds_endpoint(2, profile_id=zha.PROFILE_ID, device_type=0x0000)
     .adds(C4ConfigCluster, endpoint_id=2)
