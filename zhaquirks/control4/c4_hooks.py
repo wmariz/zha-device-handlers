@@ -579,14 +579,9 @@ except Exception as _e:
     _LOGGER.error("C4: failed to import control4_dimmer - %s", _e)
 
 try:
-    import control4_switch           # registers "C4-SW120277"
+    import control4_switch           # registers "C4-SW120277" + LSZ-101/102 aliases
 except Exception as _e:
     _LOGGER.error("C4: failed to import control4_switch - %s", _e)
-
-try:
-    import control4_scene_controller # registers "C4-KC120277"
-except Exception as _e:
-    _LOGGER.error("C4: failed to import control4_scene_controller - %s", _e)
 
 try:
     import control4_outlet           # registers "loz-5s1-w"
@@ -597,21 +592,6 @@ try:
     import control4_outlet_dimmer    # registers "loz-5d1-w" (imports control4_dimmer + control4_outlet)
 except Exception as _e:
     _LOGGER.error("C4: failed to import control4_outlet_dimmer - %s", _e)
-
-try:
-    import control4_fan              # registers "C4-4SF120"
-except Exception as _e:
-    _LOGGER.error("C4: failed to import control4_fan — %s", _e)
-
-try:
-    import control4_z2io_zp          # registers "C4-Z2IO-ZP"
-except Exception as _e:
-    _LOGGER.error("C4: failed to import control4_z2io_zp — %s", _e)
-
-try:
-    import control4_remote           # registers "C4-SR260"
-except Exception as _e:
-    _LOGGER.error("C4: failed to import control4_remote — %s", _e)
 
 try:
     import control4_keypad           # registers "KPZ-6B1"

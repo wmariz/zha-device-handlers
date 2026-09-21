@@ -45,7 +45,6 @@ from c4_helpers import (
 )
 from c4_basic_cluster import C4BasicCluster
 from c4_button_cluster import C4SwitchButtonCluster
-from c4_led_cluster import C4LEDCluster
 from c4_hooks import _C4_MODEL_QUIRK_MAP
 
 _LOGGER = logging.getLogger(__name__)
@@ -163,12 +162,6 @@ class Control4SW120Switch(CustomDevice):
                 PROFILE_ID: zha.PROFILE_ID,
                 DEVICE_TYPE: 0x0000,
                 INPUT_CLUSTERS:  [C4SwitchButtonCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-            3: {
-                PROFILE_ID:      zha.PROFILE_ID,
-                DEVICE_TYPE:     0x0000,
-                INPUT_CLUSTERS:  [C4LEDCluster],
                 OUTPUT_CLUSTERS: [],
             },
         },

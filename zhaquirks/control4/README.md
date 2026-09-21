@@ -1,9 +1,15 @@
 # Control4 ZHA Quirks
 
+> **This is the `arthouse` branch** — a trimmed-down copy of the
+> [`control4`](https://github.com/wmariz/zha-device-handlers/tree/control4/zhaquirks/control4)
+> branch containing quirks only for the specific Control4 devices installed
+> in this house: **LDZ-101, LSZ-101, LOZ-5D1-W, LOZ-5S1-W, and KPZ-6B1**.
+> For the full device lineup (fan controllers, scene controllers, the
+> Z2IO-ZP IO module, the SR260 remote, etc.), see the `control4` branch.
+
 ZHA device handler quirks for Control4 Zigbee devices. These quirks allow
-Control4 dimmers, switches, fan controllers, outlets, scene controllers,
-keypads, remotes, and IO modules to work with Home Assistant's ZHA
-integration — no Control4 controller required.
+Control4 dimmers, switches, dimming/switched outlets, and keypads to work
+with Home Assistant's ZHA integration — no Control4 controller required.
 
 > **Disclaimer:** These quirks were developed through independent reverse
 > engineering of Control4's proprietary Zigbee protocol. They are not official
@@ -16,18 +22,14 @@ integration — no Control4 controller required.
 
 | Model | Type | HA Entities |
 |-------|------|-------------|
-| C4-APD120 / LDZ-101 / LDZ-102 | Adaptive Phase Dimmer | Light (dimmable), 2 hardware-config switches (button/LED attached), 4 per-button RGB LED lights (top/bottom, on/off-color) |
-| C4-4SF120 | 4-Speed Fan Controller | Fan (off / low / med-low / med-high / high) |
-| C4-SW120277 | On/Off Wall Switch | Switch |
-| C4-KC120277 | 8-Button Scene Controller | 8 event entities (press, hold, release) |
-| loz-5s1-w | Dual Switched Outlet | 2 switches (one per outlet) |
-| loz-5d1-w | Dual Dimming Outlet | 2 lights (dimmable, one per outlet) |
-| C4-Z2IO-ZP | Zigbee IO Module | 2 switches (relays), 5 binary sensors (contacts), temperature, humidity |
-| C4-SR260 | IR/Zigbee Remote (50 buttons + LCD) | 50 event entities (press, release), battery |
+| LDZ-101 (C4-APD120) | In-Wall Adaptive Phase Dimmer | Light (dimmable), 2 hardware-config switches (button/LED attached), 4 per-button RGB LED lights (top/bottom, on/off-color) |
+| LSZ-101 (C4-SW120277) | In-Wall On/Off Switch | Switch |
+| LOZ-5D1-W | Dual Dimming Outlet | 2 lights (dimmable, one per outlet) |
+| LOZ-5S1-W | Dual Switched Outlet | 2 switches (one per outlet) |
 | KPZ-6B1 | 6-Button Zigbee Keypad | 6 binary sensors (press/release), 6 per-button RGB LED lights (current color) |
 
 > **loz-5d1-w note:** outlet 1 (EP1) sends real ZCL Level Control frames,
-> the same way the confirmed C4-APD120 dimmer does. Outlet 2 (synthetic
+> the same way the confirmed LDZ-101 dimmer does. Outlet 2 (synthetic
 > EP11) has no real Zigbee endpoint of its own, so it can't receive a real
 > ZCL frame; it speaks the outlet's own `c4.dm.tv <outlet> 00 <level>` text
 > command instead (same shape as the already-confirmed on/off command,
@@ -149,8 +151,7 @@ Control4 devices use two key sequences during pairing: a **factory reset**
 identity to the coordinator). The exact button presses depend on the device
 type.
 
-**In-wall lighting (dimmers, switches, fan controllers) and 2–3 button
-keypads:**
+**In-wall lighting (LDZ-101 dimmer, LSZ-101 switch):**
 
 | Action | Sequence |
 |--------|----------|
@@ -159,7 +160,7 @@ keypads:**
 | Reset defaults | 9 x top, 4 x bottom, 9 x top |
 | Leave mesh + factory reset | 13 x top, 4 x bottom, 13 x top |
 
-**6-button keypads (e.g. C4-KC120277, KPZ-6B1):**
+**6-button keypads (KPZ-6B1):**
 
 | Action | Sequence |
 |--------|----------|
@@ -168,7 +169,7 @@ keypads:**
 | Reset defaults | 9 x top-left, 4 x bottom-left, 9 x top-left |
 | Leave mesh + factory reset | 13 x top-left, 4 x bottom-left, 13 x top-left |
 
-**1-button products, relay/contact sensors (e.g. C4-Z2IO-ZP, outlets):**
+**Outlets (LOZ-5D1-W, LOZ-5S1-W):**
 
 | Action | Sequence |
 |--------|----------|
@@ -178,10 +179,10 @@ keypads:**
 
 ### Pairing Steps
 
-1. **Factory-reset the device (13-4-13).** For in-wall lighting devices: tap
+1. **Factory-reset the device (13-4-13).** For the LDZ-101/LSZ-101: tap
    the top button 13 times, then the bottom button 4 times, then the top
-   button 13 times. For 6-button keypads use top-left and bottom-left. For
-   single-button devices tap the button 13 times. The LEDs will flash to
+   button 13 times. For the KPZ-6B1 keypad use top-left and bottom-left.
+   For the outlets tap the button 13 times. The LEDs will flash to
    confirm the reset. This clears any previous network association and puts
    the device into join mode.
 
@@ -190,8 +191,8 @@ keypads:**
    "Add Zigbee Device" button). ZHA will open the network for new devices.
 
 3. **Trigger a 4-click identify on the device.** Tap the top button (or
-   top-left button on 6-button keypads, or the single button on 1-button
-   devices) 4 times quickly. The device will broadcast its identity to the
+   top-left button on the KPZ-6B1, or the single button on the outlets)
+   4 times quickly. The device will broadcast its identity to the
    coordinator. ZHA should discover the device within a few seconds.
 
 4. **Wait for ZHA to finish configuring the device.** The quirk will
@@ -233,7 +234,7 @@ keypads:**
 
 ## Device-Specific Notes
 
-### C4-APD120 Dimmer
+### LDZ-101 Dimmer
 
 Exposes a dimmable light entity with on/off and brightness control. The dimmer
 uses adaptive phase dimming and reports real-time power telemetry. Physical
@@ -244,10 +245,9 @@ Default transition times: 800 ms ramp-on, 2000 ms ramp-off, default on-level
 of ~75%.
 
 **Button events:** the top and bottom paddle buttons each get their own HA
-Event entity (visible in Developer Tools -> States, with history), the same
-way the C4-KC120277 scene controller's buttons do — not just an automation
-trigger. Available actions: `press` (immediate, on physical press-down,
-before a click/hold resolves), `remote_button_short_press` /
+Event entity (visible in Developer Tools -> States, with history) — not just
+an automation trigger. Available actions: `press` (immediate, on physical
+press-down, before a click/hold resolves), `remote_button_short_press` /
 `_double_press` / `_triple_press` / `_quadruple_press` (resolved once
 released), and `remote_button_long_press` / `_long_release` (holding the
 button down).
@@ -289,236 +289,22 @@ one, then a stale one) — fixed with a timestamp-suppression window. A
 "Set All LEDs" HA script (all four entities, one RGB) is included — see
 [LED Configuration](#led-configuration) below.
 
-### C4-4SF120 Fan Controller
-
-Exposes a fan entity with five speeds: off, low, medium-low, medium-high, and
-high. Despite identifying itself as a `control4_light` in the model string,
-this is a fan-only device. The quirk maps speed commands to the Control4
-`c4.dmx.fsc` protocol. The vestigial `c4.dmx.ls` (light state) announcements
-are ignored.
-
-### C4-SW120277 Switch
+### LSZ-101 Switch
 
 Exposes a simple on/off switch entity. Physical button presses sync state back
-to Home Assistant.
+to Home Assistant. Registered separately from the LDZ-101 dimmer quirk so it
+correctly shows up as a Switch, not a Light.
 
-### C4-KC120277 Scene Controller
+### LOZ-5D1-W Dual Dimming Outlet
 
-Exposes 8 event entities (one per button). Each button supports press, hold,
-and release actions. The scene controller does not control any load directly —
-use Home Assistant automations to map button events to actions.
+Exposes two independent dimmable light entities, one per outlet. See the
+note under [Supported Devices](#supported-devices) above for the graduated
+dimming details and history.
 
-The keypad has 12 LEDs (buttons 1–12) whose colors can be customized. See
-the LED Configuration section below.
-
-### loz-5s1-w Dual Outlet
+### LOZ-5S1-W Dual Switched Outlet
 
 Exposes two independent switch entities, one per outlet. Each outlet can be
 toggled individually.
-
-### C4-SR260 Remote
-
-A 50-button IR / Zigbee remote with an LCD screen. Battery-powered (sleepy
-end-device).
-
-The quirk exposes one HA Event entity per physical key (50 entities total)
-and a battery sensor. Each press emits a `remote_button_short_press` action
-on key-down (the C4 `c4.zr.bb` "button begin" event) followed by a
-`remote_button_short_release` on key-up (`c4.zr.be` "button end"). While
-a key is held the remote re-sends `c4.zr.bh` every ~100ms, surfaced as
-`remote_button_long_press` actions — so HA automations can auto-repeat
-for held volume / channel / d-pad / transport keys by listening on
-`remote_button_long_press` in addition to `remote_button_short_press`.
-
-The Event entity names follow the physical layout:
-
-- Top soft / activity row: `room_off`, `watch`, `control4`, `listen`,
-  `list`, `i`, `ii`, `iii`
-- Nav extras: `guide`, `page_up`, `page_down`, `prev`
-- D-pad + rockers: `up` / `down` / `left` / `right` / `select`,
-  `volume_up` / `volume_down` / `channel_up` / `channel_down`
-- UI cluster: `volume_mute`, `info`, `menu`, `cancel`
-- Transport: `reverse` (Rewind), `dvr`, `forward` (Fast Forward),
-  `skip_back`, `play`, `skip_forward`, `record`, `pause`, `stop`
-- Color buttons: `red` / `green` / `yellow` / `blue`
-- Numeric keypad: `digit_0` … `digit_9`, `star`, `hash`
-
-**LCD display message** — the quirk exposes a writable string attribute
-(cluster `0xFC47`, attribute `0x0000` = `display_message`) on EP 1.
-Writing to this attribute pushes the string to the SR260's LCD via
-`c4.ln.dm`; writing an empty string clears the LCD via `c4.ln.le`. The
-icon byte (attribute `0x0001` = `display_icon`, default `0x5A`) is
-configurable by writing it before the message.
-
-The cached value persists across HA restarts. On every HA / ZHA startup
-the quirk re-pushes the cached message to the LCD so the display always
-matches whatever was last set, even after the remote sleeps and reboots.
-On the very first start the cache is seeded with the device's model
-string (`"C4-SR260"`) as a sensible default; write the attribute once to
-override it and the new value sticks.
-
-> **Note — there is no UI text entity for this attribute.** ZHA does not
-> have a `text` platform, so a writable `CharacterString` attribute on a
-> custom cluster does *not* surface as a text input on the device card,
-> and no amount of re-pairing will produce one. To write the attribute,
-> either call `zha.set_zigbee_cluster_attribute` from an automation /
-> script (see below), or bridge an `input_text` helper to that service
-> call.
-
-Direct service call:
-
-```yaml
-service: zha.set_zigbee_cluster_attribute
-data:
-  ieee: "00:0f:ff:XX:XX:XX:XX:XX"   # SR260 IEEE
-  endpoint_id: 1
-  cluster_id: 0xFC47
-  cluster_type: in
-  attribute: 0                       # display_message
-  value: "Doorbell ringing"
-```
-
-`input_text` helper bridge (gives you a text input on dashboards):
-
-```yaml
-# configuration.yaml
-input_text:
-  sr260_display:
-    name: SR260 LCD message
-    initial: "C4-SR260"
-    max: 64
-```
-
-```yaml
-# automations.yaml
-- alias: SR260 → push display message
-  trigger:
-    - platform: state
-      entity_id: input_text.sr260_display
-  action:
-    - service: zha.set_zigbee_cluster_attribute
-      data:
-        ieee: "00:0f:ff:XX:XX:XX:XX:XX"   # SR260 IEEE
-        endpoint_id: 1
-        cluster_id: 0xFC47
-        cluster_type: in
-        attribute: 0
-        value: "{{ states('input_text.sr260_display') }}"
-```
-
-The remote does not echo the displayed message back, so the cached
-value is the only ground truth available for read-back.
-
-**LCD menu / list selection** — the same cluster also exposes two
-ZHA cluster commands that drive the SR260's full menu protocol:
-
-| Command id | Name | Args |
-|---|---|---|
-| `0` | `show_list` | `title` (string), `items` (`|`-separated string), `selected_index` (uint16) |
-| `1` | `close_list` | (none) |
-
-`show_list` pushes a paged menu to the LCD: the controller sends
-`c4.ln.sl <list_id> <count> <sel> "<title>"`, the remote pages through
-the items by sending `c4.ln.gi` requests, and the quirk answers each
-page from the cached item list. When the user navigates with the d-pad
-and presses **Select**, the quirk fires a `zha_event` of type
-`menu_select` carrying the chosen item, then auto-dismisses the menu
-with `c4.ln.le`. Pressing any list-dismissing key (Cancel, Control4)
-also clears the menu.
-
-Call `show_list` from a HA service:
-
-```yaml
-service: zha.issue_zigbee_cluster_command
-data:
-  ieee: "00:0f:ff:XX:XX:XX:XX:XX"
-  endpoint_id: 1
-  cluster_id: 64583                  # 0xFC47
-  cluster_type: in
-  command: 0                          # show_list
-  command_type: server
-  params:
-    title: "What now?"
-    items: "Watch|Listen|Settings"
-    selected_index: 0
-```
-
-Listen for the selection in an automation:
-
-```yaml
-- alias: SR260 menu → handle selection
-  trigger:
-    - platform: event
-      event_type: zha_event
-      event_data:
-        device_ieee: "00:0f:ff:XX:XX:XX:XX:XX"
-        command: menu_select
-  action:
-    - service: system_log.write
-      data:
-        message: >
-          SR260 menu_select:
-          item={{ trigger.event.data.args.item }},
-          index={{ trigger.event.data.args.selected_index }},
-          title={{ trigger.event.data.args.title }}
-```
-
-`close_list` (command id `1`, no args) dismisses the active menu
-without waiting for a user choice.
-
-For the common case of "show a menu and run a different action depending
-on which item the user picks", import the
-[`c4_sr260_menu_dispatcher.yaml`](blueprints/c4_sr260_menu_dispatcher.yaml)
-blueprint. It exposes up to 8 paired item/action slots and a
-user-supplied "show trigger", and handles both the show side
-(`show_list`) and the dispatch side (`menu_select` event) in one
-automation.
-
-**Motion / wake event** — every time the SR260 wakes from sleep
-because the user picked it up or moved it, the quirk fires a
-`zha_event` with `command: motion_wake` AND exposes it as a HA device
-trigger. The easiest way to use it is from the automation UI:
-
-> **Settings → Automations → Add Automation → Trigger type: Device →
-> Device: <your SR260> → Trigger: `motion_wake remote`.**
-
-That ends up sitting in the same dropdown as the per-button presses
-("Remote button short press, play", etc.) and the standard ZHA
-device-availability triggers ("Identify has been pressed", "Device
-offline"), so no YAML / `zha_event` plumbing is needed for the common
-case.
-
-If you prefer raw YAML:
-
-```yaml
-trigger:
-  - platform: device
-    device_id: <SR260 device id>
-    domain: zha
-    type: motion_wake
-    subtype: remote
-action:
-  - service: light.turn_on
-    target:
-      entity_id: light.living_room
-```
-
-`motion_wake` corresponds to the SR260's `c4.zr.mot` announce — the
-remote also sends one shortly after a cold boot / rejoin, so expect an
-event right after the device comes online.
-
-### C4-Z2IO-ZP IO Module
-
-A versatile IO module with 2 relay outputs and 5 contact inputs, commonly used
-as a garage door controller. Exposes relay switches, contact binary sensors,
-and temperature/humidity sensors (if probes are connected).
-
-The module supports multiple IO modes that determine how the relays and
-contacts are configured. Mode 1 (2 relays + contacts) is the default for
-garage door use.
-
-The external temperature probe returns −40 °C as a sentinel when no probe is
-connected. The quirk handles this automatically.
 
 ### KPZ-6B1 6-Button Keypad
 
@@ -532,7 +318,7 @@ physical controller's recovery partition, are in
 then one of `remote_button_short_press` / `_double_press` /
 `_triple_press` / `_quadruple_press` (a resolved click) or
 `remote_button_long_press` / `_long_release` (holding the button down) —
-the same action set as the APD120 dimmer's own button events.
+the same action set as the LDZ-101 dimmer's own button events.
 
 **LED colors:** each button's light entity sets its own current color via
 `light.turn_on`. For setting multiple buttons at once, use
@@ -552,41 +338,15 @@ linked above for the full story if this behavior ever needs revisiting.
 
 ## LED Configuration
 
-Control4 dimmers, switches, scene controllers, and keypads have per-button
-RGB LED indicators. Which script to use depends on the device — each
-device family speaks its own LED protocol, so a script written for one
-will not work on another.
-
-### `control4_led_scripts.yaml` — C4LEDCluster devices (`c4.dmx.led`)
-
-This is the KC120277 scene-controller's own protocol (`C4LEDCluster`,
-cluster `0xFC43`). It is **very likely non-functional on the APD120/
-LDZ-101 dimmer's or the KPZ-6B1 keypad's own LEDs** — those devices speak
-a different, per-device protocol (see below). Copy
-`ha-scripts/control4_led_scripts.yaml` into your Home Assistant scripts
-configuration, or paste its contents into **Settings → Automations &
-Scenes → Scripts → Add Script → Edit in YAML**.
-
-- **control4_set_led_color** — Set the on/off colors for a single button's
-  LED. Takes a target device, button ID (1–12), and two RGB color values.
-
-- **control4_set_all_leds** — Set all button LEDs to the same on/off colors
-  in a single command.
-
-- **control4_set_led_mode** — Set the behavioral parameters (mode, behavior,
-  color mode) for a single button's LED.
-
-- **control4_set_all_leds_individual** — Set colors for all 12 buttons
-  individually in one call.
-
-Colors are specified as 24-bit RGB hex values (e.g., `0x0000FF` for blue,
-`0xFF0000` for red, `0x000000` for off).
+The LDZ-101 dimmer and the KPZ-6B1 keypad have per-button RGB LED
+indicators, each speaking its own protocol — a script written for one
+device does not work on the other.
 
 ### `control4_ldz101_led_rgb_scripts.yaml` — LDZ-101 dimmer *or* KPZ-6B1 keypad
 
 **`control4_ldz101_set_all_leds`** — a single script that targets either
-an APD120/LDZ-101 dimmer's 4 LED light entities (top/bottom, on/off-color)
-or a KPZ-6B1 keypad's 6 buttons, picking the right method automatically
+the LDZ-101 dimmer's 4 LED light entities (top/bottom, on/off-color) or
+the KPZ-6B1 keypad's 6 buttons, picking the right method automatically
 based on which device you select (the device picker only allows these
 two models). One RGB color field, applied to every LED entity/button on
 the chosen device. For the dimmer this replicates Control4's own
@@ -600,39 +360,47 @@ KPZ-6B1 keypads, with one color field per button (6 total), calling
 `C4KeypadAllLedCluster.set_individual_colors` to set all 6 to their own
 distinct color in a single wire frame.
 
+Copy either file into your Home Assistant scripts configuration, or paste
+its contents into **Settings → Automations & Scenes → Scripts → Add
+Script → Edit in YAML**.
+
+## Ramp Rate Configuration (LDZ-101 dimmer)
+
+`ha-scripts/control4_ramp_scripts.yaml` — two scripts targeting
+`C4RampCluster` (endpoint 4, cluster `0xFC44`) for adjusting the LDZ-101's
+transition times:
+
+- **control4_set_ramp_rate** — set a single ramp time (on-ramp, off-ramp,
+  fast, or one of two slow-fade slots) from a dropdown.
+- **control4_set_on_off_ramps** — set both the on-ramp and off-ramp times
+  at once.
+
+Defaults confirmed from the device's own provisioning capture: 750 ms
+on-ramp, 2000 ms off-ramp, 100 ms fast ramp, 5000 ms slow fades.
+
 ## Architecture
 
 The quirks are organized as follows:
 
 ```
 control4/
-├── control4_dimmer.py           C4-APD120 / LDZ-101 / LDZ-102 quirk
-├── control4_fan.py              C4-4SF120 quirk
-├── control4_switch.py           C4-SW120277 quirk
-├── control4_scene_controller.py C4-KC120277 quirk
-├── control4_outlet.py           loz-5s1-w quirk
-├── control4_outlet_dimmer.py    loz-5d1-w quirk (dual dimming outlet)
-├── control4_z2io_zp.py          C4-Z2IO-ZP quirk
-├── control4_remote.py           C4-SR260 quirk
+├── control4_dimmer.py           LDZ-101 (C4-APD120) quirk
+├── control4_switch.py           LSZ-101 (C4-SW120277) quirk
+├── control4_outlet.py           LOZ-5S1-W quirk
+├── control4_outlet_dimmer.py    LOZ-5D1-W quirk (dual dimming outlet)
 ├── control4_keypad.py           KPZ-6B1 quirk
-├── c4_z2io_zp.py                Z2IO-ZP state machine & protocol handler
 ├── c4_basic_cluster.py          Model/manufacturer resolution for C4 devices
-├── c4_button_cluster.py         Button event parsing & state sync (all devices, incl. KPZ-6B1)
-├── c4_display_cluster.py        SR260 LCD-message cluster (0xFC47)
-├── c4_led_cluster.py            LED color/mode control (cluster 0xFC43, KC120277 protocol)
-├── c4_led_rgb.py                Per-button RGB light entities (APD120/LDZ-101 dimmer; shared base classes reused by the keypad)
+├── c4_button_cluster.py         Button event parsing & state sync (all devices)
+├── c4_led_rgb.py                Per-button RGB light entities (LDZ-101 dimmer; shared base classes reused by the keypad)
 ├── c4_keypad_led_rgb.py         KPZ-6B1 per-button RGB lights + C4KeypadAllLedCluster (0xFC48)
 ├── c4_attached_switch.py        button_attached/led_attached hardware-config switches (dimmer)
 ├── c4_ramp_cluster.py           Transition-time / hardware-config cluster (dimmer provisioning)
 ├── c4_helpers.py                Constants, frame builders, shared utilities
 ├── c4_hooks.py                  Monkey-patches for quirk discovery & routing
 ├── ha-scripts/
-│   ├── control4_led_scripts.yaml                  KC120277 (C4LEDCluster) LED scripts
 │   ├── control4_ldz101_led_rgb_scripts.yaml        "Set All LEDs" — LDZ-101 dimmer or KPZ-6B1 keypad
-│   └── control4_kpz6b1_individual_leds_script.yaml "Set Individual LEDs" — KPZ-6B1 only
-├── blueprints/                  HA automation blueprints
-│   ├── c4_sr260_media_player.yaml      SR260 → media-player + remote
-│   └── c4_sr260_menu_dispatcher.yaml   Show a menu, dispatch by selection
+│   ├── control4_kpz6b1_individual_leds_script.yaml "Set Individual LEDs" — KPZ-6B1 only
+│   └── control4_ramp_scripts.yaml                  Ramp/transition-time scripts — LDZ-101 dimmer only
 └── documentation/               Protocol documentation (from packet captures, HA/ZHA logs, and a real driver binary)
 ```
 

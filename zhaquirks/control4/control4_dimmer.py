@@ -304,7 +304,6 @@ from c4_helpers import (
 )
 from c4_basic_cluster import C4BasicCluster
 from c4_button_cluster import C4DimmerButtonCluster, _DIMMER_BUTTON_CLUSTERS
-from c4_led_cluster import C4LEDCluster
 from c4_ramp_cluster import C4RampCluster, C4_RAMP_CLUSTER_ID
 from c4_attached_switch import (
     ATTACHED_SWITCH_EP_MAP,
@@ -719,12 +718,6 @@ class Control4APD120Dimmer(CustomDevice):
                 PROFILE_ID: zha.PROFILE_ID,
                 DEVICE_TYPE: 0x0000,
                 INPUT_CLUSTERS:  [C4DimmerButtonCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-            3: {
-                PROFILE_ID:      zha.PROFILE_ID,
-                DEVICE_TYPE:     0x0000,
-                INPUT_CLUSTERS:  [C4LEDCluster],
                 OUTPUT_CLUSTERS: [],
             },
             4: {
