@@ -230,14 +230,16 @@ class C4RampCluster(_C4LocalOnlyReadMixin, CustomCluster):
     # Local cache: index → time in ms
     _ramp_times: dict[int, int] = {}
 
-    # Delays (seconds) between retries of _push_ramp_defaults() after the
-    # first (immediate) attempt — see that method's docstring for why a
-    # retry is needed at all. CONFIRMED on real hardware (HA debug log)
-    # that a shorter (3, 8, 20) schedule wasn't always enough — one boot
-    # took ~35s for the ApplicationController to come up, 2s past that
-    # schedule's ~31s total budget, and the push gave up right before it
-    # would have succeeded. This schedule's cumulative offsets are
-    # 0/5/20/50/110s, comfortably outlasting that observed case.
+    # Delay (seconds) before each attempt of _push_ramp_defaults(),
+    # cumulative — see that method's docstring for why a delay is needed
+    # even for a purely local (no-wire) subclass, not just as a retry for
+    # a failing wire send. CONFIRMED on real hardware (HA debug log) that
+    # a shorter (3, 8, 20) schedule wasn't always enough for the wire
+    # case — one boot took ~35s for the ApplicationController to come
+    # up, 2s past that schedule's ~31s total budget, and the push gave
+    # up right before it would have succeeded. This schedule's
+    # cumulative offsets are 5/20/50/110s, comfortably outlasting that
+    # observed case.
     _RAMP_DEFAULTS_RETRY_DELAYS = (5, 15, 30, 60)
 
     class AttributeDefs(BaseAttributeDefs):
@@ -346,18 +348,36 @@ class C4RampCluster(_C4LocalOnlyReadMixin, CustomCluster):
         regardless, both overwriting the correctly-restored in-memory
         cache AND re-persisting 750 back to the database on every
         successful send — a self-reinforcing loop that made a custom
-        value impossible to keep. Now checks self.get() for both
-        attributes on every attempt (not just once): by the time a
-        retry actually fires, zigpy's local SQLite restore (fast, no
-        relation to how long the zigbee radio itself takes to come up)
-        will certainly have completed, so any already-restored value is
-        adopted into self._ramp_times before pushing, instead of being
-        clobbered by the hardcoded default.
+        value impossible to keep. Checks self.get() for both attributes
+        on every attempt (not just once): by the time a retry actually
+        fires, zigpy's local SQLite restore (fast, no relation to how
+        long the zigbee radio itself takes to come up) will certainly
+        have completed, so any already-restored value is adopted into
+        self._ramp_times before pushing, instead of being clobbered by
+        the hardcoded default.
+
+        CONFIRMED STILL BROKEN for C4RampClusterOutlet2 specifically
+        (real HA screenshot: "1 Ramp Rate" correctly kept a custom
+        10000 ms across a restart, "2 Ramp Rate" reverted to 750 ms).
+        Root cause: outlet 2's _send_ramp_set() override always
+        succeeds immediately (no wire dependency to retry on), so this
+        loop's very first attempt — delay=0, run essentially the
+        instant __init__ schedules it, almost certainly BEFORE zigpy's
+        own restore pass has had a chance to run — both checks the
+        cache (finds nothing yet) and satisfies "on_ok and off_ok",
+        returning immediately and never reaching a later attempt where
+        the restore would have completed. Outlet 1's equivalent only
+        ever self-corrected because the real wire send genuinely fails
+        until the radio is ready, forcing it through several retries —
+        one of which happens to land after the restore. Dropped the
+        immediate (delay=0) first attempt entirely: every push, wire or
+        local, now waits for at least the first real retry delay before
+        ever checking the cache or sending, giving zigpy's local
+        restore (fast) time to finish regardless of which subclass this
+        is.
         """
-        delays = (0,) + self._RAMP_DEFAULTS_RETRY_DELAYS
-        for attempt, delay in enumerate(delays):
-            if delay:
-                await asyncio.sleep(delay)
+        for attempt, delay in enumerate(self._RAMP_DEFAULTS_RETRY_DELAYS):
+            await asyncio.sleep(delay)
 
             cached_on = self.get(self.AttributeDefs.on_ramp_ms.id)
             if cached_on is not None:
@@ -380,7 +400,7 @@ class C4RampCluster(_C4LocalOnlyReadMixin, CustomCluster):
             )
         _LOGGER.warning(
             "C4 Ramp: giving up pushing defaults to the device after %d "
-            "attempts", len(delays),
+            "attempts", len(self._RAMP_DEFAULTS_RETRY_DELAYS),
         )
 
     async def write_attributes(self, attributes, manufacturer=None):
