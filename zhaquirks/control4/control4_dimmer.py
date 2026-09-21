@@ -263,7 +263,7 @@ from zigpy.quirks import CustomCluster
 from zigpy.quirks.v2 import QuirkBuilder
 from zigpy.zcl import foundation
 from zigpy.zcl.foundation import Status as ZCLStatus
-from zigpy.zcl.clusters.general import BinaryInput, Groups, LevelControl, OnOff, Scenes
+from zigpy.zcl.clusters.general import Basic, BinaryInput, Groups, LevelControl, OnOff, Scenes
 
 from zhaquirks.const import (
     CLUSTER_ID,
@@ -679,12 +679,38 @@ _c4_apd120_entry = (
 
 # Virtual per-button endpoints — one Event/binary_sensor entity each in ZHA.
 # See C4DimmerButtonCluster / DIMMER_BUTTON_EVENT_EP_MAP.
-for _btn_name, _ep_id in DIMMER_BUTTON_EVENT_EP_MAP.items():
-    _c4_apd120_entry = (
-        _c4_apd120_entry
-        .adds_endpoint(_ep_id, profile_id=zha.PROFILE_ID, device_type=0x0000)
-        .adds(_DIMMER_BUTTON_CLUSTERS[_btn_name], endpoint_id=_ep_id)
-    )
+#
+# CONFIRMED from a real HA debug log capturing a fresh LDZ-101 pairing:
+# EP198 ("top") is NOT purely virtual on this hardware family — the
+# physical device answers a real Simple_Desc_req for it (profile=
+# C4_PROFILE_OUTLET/0xC25E, device_type=0x0101, in=[Basic]), the exact
+# same "model discriminator" endpoint control4_outlet.py /
+# control4_outlet_dimmer.py use on purpose (see their own docstrings).
+# The old CustomDevice-era quirk never declared EP198 in its `signature`,
+# so this real endpoint was silently discarded — but QuirkBuilder v2's
+# adds_endpoint() assumes the endpoint doesn't exist yet, and calling it
+# on one that's already real (with a real Basic cluster already there)
+# left EP198 in a broken state: ZHA's entity discovery only ever
+# produced ONE binary_sensor for the pair of button endpoints instead
+# of two — the top button's entity silently never appeared (or
+# vanished after a fresh re-pair, instead of showing "unavailable").
+# EP199 ("bottom") IS purely virtual — confirmed absent from the real
+# device's own "Discovered endpoints: [1, 196, 197, 198]" log line — so
+# it keeps using adds_endpoint() normally, same as every other virtual
+# endpoint on this device.
+_top_ep_id = DIMMER_BUTTON_EVENT_EP_MAP["top"]
+_c4_apd120_entry = (
+    _c4_apd120_entry
+    .replaces_endpoint(_top_ep_id, profile_id=zha.PROFILE_ID, device_type=0x0000)
+    .removes(Basic.cluster_id, endpoint_id=_top_ep_id)
+    .adds(_DIMMER_BUTTON_CLUSTERS["top"], endpoint_id=_top_ep_id)
+)
+_bottom_ep_id = DIMMER_BUTTON_EVENT_EP_MAP["bottom"]
+_c4_apd120_entry = (
+    _c4_apd120_entry
+    .adds_endpoint(_bottom_ep_id, profile_id=zha.PROFILE_ID, device_type=0x0000)
+    .adds(_DIMMER_BUTTON_CLUSTERS["bottom"], endpoint_id=_bottom_ep_id)
+)
 
 # Virtual button/led-attached endpoints — one Switch entity each in ZHA.
 # See c4_attached_switch.py.
