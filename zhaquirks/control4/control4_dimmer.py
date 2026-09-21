@@ -708,7 +708,7 @@ _c4_apd120_entry = (
     .change_entity_metadata(
         endpoint_id=_top_ep_id,
         cluster_id=BinaryInput.cluster_id,
-        new_fallback_name="Top Button",
+        new_fallback_name="Button Top",
     )
 )
 _bottom_ep_id = DIMMER_BUTTON_EVENT_EP_MAP["bottom"]
@@ -719,7 +719,7 @@ _c4_apd120_entry = (
     .change_entity_metadata(
         endpoint_id=_bottom_ep_id,
         cluster_id=BinaryInput.cluster_id,
-        new_fallback_name="Bottom Button",
+        new_fallback_name="Button Bottom",
     )
 )
 
@@ -747,10 +747,10 @@ for _attach_name, _attach_cls, _attach_label in (
 # Virtual per-button LED-color/off-color endpoints — one RGB light entity
 # each in ZHA. See c4_led_rgb.py.
 for _ep_id, _color_cls, _led_label in (
-    (LED_COLOR_EP_MAP["top"], C4TopLedColorCluster, "Top LED"),
-    (LED_COLOR_EP_MAP["bottom"], C4BottomLedColorCluster, "Bottom LED"),
-    (LED_OFF_COLOR_EP_MAP["top"], C4TopLedOffColorCluster, "Top LED Off Color"),
-    (LED_OFF_COLOR_EP_MAP["bottom"], C4BottomLedOffColorCluster, "Bottom LED Off Color"),
+    (LED_COLOR_EP_MAP["top"], C4TopLedColorCluster, "LED Top On"),
+    (LED_COLOR_EP_MAP["bottom"], C4BottomLedColorCluster, "LED Bottom On"),
+    (LED_OFF_COLOR_EP_MAP["top"], C4TopLedOffColorCluster, "LED Top Off"),
+    (LED_OFF_COLOR_EP_MAP["bottom"], C4BottomLedOffColorCluster, "LED Bottom Off"),
 ):
     _c4_apd120_entry = (
         _c4_apd120_entry
