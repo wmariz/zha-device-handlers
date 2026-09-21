@@ -99,7 +99,6 @@ device regardless of model):
              (routing hub + "set all 6 LED colors" service call)
   200-205  — virtual per-button binary_sensor entities (press/release)
   210-215  — virtual per-button RGB light entities (current color)
-  220-225  — virtual per-button "Keypad Managed" switch entities (config)
 
 Uses SKIP_CONFIGURATION to prevent ZHA from attempting bind/configure on
 this C4 proprietary device. The coordinator handshake is handled
@@ -116,11 +115,8 @@ if _QUIRK_DIR not in sys.path:
     sys.path.insert(0, _QUIRK_DIR)
 
 from zigpy.profiles import zha
-from zigpy.quirks import CustomCluster
-from zigpy.quirks.v2 import EntityType, QuirkBuilder
-from zigpy.zcl import foundation
-from zigpy.zcl.foundation import Status as ZCLStatus
-from zigpy.zcl.clusters.general import BinaryInput, OnOff
+from zigpy.quirks.v2 import QuirkBuilder
+from zigpy.zcl.clusters.general import BinaryInput
 from zigpy.zcl.clusters.lighting import Color
 
 from zhaquirks.const import (
@@ -138,16 +134,12 @@ from zhaquirks.const import (
 # Ensure patches are installed before this quirk is registered
 import c4_hooks
 
-import c4_helpers as C4
 from c4_helpers import (
-    C4_PROFILE_BUTTON,
     KPZ6B1_BUTTON_EP_MAP,
     KPZ6B1_BUTTON_MAP,
     KPZ6B1_LED_EP_MAP,
     C4DimmerManufCluster,
     C4ConfigCluster,
-    _build_c4_frame,
-    next_c4_seq,
     strip_c4_endpoint,
 )
 from c4_basic_cluster import C4BasicCluster
@@ -158,102 +150,13 @@ from c4_hooks import _C4_MODEL_QUIRK_MAP
 
 _LOGGER = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Per-button "Keypad Managed" toggle
-# ---------------------------------------------------------------------------
-
-def _make_keypad_managed_cluster(btn_id: int) -> type:
-    """Return a virtual switch cluster for one button's "Keypad Managed" flag.
-
-    Sends the CONFIRMED `c4.kp.llm <btn_single_hex_digit> <00|01>` wire
-    command (see C4KeypadButtonCluster._ensure_all_buttons_unmanaged's
-    docstring, c4_button_cluster.py, for the full history of what
-    "managed" actually means): off/unmanaged makes the two color
-    properties a static "On Color"/"Off Color" (what c4.kp.lv drives, and
-    the confirmed-safe default this fork already forces once per device
-    on first contact); on/managed flips them to momentary "Push Color"/
-    "Release Color", which reverts any color set via c4.kp.lv the instant
-    the button is pressed — CONFIRMED WRONG as an always-on default, but
-    exposed here as an opt-in switch per the user's request, seeded off
-    to match the existing safe default rather than the device's own
-    factory value.
-    """
-
-    class _ManagedCluster(CustomCluster, OnOff):
-        cluster_id = OnOff.cluster_id
-        _SUCCESS = (foundation.GeneralCommand.Default_Response, ZCLStatus.SUCCESS)
-        BTN_ID = btn_id
-
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self._update_attribute(self.AttributeDefs.on_off.id, False)
-
-        async def command(
-            self,
-            command_id,
-            *args,
-            manufacturer=None,
-            expect_reply=True,
-            tsn=None,
-            **kwargs,
-        ):
-            cmds = self.ServerCommandDefs
-            if command_id == cmds.on.id:
-                new_state = True
-            elif command_id == cmds.off.id:
-                new_state = False
-            elif command_id == cmds.toggle.id:
-                new_state = not bool(self.get(self.AttributeDefs.on_off.id, False))
-            else:
-                return await super().command(
-                    command_id, *args, manufacturer=manufacturer,
-                    expect_reply=expect_reply, tsn=tsn, **kwargs,
-                )
-
-            await self._send_managed_flag(new_state)
-            self._update_attribute(self.AttributeDefs.on_off.id, new_state)
-            return self._SUCCESS
-
-        async def _send_managed_flag(self, managed: bool) -> None:
-            device = self.endpoint.device
-            value = 1 if managed else 0
-            seq = next_c4_seq(device)
-            cmd = f"0s{seq:04x} c4.kp.llm {self.BTN_ID:x} {value:02x}"
-
-            _LOGGER.info(
-                "C4 keypad managed (button %d): setting managed=%d — cmd: %s",
-                self.BTN_ID, value, cmd,
-            )
-
-            frame = _build_c4_frame(seq, cmd)
-            try:
-                await device.request(
-                    profile=C4_PROFILE_BUTTON,
-                    cluster=C4.C4_CLUSTER_ID,
-                    src_ep=1, dst_ep=1,
-                    sequence=device.get_sequence(),
-                    data=frame,
-                    expect_reply=False,
-                )
-            except Exception as e:
-                _LOGGER.warning(
-                    "C4 keypad managed (button %d): failed to set managed=%d — %s",
-                    self.BTN_ID, value, e,
-                )
-
-    _ManagedCluster.__name__     = f"C4Keypad{btn_id}ManagedCluster"
-    _ManagedCluster.__qualname__ = _ManagedCluster.__name__
-    return _ManagedCluster
-
-
-# Virtual endpoint IDs for the per-button "Keypad Managed" switch entities.
-KPZ6B1_MANAGED_EP_MAP: dict[int, int] = {
-    btn_id: 220 + btn_id for btn_id in KPZ6B1_BUTTON_MAP
-}
-_KPZ6B1_MANAGED_CLUSTERS: dict[int, type] = {
-    btn_id: _make_keypad_managed_cluster(btn_id) for btn_id in KPZ6B1_BUTTON_MAP
-}
+# "Keypad Managed" per-button config switches were removed by user request —
+# they don't fit a plain-ZHA scenario with no Control4 controller present.
+# Every button is unconditionally forced to unmanaged (c4.kp.llm <btn> 00)
+# once per device on first contact, same as before the switches ever
+# existed — see C4KeypadButtonCluster._ensure_all_buttons_unmanaged's
+# docstring (c4_button_cluster.py) for what "managed" means and why
+# unmanaged is the only correct state here.
 
 
 # ---------------------------------------------------------------------------
@@ -327,23 +230,6 @@ for _btn_id, _ep_id in KPZ6B1_LED_EP_MAP.items():
             cluster_id=Color.cluster_id,
             new_fallback_name=f"LED {_btn_id + 1}",
             new_entity_registry_enabled_default=False,
-        )
-    )
-
-# Virtual per-button "Keypad Managed" switch endpoints — one Switch
-# entity each in ZHA, moved into the device's Configuration section
-# (a hardware-config flag, not a day-to-day control). See
-# _make_keypad_managed_cluster()'s docstring for what the flag means.
-for _btn_id, _ep_id in KPZ6B1_MANAGED_EP_MAP.items():
-    _c4_kpz6b1_entry = (
-        _c4_kpz6b1_entry
-        .adds_endpoint(_ep_id, profile_id=zha.PROFILE_ID, device_type=0x0000)
-        .adds(_KPZ6B1_MANAGED_CLUSTERS[_btn_id], endpoint_id=_ep_id)
-        .change_entity_metadata(
-            endpoint_id=_ep_id,
-            cluster_id=OnOff.cluster_id,
-            new_entity_category=EntityType.CONFIG,
-            new_fallback_name=f"Keypad Managed {_btn_id + 1}",
         )
     )
 
