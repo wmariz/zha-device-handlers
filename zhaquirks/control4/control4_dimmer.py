@@ -682,16 +682,62 @@ _c4_apd120_entry = (
     .adds(Scenes, endpoint_id=1)
     .adds(C4DimmerOnOff, endpoint_id=1)
     .adds(C4DimmerLevelControl, endpoint_id=1)
-    # ZHA auto-creates an "On Level" Number config entity for any
-    # LevelControl cluster — on_level is a purely local cache here (see
-    # C4DimmerLevelControl), never meant to be user-facing. The standard
-    # Off/On/Off-On Transition Time entities are deliberately left
-    # VISIBLE ("Attempt 22") — they're now this device's one and only
-    # ramp-rate config surface, replacing the old custom "Ramp Rate
-    # Up/Down" pair. See read_transition_tenths() (c4_helpers.py).
+    # ZHA auto-creates "On Level" and "Off/On/Off-On Transition Time"
+    # Number config entities for any LevelControl cluster — on_level is
+    # a purely local cache here (see C4DimmerLevelControl), never meant
+    # to be user-facing. "Attempt 22" left the transition-time entities
+    # visible as the sole ramp-rate config surface (see
+    # read_transition_tenths(), c4_helpers.py), but "Attempt 23"
+    # suppresses ZHA's own default ones here too and re-declares them
+    # below instead, purely for a clear name: both use an OFFICIAL
+    # baked-in translation_key ("on_transition_time"/
+    # "off_transition_time"), and HA's translation lookup for an
+    # official key wins over change_entity_metadata()'s own
+    # new_fallback_name (same limitation already confirmed this session
+    # for BinaryInput/Light/Switch-class entities) — so on the
+    # LOZ-5D1-W outlet dimmer, outlet 1 and outlet 2's entities show the
+    # SAME generic translated name and are indistinguishable in the UI.
+    # A custom .number() declaration has no such conflict (a made-up
+    # translation_key with no official translation correctly falls back
+    # to fallback_name). Still reads/writes the SAME real
+    # on_transition_time/off_transition_time attribute (no multiplier —
+    # the user confirmed ZCL 1/10-second units are fine as-is), so
+    # read_transition_tenths() keeps working unchanged.
     .prevent_default_entity_creation(
         endpoint_id=1, cluster_id=LevelControl.cluster_id,
         unique_id_suffix="on_level",
+    )
+    .prevent_default_entity_creation(
+        endpoint_id=1, cluster_id=LevelControl.cluster_id,
+        unique_id_suffix="on_transition_time",
+    )
+    .prevent_default_entity_creation(
+        endpoint_id=1, cluster_id=LevelControl.cluster_id,
+        unique_id_suffix="off_transition_time",
+    )
+    .number(
+        attribute_name=LevelControl.AttributeDefs.on_transition_time.name,
+        cluster_id=LevelControl.cluster_id,
+        endpoint_id=1,
+        min_value=0,
+        max_value=0xFFFE,
+        step=1,
+        unit="0.1s",
+        unique_id_suffix="on_transition_time_named",
+        translation_key="c4_on_transition_time",
+        fallback_name="On Transition Time",
+    )
+    .number(
+        attribute_name=LevelControl.AttributeDefs.off_transition_time.name,
+        cluster_id=LevelControl.cluster_id,
+        endpoint_id=1,
+        min_value=0,
+        max_value=0xFFFE,
+        step=1,
+        unit="0.1s",
+        unique_id_suffix="off_transition_time_named",
+        translation_key="c4_off_transition_time",
+        fallback_name="Off Transition Time",
     )
     # --- EP2: ZHA-side-only virtual config endpoint (not on the wire) ---
     .adds_endpoint(2, profile_id=zha.PROFILE_ID, device_type=0x0000)

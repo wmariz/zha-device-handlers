@@ -1459,13 +1459,54 @@ _c4_loz5d1w_entry = (
         endpoint_id=1, cluster_id=LevelControl.cluster_id,
         unique_id_suffix="on_level",
     )
-    # ZHA's standard "Off/On/Off-On Transition Time" Number config
-    # entities are deliberately left VISIBLE ("Attempt 22") — they're
-    # this outlet's one and only ramp-rate config surface now, replacing
-    # the old custom "1 Ramp Rate Up/Down" pair (EP4/C4RampCluster) and
-    # "2 Ramp Rate Up/Down" pair (EP14/C4RampClusterOutlet2, which was
-    # never confirmed on real hardware anyway). See module docstring and
-    # read_transition_tenths() in c4_helpers.py.
+    # "Attempt 22" left ZHA's standard "Off/On/Off-On Transition Time"
+    # entities visible as the ramp-rate config surface, replacing the
+    # old custom "1/2 Ramp Rate Up/Down" pairs. "Attempt 23": those
+    # standard entities use an OFFICIAL baked-in translation_key
+    # ("on_transition_time"/"off_transition_time") shared by BOTH
+    # outlets, and HA's translation lookup for an official key wins
+    # over change_entity_metadata()'s new_fallback_name (same
+    # limitation already confirmed this session for BinaryInput/Light/
+    # Switch-class entities) — so outlet 1 and outlet 2's entities
+    # showed the exact same generic name, indistinguishable in the UI.
+    # Suppressed here and re-declared below via .number() with a
+    # made-up translation_key (no official conflict, so fallback_name
+    # actually applies) and a "1"/"2" prefix, matching the naming
+    # pattern already used for the LED/button entities. Still reads/
+    # writes the SAME real on_transition_time/off_transition_time
+    # attribute — see read_transition_tenths() in c4_helpers.py.
+    .prevent_default_entity_creation(
+        endpoint_id=1, cluster_id=LevelControl.cluster_id,
+        unique_id_suffix="on_transition_time",
+    )
+    .prevent_default_entity_creation(
+        endpoint_id=1, cluster_id=LevelControl.cluster_id,
+        unique_id_suffix="off_transition_time",
+    )
+    .number(
+        attribute_name=LevelControl.AttributeDefs.on_transition_time.name,
+        cluster_id=LevelControl.cluster_id,
+        endpoint_id=1,
+        min_value=0,
+        max_value=0xFFFE,
+        step=1,
+        unit="0.1s",
+        unique_id_suffix="on_transition_time_named",
+        translation_key="c4_on_transition_time_1",
+        fallback_name="1 On Transition Time",
+    )
+    .number(
+        attribute_name=LevelControl.AttributeDefs.off_transition_time.name,
+        cluster_id=LevelControl.cluster_id,
+        endpoint_id=1,
+        min_value=0,
+        max_value=0xFFFE,
+        step=1,
+        unit="0.1s",
+        unique_id_suffix="off_transition_time_named",
+        translation_key="c4_off_transition_time_1",
+        fallback_name="1 Off Transition Time",
+    )
     # --- EP11: synthetic endpoint for the second outlet (not on the wire) ---
     .adds_endpoint(11, profile_id=zha.PROFILE_ID, device_type=0x0101)
     .adds(C4Outlet2OnOff, endpoint_id=11)
@@ -1473,6 +1514,38 @@ _c4_loz5d1w_entry = (
     .prevent_default_entity_creation(
         endpoint_id=11, cluster_id=LevelControl.cluster_id,
         unique_id_suffix="on_level",
+    )
+    .prevent_default_entity_creation(
+        endpoint_id=11, cluster_id=LevelControl.cluster_id,
+        unique_id_suffix="on_transition_time",
+    )
+    .prevent_default_entity_creation(
+        endpoint_id=11, cluster_id=LevelControl.cluster_id,
+        unique_id_suffix="off_transition_time",
+    )
+    .number(
+        attribute_name=LevelControl.AttributeDefs.on_transition_time.name,
+        cluster_id=LevelControl.cluster_id,
+        endpoint_id=11,
+        min_value=0,
+        max_value=0xFFFE,
+        step=1,
+        unit="0.1s",
+        unique_id_suffix="on_transition_time_named",
+        translation_key="c4_on_transition_time_2",
+        fallback_name="2 On Transition Time",
+    )
+    .number(
+        attribute_name=LevelControl.AttributeDefs.off_transition_time.name,
+        cluster_id=LevelControl.cluster_id,
+        endpoint_id=11,
+        min_value=0,
+        max_value=0xFFFE,
+        step=1,
+        unit="0.1s",
+        unique_id_suffix="off_transition_time_named",
+        translation_key="c4_off_transition_time_2",
+        fallback_name="2 Off Transition Time",
     )
     # --- EP198: real endpoint, the model discriminator (see docstring) ---
     .replaces_endpoint(198, profile_id=zha.PROFILE_ID, device_type=0x0000)
