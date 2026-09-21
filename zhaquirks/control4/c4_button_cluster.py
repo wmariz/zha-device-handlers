@@ -4,6 +4,7 @@ Classes exported:
   C4ButtonCluster                  — base, used by plain switches
   C4DimmerButtonCluster            — C4-APD120/LDZ-101 dimmer (adds per-button binary_sensor entities)
   C4SwitchButtonCluster            — on/off switch variant
+  C4SwitchButtonClusterWithBinarySensor — LSZ-101 (adds per-button binary_sensor entities)
   C4DualOutletButtonCluster        — LOZ-5S1-W dual outlet
   C4KeypadButtonCluster            — C4-KPZ-6B1 6-button keypad (adds per-button binary_sensor entities)
   _DIMMER_BUTTON_CLUSTERS          — per-button virtual cluster dict for the dimmer (name → class)
@@ -697,6 +698,58 @@ class C4SwitchButtonCluster(C4ButtonCluster):
                     )
         except Exception:
             _LOGGER.warning("C4 switch sync: failed", exc_info=True)
+
+
+class C4SwitchButtonClusterWithBinarySensor(C4SwitchButtonCluster):
+    """C4SwitchButtonCluster, but each button also gets a dedicated binary_sensor.
+
+    Mirrors C4DimmerButtonCluster's _fire_button_zha_event() override
+    exactly (routes to DIMMER_BUTTON_EVENT_EP_MAP's virtual per-button
+    endpoint instead of firing on this cluster's own endpoint 197) — added
+    for the LSZ-101 to match the LDZ-101's per-button binary_sensor
+    entities. BUTTON_MAP is inherited unchanged from C4SwitchButtonCluster
+    (DIMMER_BUTTON_MAP: 0x00/0x01=top, 0x05=bottom — the switch's real
+    c4.dmx.* protocol), unlike C4DimmerButtonCluster, which overrides it to
+    APD120_BUTTON_MAP for the dimmer's different c4.dm.* protocol.
+    """
+
+    def _fire_button_zha_event(self, action, button_id, button_name):
+        ep_id = DIMMER_BUTTON_EVENT_EP_MAP.get(button_name)
+        if ep_id is None:
+            _LOGGER.warning(
+                "C4 switch button: no virtual EP for button %r — add it "
+                "to DIMMER_BUTTON_EVENT_EP_MAP", button_name,
+            )
+            return
+
+        ep = self.endpoint.device.endpoints.get(ep_id)
+        if ep is None:
+            _LOGGER.warning(
+                "C4 switch button: virtual EP %d not in device endpoints "
+                "(re-pair after quirk update?)", ep_id,
+            )
+            return
+
+        btn_cluster = ep.in_clusters.get(BinaryInput.cluster_id)
+        if btn_cluster is None:
+            _LOGGER.warning(
+                "C4 switch button: no cluster 0x%04X on EP %d",
+                BinaryInput.cluster_id, ep_id,
+            )
+            return
+
+        btn_cluster.listener_event("zha_send_event", action, {ENDPOINT_ID: ep_id})
+        if action == "press":
+            btn_cluster.set_pressed(True)
+        elif action in (
+            SHORT_PRESS, DOUBLE_PRESS, TRIPLE_PRESS, QUADRUPLE_PRESS,
+            LONG_RELEASE,
+        ):
+            btn_cluster.set_pressed(False)
+        _LOGGER.debug(
+            "C4 switch button: fired %r for %s on EP %d",
+            action, button_name, ep_id,
+        )
 
 
 # ---------------------------------------------------------------------------

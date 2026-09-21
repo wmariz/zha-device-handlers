@@ -10,10 +10,11 @@ if _QUIRK_DIR not in sys.path:
 
 from zigpy.profiles import zha
 from zigpy.quirks import CustomCluster
-from zigpy.quirks.v2 import QuirkBuilder
+from zigpy.quirks.v2 import EntityType, QuirkBuilder
 from zigpy.zcl import foundation
 from zigpy.zcl.foundation import Status as ZCLStatus
-from zigpy.zcl.clusters.general import Groups, OnOff, Scenes
+from zigpy.zcl.clusters.general import Basic, BinaryInput, Groups, OnOff, Scenes
+from zigpy.zcl.clusters.lighting import Color
 
 from zhaquirks.const import (
     CLUSTER_ID,
@@ -22,6 +23,9 @@ from zhaquirks.const import (
     TRIPLE_PRESS,
     QUADRUPLE_PRESS,
     ENDPOINT_ID,
+    LONG_PRESS,
+    LONG_RELEASE,
+    SHORT_PRESS,
 )
 
 # Ensure patches are installed before this quirk is registered
@@ -29,13 +33,28 @@ import c4_hooks
 
 import c4_helpers as C4
 from c4_helpers import (
-    C4_BUTTON_CLUSTER_ID,
+    DIMMER_BUTTON_EVENT_EP_MAP,
     DIMMER_BUTTON_MAP,
     C4DimmerManufCluster,
     C4ConfigCluster,
 )
 from c4_basic_cluster import C4BasicCluster
-from c4_button_cluster import C4SwitchButtonCluster
+from c4_button_cluster import C4SwitchButtonClusterWithBinarySensor, _DIMMER_BUTTON_CLUSTERS
+from c4_attached_switch import (
+    ATTACHED_SWITCH_EP_MAP,
+    C4ButtonAttachedOnOff,
+    C4LedAttachedOnOff,
+)
+from c4_led_rgb import (
+    LED_COLOR_EP_MAP,
+    LED_OFF_COLOR_EP_MAP,
+    C4LedOnOff,
+    C4LedLevelControl,
+    C4TopLedColorCluster,
+    C4BottomLedColorCluster,
+    C4TopLedOffColorCluster,
+    C4BottomLedOffColorCluster,
+)
 from c4_hooks import _C4_MODEL_QUIRK_MAP
 
 _LOGGER = logging.getLogger(__name__)
@@ -86,18 +105,30 @@ class C4SwitchOnOff(CustomCluster, OnOff):
 # since they never answer Simple_Desc_req on the wire — but their sole
 # real-wire cluster (C4_CLUSTER_ID / 0x0001) carries no useful ZCL schema.
 # It's swapped for a ZHA-side-only virtual cluster (C4ConfigCluster /
-# C4SwitchButtonCluster, both on manufacturer-specific IDs the real
-# protocol never uses) and the endpoint's profile is forced from the C4
-# proprietary profile to the standard ZHA profile, matching the original
-# CustomDevice replacement dict — ZHA only builds entities for clusters
-# under the ZHA profile.
+# C4SwitchButtonClusterWithBinarySensor, both on manufacturer-specific IDs
+# the real protocol never uses) and the endpoint's profile is forced from
+# the C4 proprietary profile to the standard ZHA profile — ZHA only builds
+# entities for clusters under the ZHA profile.
 #
 # EP2 does not exist on the wire at all for this model (absent from the
-# original signature's ENDPOINTS) — it's purely a ZHA-side config
-# endpoint, hence adds_endpoint() instead of replaces_endpoint().
+# original signature's ENDPOINTS) — it's purely a ZHA-side config endpoint.
+#
+# EP198/199 (per-button binary_sensor), 200/201 (button/led-attached
+# switches) and 202-205 (per-button LED lights) mirror the LDZ-101 dimmer's
+# own virtual endpoints exactly (same c4_attached_switch.py/c4_led_rgb.py
+# classes, same endpoint numbers — no cross-device collision, since
+# endpoint numbers are per physical device). UNCONFIRMED on real hardware
+# for this specific model: the LDZ-101 (dimmer) and LOZ-5S1-W (outlet)
+# both turned out to have a REAL EP198 already on the wire (profile
+# 0xC25E, a Basic cluster) that the old CustomDevice-era quirks silently
+# discarded — given how consistently that's shown up across every C4
+# device checked so far, replaces_endpoint() is used for EP198 here too
+# (instead of adds_endpoint()) since it safely handles either case: it
+# reconfigures the endpoint if real, or creates it fresh if not — unlike
+# adds_endpoint(), which assumes the endpoint doesn't exist yet and would
+# silently do nothing on a real one, exactly the bug already hit and
+# fixed on the dimmer.
 # ---------------------------------------------------------------------------
-
-_c4_sw120_trigger_actions = ("click", "press", "release", DOUBLE_PRESS, TRIPLE_PRESS, QUADRUPLE_PRESS)
 
 _c4_sw120_entry = (
     QuirkBuilder(manufacturer="Control4", model="C4-SW120277")
@@ -122,16 +153,99 @@ _c4_sw120_entry = (
     # --- EP197: real endpoint, injected at interview time ---
     .replaces_endpoint(197, profile_id=zha.PROFILE_ID, device_type=0x0000)
     .removes(C4.C4_CLUSTER_ID, endpoint_id=197)
-    .adds(C4SwitchButtonCluster, endpoint_id=197)
+    .adds(C4SwitchButtonClusterWithBinarySensor, endpoint_id=197)
+)
+
+# Virtual per-button endpoints — one binary_sensor entity each in ZHA
+# (press/release), hidden by default. See DIMMER_BUTTON_EVENT_EP_MAP /
+# C4SwitchButtonClusterWithBinarySensor.
+for _btn_ep_name, _btn_ep_id, _btn_label in (
+    ("top", DIMMER_BUTTON_EVENT_EP_MAP["top"], "Button Top"),
+    ("bottom", DIMMER_BUTTON_EVENT_EP_MAP["bottom"], "Button Bottom"),
+):
+    _c4_sw120_entry = (
+        _c4_sw120_entry
+        .replaces_endpoint(_btn_ep_id, profile_id=zha.PROFILE_ID, device_type=0x0000)
+        .removes(Basic.cluster_id, endpoint_id=_btn_ep_id)
+        .adds(_DIMMER_BUTTON_CLUSTERS[_btn_ep_name], endpoint_id=_btn_ep_id)
+        .change_entity_metadata(
+            endpoint_id=_btn_ep_id,
+            cluster_id=BinaryInput.cluster_id,
+            new_fallback_name=_btn_label,
+            new_entity_registry_enabled_default=False,
+        )
+    )
+
+# Virtual button/led-attached endpoints — one Switch entity each in ZHA,
+# moved into the device's Configuration section. See c4_attached_switch.py.
+for _attach_name, _attach_cls, _attach_label in (
+    ("button_attached", C4ButtonAttachedOnOff, "Button Attached"),
+    ("led_attached", C4LedAttachedOnOff, "Led Attached"),
+):
+    _ep_id = ATTACHED_SWITCH_EP_MAP[_attach_name]
+    _c4_sw120_entry = (
+        _c4_sw120_entry
+        .replaces_endpoint(_ep_id, profile_id=zha.PROFILE_ID, device_type=0x0000)
+        .removes(Basic.cluster_id, endpoint_id=_ep_id)
+        .adds(_attach_cls, endpoint_id=_ep_id)
+        .change_entity_metadata(
+            endpoint_id=_ep_id,
+            cluster_id=OnOff.cluster_id,
+            new_entity_category=EntityType.CONFIG,
+            new_fallback_name=_attach_label,
+        )
+    )
+
+# Virtual per-button LED-color/off-color endpoints — one RGB light entity
+# each in ZHA, hidden by default. See c4_led_rgb.py.
+for _ep_id, _color_cls, _led_label in (
+    (LED_COLOR_EP_MAP["top"], C4TopLedColorCluster, "LED Top On"),
+    (LED_COLOR_EP_MAP["bottom"], C4BottomLedColorCluster, "LED Bottom On"),
+    (LED_OFF_COLOR_EP_MAP["top"], C4TopLedOffColorCluster, "LED Top Off"),
+    (LED_OFF_COLOR_EP_MAP["bottom"], C4BottomLedOffColorCluster, "LED Bottom Off"),
+):
+    _c4_sw120_entry = (
+        _c4_sw120_entry
+        .replaces_endpoint(
+            _ep_id,
+            profile_id=zha.PROFILE_ID,
+            device_type=zha.DeviceType.COLOR_DIMMABLE_LIGHT,
+        )
+        .removes(Basic.cluster_id, endpoint_id=_ep_id)
+        .adds(C4LedOnOff, endpoint_id=_ep_id)
+        .adds(C4LedLevelControl, endpoint_id=_ep_id)
+        .adds(_color_cls, endpoint_id=_ep_id)
+        .change_entity_metadata(
+            endpoint_id=_ep_id,
+            cluster_id=Color.cluster_id,
+            new_fallback_name=_led_label,
+            new_entity_registry_enabled_default=False,
+        )
+    )
+
+# CLUSTER_ID/ENDPOINT_ID point at DIMMER_BUTTON_EVENT_EP_MAP's virtual
+# per-button endpoints, not at 197 (this cluster's own endpoint) — since
+# C4SwitchButtonClusterWithBinarySensor fires zha_send_event there instead.
+# Also corrects a stale trigger list: "click"/"release" never actually
+# fired (nothing in DIMMER_EVENT_MAP produces those exact literal
+# strings — the same dead-trigger bug already found and fixed on the
+# dimmer), while the real actions (press/SHORT_PRESS/LONG_PRESS/
+# LONG_RELEASE/DOUBLE_PRESS/TRIPLE_PRESS/QUADRUPLE_PRESS) were missing.
+_c4_sw120_entry = (
+    _c4_sw120_entry
     .device_automation_triggers(
         {
             (_action, _btn_name): {
                 COMMAND: _action,
-                CLUSTER_ID: C4_BUTTON_CLUSTER_ID,
-                ENDPOINT_ID: 197,
+                CLUSTER_ID: BinaryInput.cluster_id,
+                ENDPOINT_ID: DIMMER_BUTTON_EVENT_EP_MAP[_btn_name],
             }
             for _btn_id, _btn_name in DIMMER_BUTTON_MAP.items()
-            for _action in _c4_sw120_trigger_actions
+            for _action in (
+                "press",
+                SHORT_PRESS, DOUBLE_PRESS, TRIPLE_PRESS, QUADRUPLE_PRESS,
+                LONG_PRESS, LONG_RELEASE,
+            )
         }
     )
     .add_to_registry()
