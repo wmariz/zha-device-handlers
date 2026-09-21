@@ -260,7 +260,7 @@ if _QUIRK_DIR not in sys.path:
 
 from zigpy.profiles import zha
 from zigpy.quirks import CustomCluster
-from zigpy.quirks.v2 import QuirkBuilder
+from zigpy.quirks.v2 import EntityType, QuirkBuilder
 from zigpy.zcl import foundation
 from zigpy.zcl.foundation import Status as ZCLStatus
 from zigpy.zcl.clusters.general import Basic, BinaryInput, Groups, LevelControl, OnOff, Scenes
@@ -712,17 +712,25 @@ _c4_apd120_entry = (
     .adds(_DIMMER_BUTTON_CLUSTERS["bottom"], endpoint_id=_bottom_ep_id)
 )
 
-# Virtual button/led-attached endpoints — one Switch entity each in ZHA.
-# See c4_attached_switch.py.
-for _attach_name, _attach_cls in (
-    ("button_attached", C4ButtonAttachedOnOff),
-    ("led_attached", C4LedAttachedOnOff),
+# Virtual button/led-attached endpoints — one Switch entity each in ZHA,
+# moved into the device's Configuration section (not a Control) since
+# these toggle a hardware-config flag, not something the user turns
+# on/off day to day. See c4_attached_switch.py.
+for _attach_name, _attach_cls, _attach_label in (
+    ("button_attached", C4ButtonAttachedOnOff, "Button Attached"),
+    ("led_attached", C4LedAttachedOnOff, "Led Attached"),
 ):
     _ep_id = ATTACHED_SWITCH_EP_MAP[_attach_name]
     _c4_apd120_entry = (
         _c4_apd120_entry
         .adds_endpoint(_ep_id, profile_id=zha.PROFILE_ID, device_type=0x0000)
         .adds(_attach_cls, endpoint_id=_ep_id)
+        .change_entity_metadata(
+            endpoint_id=_ep_id,
+            cluster_id=OnOff.cluster_id,
+            new_entity_category=EntityType.CONFIG,
+            new_fallback_name=_attach_label,
+        )
     )
 
 # Virtual per-button LED-color/off-color endpoints — one RGB light entity
