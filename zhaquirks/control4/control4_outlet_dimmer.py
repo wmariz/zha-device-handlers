@@ -415,6 +415,42 @@ History:
   work on the other four device files), an already-paired device may need
   removal + re-pair before the new names actually display.
 
+  Attempt 19: two follow-ups after attempt 18 shipped. First, the user
+  reported that ZHA started showing unwanted "Off/On/Off-On Transition
+  Time" Number config entities (standard ZCL LevelControl entities, not
+  ours) on both outlets — hidden the same way "On Level" already was, via
+  prevent_default_entity_creation() with unique_id_suffix "on_transition_
+  time"/"off_transition_time"/"on_off_transition_time" on EP1 and EP11.
+
+  Second, the user asked to replicate Control4's own behavior and use "2
+  Ramp Rate Up"/"2 Ramp Rate Down" to build a real c4.dm.rtl RAMP_TO_LEVEL
+  command for outlet 2, instead of attempt 18's channel-01 c4.dm.tv
+  approach. Disassembling the real driver (outlet_ip_control4.c4l,
+  outlet_ip_control4::SetRampRate(SingleOutletInfo*, int, RampTypes), via
+  capstone/pyelftools since this environment has no objdump) showed
+  Control4's own analogous "Hold/Click Ramp Rate" Composer fields are
+  NEVER sent to the device at all — the function only validates the new
+  value against its paired counterpart (hold >= click), cascades the
+  other one if needed, writes to local SingleOutletInfo state, and
+  notifies the Composer UI; no call into SendMIBPacketWithHexParams or
+  SendZclPacket anywhere, and no dedicated MIB variable-name string
+  exists for it (every wire-facing feature in this driver has one, e.g.
+  s_MIBRampToLevelStr — ramp-rate has none). The value is purely local
+  pacing state the controller uses when IT performs a live ramp.
+
+  Replicated that exactly: C4RampClusterOutlet2 (c4_ramp_cluster.py) no
+  longer sends anything on write — it overrides _send_ramp_set() to cache
+  locally only. C4Outlet2DimmerLevelControl/C4Outlet2OnOff (this file)
+  now read that cache and send a real c4.dm.rtl command instead of the
+  old instant c4.dm.tv SET_LEVEL: `0i<seq> c4.dm.rtl 01 <level_hex2>
+  <time_ms_hex8>` — confirmed wire shape (from the same real controller
+  log already used for outlet 1's RAMP_TO_LEVEL), outlet index 01 by
+  analogy (same compiled function, same OutletID selector already
+  confirmed for the sibling SET_LEVEL command on this device). C4Outlet2
+  OnOff's off() no longer delegates to the base class's instant cut —
+  it ramps to 0 the same way on() now ramps up, using "2 Ramp Rate Down".
+  Needs real-hardware confirmation of c4.dm.rtl specifically on outlet 2.
+
 Implementation:
   • Outlet 1 (EP1) reuses C4DimmerOnOff UNCHANGED from control4_dimmer.py
     for on/off, paired with C4DimmerLevelControlWithOptimisticSync (this
@@ -485,7 +521,12 @@ from c4_helpers import (
 )
 from c4_basic_cluster import C4BasicCluster
 from c4_button_cluster import C4DualOutletButtonCluster
-from c4_ramp_cluster import C4RampCluster, C4RampClusterOutlet2
+from c4_ramp_cluster import (
+    C4RampCluster,
+    C4RampClusterOutlet2,
+    RAMP_IDX_ON,
+    RAMP_IDX_OFF,
+)
 from c4_hooks import _C4_MODEL_QUIRK_MAP
 
 # C4DimmerOnOff reused UNCHANGED for outlet 1: real-ZCL transport, same as
@@ -644,9 +685,11 @@ class C4Outlet2OnOff(C4Outlet1OnOff):
     uses via C4DimmerLevelControlWithOptimisticSync — falling back to
     100% only if no level has ever been set yet (e.g. right after
     pairing). Reuses C4Outlet2DimmerLevelControl's own
-    _send_c4_outlet_level() to build/send the wire frame rather than
-    duplicating it, since that class already speaks graduated
-    `c4.dm.tv <outlet> 00 <level>` values.
+    _send_c4_outlet_ramp_to_level() to build/send the wire frame rather
+    than duplicating it, since that class already speaks the confirmed
+    c4.dm.rtl RAMP_TO_LEVEL shape (see "Attempt 19" in the module
+    docstring). off() is overridden the same way, ramping to 0 instead of
+    the base class's instant cut.
 
     Also keeps current_level optimistically in sync with on_off, as
     before this fix: outlet 1 never needs this because its on/off
@@ -689,7 +732,8 @@ class C4Outlet2OnOff(C4Outlet1OnOff):
                 "(cached on_level_zcl=%s)", level_pct, on_level_zcl,
             )
             if level_cluster is not None:
-                await level_cluster._send_c4_outlet_level(level_pct)
+                ramp_ms = level_cluster._get_outlet2_ramp_ms("up")
+                await level_cluster._send_c4_outlet_ramp_to_level(level_pct, ramp_ms)
             else:
                 _LOGGER.warning(
                     "C4 Outlet2OnOff: no LevelControl cluster found on "
@@ -704,31 +748,48 @@ class C4Outlet2OnOff(C4Outlet1OnOff):
                 )
             return self._SUCCESS
 
+        if command_id == OnOff.ServerCommandDefs.off.id:
+            # "Attempt 19": off() now ramps to 0 via c4.dm.rtl (using the
+            # cached "2 Ramp Rate Down" time) instead of the base class's
+            # instant c4.dm.tv 01 00 00 — same reasoning as on() above, so
+            # turning off is no longer an abrupt cut relative to a
+            # graduated turn-on.
+            if level_cluster is not None:
+                ramp_ms = level_cluster._get_outlet2_ramp_ms("down")
+                _LOGGER.debug(
+                    "C4 Outlet2OnOff: off() ramping to 0 over %d ms", ramp_ms,
+                )
+                await level_cluster._send_c4_outlet_ramp_to_level(0, ramp_ms)
+            else:
+                _LOGGER.warning(
+                    "C4 Outlet2OnOff: no LevelControl cluster found on "
+                    "endpoint %s — falling back to on/off-only transport",
+                    self.endpoint.endpoint_id,
+                )
+                await self._send_c4_outlet_command(False)
+            self._update_attribute(OnOff.AttributeDefs.on_off.id, False)
+            if level_cluster is not None:
+                level_cluster.update_attribute(
+                    LevelControl.AttributeDefs.current_level.id,
+                    _c4_pct_to_zcl_level(0),
+                )
+            return self._SUCCESS
+
         result = await super().command(
             command_id, *args,
             manufacturer=manufacturer, expect_reply=expect_reply,
             tsn=tsn, **kwargs,
         )
-        if command_id == OnOff.ServerCommandDefs.off.id and level_cluster is not None:
-            # super() already sent c4.dm.tv 01 00 00 and optimistically
-            # set on_off=False — mirror that into current_level too (but
-            # NOT into on_level, which must keep remembering the level
-            # from before so a later on() can restore it).
-            _LOGGER.debug("C4 Outlet2OnOff: syncing current_level=0 for off")
-            level_cluster.update_attribute(
-                LevelControl.AttributeDefs.current_level.id,
-                _c4_pct_to_zcl_level(0),
-            )
         return result
 
 
 # ---------------------------------------------------------------------------
-# Outlet 2 LevelControl — no real endpoint, so it speaks c4.dm.tv with a
-# graduated level instead of the real ZCL frame outlet 1 uses.
+# Outlet 2 LevelControl — no real endpoint, so it speaks c4.dm.rtl
+# (RAMP_TO_LEVEL) instead of the real ZCL frame outlet 1 uses.
 # ---------------------------------------------------------------------------
 
 class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
-    """LevelControl for outlet 2 (synthetic EP11), via the CONFIRMED SET_LEVEL command.
+    """LevelControl for outlet 2 (synthetic EP11), via c4.dm.rtl RAMP_TO_LEVEL.
 
     CONFIRMED from a real HC-300 controller's own log (not inference this
     time): the user connected the physical device to a real Control4
@@ -746,35 +807,35 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
 
     and the identical pattern for the second outlet (outlet index 01,
     "Light (v2) 2(15)" in the log). This is the SAME `c4.dm.tv <outlet> 00
-    <level>` command already confirmed for on/off — it simply also accepts
-    values between 0x00 and 0x64, and the device announces each one back.
+    <level>` (SET_LEVEL) command already confirmed for on/off — it simply
+    also accepts values between 0x00 and 0x64, and the device announces
+    each one back. SET_LEVEL was this class's original transport (BUG
+    FOUND AND FIXED in module docstring's History, attempt 10: args-vs-
+    kwargs level extraction).
 
-    BUG FOUND AND FIXED, not yet confirmed on real hardware (module
-    docstring's History, attempt 10): the wire command above was always
-    correct. The actual bug was in this class's own command() — it read
-    the requested brightness from `args[0]`, but on the user's zigpy/
-    Python 3.14 stack, move_to_level(_with_on_off) can deliver it as a
-    `level=` keyword argument instead, leaving `args`
-    empty and silently sending level 0 on every single dim request. Fixed
-    by falling back to `kwargs["level"]` when `args` is empty.
+    "Attempt 19" (see module docstring History) switched this class from
+    SET_LEVEL to RAMP_TO_LEVEL: `0i<seq> c4.dm.rtl <outlet> <level_hex2>
+    <time_ms_hex8>` (an "interrupt" frame, 8 hex digits of milliseconds —
+    confirmed from the same real controller log). The <time_ms> argument
+    comes from C4RampClusterOutlet2's locally-cached "2 Ramp Rate
+    Up"/"2 Ramp Rate Down" values (c4_ramp_cluster.py, EP14) — this
+    replicates how Control4's own Composer "Hold Ramp Rate" fields work
+    (confirmed via disassembling outlet_ip_control4.c4l's own SetRampRate:
+    purely a local pacing value, never itself sent to the device — see
+    C4RampClusterOutlet2's docstring). Outlet index 01 for RAMP_TO_LEVEL
+    specifically is inferred by analogy (same compiled function as
+    SET_LEVEL, same OutletID selector), not independently captured —
+    needs real-hardware confirmation.
 
-    The same log also confirms RAMP_TO_LEVEL's real wire format —
-    `0i<seq> c4.dm.rtl <outlet> <level_hex2> <time_ms_hex8>` (an
-    "interrupt" frame, 8 hex digits of milliseconds, not the 4-digit
-    hex/"set" frame guessed in the previous revision) — but this class
-    does not use it: c4.dm.tv alone is sufficient to set any level, and
-    every earlier guess at c4.dm.rtl's shape has cost a full hardware test
-    cycle to disprove, so it's deliberately left unused pending a reason
-    to need real device-side ramping.
-
-    On/off itself does NOT go through this class — see C4Outlet1OnOff in
-    control4_outlet.py, reused unchanged below, which keeps using the
-    confirmed c4.dm.tv on/off transport with the fixed 0x64/0x00 values.
+    On/off itself does NOT go through this class's move_to_level path but
+    DOES call its _send_c4_outlet_ramp_to_level()/_get_outlet2_ramp_ms()
+    helpers directly — see C4Outlet2OnOff above, which now also ramps
+    (rather than cutting instantly) for both on() and off().
 
     Inherits C4DimmerLevelControl's local caching of on_level/transition-time
     attributes but overrides write_attributes (never forward to the device —
     this protocol has no ZCL WriteAttributes equivalent at all) and
-    move_to_level(_with_on_off) to send c4.dm.tv instead of a real ZCL
+    move_to_level(_with_on_off) to send c4.dm.rtl instead of a real ZCL
     frame, since outlet 2 has no physical endpoint a real frame could reach.
     """
 
@@ -812,16 +873,49 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
         except Exception as exc:
             _LOGGER.warning("C4 Outlet2DimmerLevel: poll failed: %s", exc)
 
-    async def _send_c4_outlet_level(self, level_pct: int) -> None:
-        """Send c4.dm.tv <outlet> 00 <level> — confirmed from a real
-        controller's log, see class docstring.
+    def _get_outlet2_ramp_ms(self, direction: str) -> int:
+        """Look up the locally-cached ramp time (ms) for outlet 2's next
+        c4.dm.rtl RAMP_TO_LEVEL send — see C4RampClusterOutlet2
+        (c4_ramp_cluster.py, EP14) and this module's "Attempt 19" History
+        entry. direction is "up" (turning on / raising the level) or
+        "down" (turning off / lowering the level). Falls back to 0
+        (instant ramp) if EP14 or its ramp cluster isn't present.
+        """
+        ramp_ep = self.endpoint.device.endpoints.get(14)
+        if ramp_ep is None:
+            return 0
+        ramp_cluster = ramp_ep.in_clusters.get(C4RampClusterOutlet2.cluster_id)
+        if ramp_cluster is None:
+            return 0
+        idx = RAMP_IDX_ON if direction == "up" else RAMP_IDX_OFF
+        return ramp_cluster.get_ramp_ms(idx)
+
+    async def _send_c4_outlet_ramp_to_level(self, level_pct: int, time_ms: int) -> None:
+        """Send c4.dm.rtl <outlet> <level_hex2> <time_ms_hex8> (RAMP_TO_LEVEL).
+
+        CONFIRMED wire format from a real HC-300 controller log (outlet 1):
+        an "interrupt" frame (0i, not 0s/0g) with an 8-hex-digit
+        millisecond time — `0if088 c4.dm.rtl 00 32 000003e8`. Outlet index
+        01 for outlet 2 is inferred by direct analogy, not independently
+        captured for this command specifically: RampOutletLevel(OutletID,
+        level, time) is a single compiled function in the real driver
+        (outlet_ip_control4.c4l) shared by both outlets, and index 01 is
+        already independently confirmed for the sibling c4.dm.tv
+        SET_LEVEL command on this same device (module docstring, attempt
+        9: "identical pattern on outlet index 01"). Needs real-hardware
+        confirmation for c4.dm.rtl specifically — see "Attempt 19".
+
+        Replaces the old instant c4.dm.tv SET_LEVEL send for outlet 2's
+        level changes (see "Attempt 19").
         """
         device = self.endpoint.device
         seq = next_c4_seq(device)
-        cmd = f"0s{seq:04x} c4.dm.tv {self.OUTLET_IDX:02x} 00 {level_pct:02x}"
+        level_pct = max(0, min(100, int(level_pct)))
+        time_ms = max(0, min(0xFFFFFFFF, int(time_ms)))
+        cmd = f"0i{seq:04x} c4.dm.rtl {self.OUTLET_IDX:02x} {level_pct:02x} {time_ms:08x}"
         data = _build_c4_frame(0, cmd)
 
-        _LOGGER.debug("C4 Outlet2DimmerLevel: sending %s", cmd)
+        _LOGGER.debug("C4 Outlet2DimmerLevel: sending ramp %s", cmd)
         try:
             await device.request(
                 profile=C4_PROFILE_BUTTON,
@@ -836,7 +930,7 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
                 "without raising", cmd,
             )
         except Exception as exc:
-            _LOGGER.warning("C4 Outlet2DimmerLevel: send failed: %s", exc)
+            _LOGGER.warning("C4 Outlet2DimmerLevel: ramp send failed: %s", exc)
 
     async def command(
         self,
@@ -865,12 +959,15 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
             else:
                 level_zcl = 0
             level_pct = _zcl_level_to_c4_pct(level_zcl)
+            current_zcl = self.get("current_level") or 0
+            direction = "up" if level_zcl >= current_zcl else "down"
+            ramp_ms = self._get_outlet2_ramp_ms(direction)
             _LOGGER.debug(
                 "C4 Outlet2DimmerLevel: move_to_level cmd=0x%02x args=%s "
-                "kwargs=%s zcl=%d -> c4_pct=%d",
-                command_id, args, kwargs, level_zcl, level_pct,
+                "kwargs=%s zcl=%d -> c4_pct=%d ramp_ms=%d (%s)",
+                command_id, args, kwargs, level_zcl, level_pct, ramp_ms, direction,
             )
-            await self._send_c4_outlet_level(level_pct)
+            await self._send_c4_outlet_ramp_to_level(level_pct, ramp_ms)
 
             # Optimistic update — device will confirm via a c4.dm.tc announce
             _LOGGER.debug(
@@ -1071,6 +1168,21 @@ _c4_loz5d1w_entry = (
         endpoint_id=1, cluster_id=LevelControl.cluster_id,
         unique_id_suffix="on_level",
     )
+    # ZHA also auto-creates "Off/On/Off-On Transition Time" Number config
+    # entities for any LevelControl cluster — same reasoning as on_level
+    # above, hidden for both outlets ("Attempt 19").
+    .prevent_default_entity_creation(
+        endpoint_id=1, cluster_id=LevelControl.cluster_id,
+        unique_id_suffix="on_transition_time",
+    )
+    .prevent_default_entity_creation(
+        endpoint_id=1, cluster_id=LevelControl.cluster_id,
+        unique_id_suffix="off_transition_time",
+    )
+    .prevent_default_entity_creation(
+        endpoint_id=1, cluster_id=LevelControl.cluster_id,
+        unique_id_suffix="on_off_transition_time",
+    )
     # --- EP4: virtual ramp-rate config endpoint, outlet 1 — it's the same
     # real dimming circuit/protocol as the plain APD120/LDZ-101 (see
     # C4DimmerOnOff, reused unchanged above), and c4.dm.tv's ramp-set shape
@@ -1138,6 +1250,18 @@ _c4_loz5d1w_entry = (
     .prevent_default_entity_creation(
         endpoint_id=11, cluster_id=LevelControl.cluster_id,
         unique_id_suffix="on_level",
+    )
+    .prevent_default_entity_creation(
+        endpoint_id=11, cluster_id=LevelControl.cluster_id,
+        unique_id_suffix="on_transition_time",
+    )
+    .prevent_default_entity_creation(
+        endpoint_id=11, cluster_id=LevelControl.cluster_id,
+        unique_id_suffix="off_transition_time",
+    )
+    .prevent_default_entity_creation(
+        endpoint_id=11, cluster_id=LevelControl.cluster_id,
+        unique_id_suffix="on_off_transition_time",
     )
     # --- EP198: real endpoint, the model discriminator (see docstring) ---
     .replaces_endpoint(198, profile_id=zha.PROFILE_ID, device_type=0x0000)

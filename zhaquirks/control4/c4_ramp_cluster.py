@@ -54,9 +54,10 @@ Exported:
                           plus on_ramp_ms/off_ramp_ms attributes for the
                           Home Assistant "Ramp Rate Up"/"Ramp Rate Down"
                           Number config entities
-  C4RampClusterOutlet2  — same, for outlet 2 of a dual-outlet dimmer
-                          (LOZ-5D1-W). UNCONFIRMED on real hardware: see
-                          its own docstring below.
+  C4RampClusterOutlet2  — same Number entities, but for outlet 2 of a
+                          dual-outlet dimmer (LOZ-5D1-W): purely a local
+                          cache, never sent to the device — see its own
+                          docstring below.
   C4_RAMP_CLUSTER_ID    — cluster ID (0xFC44)
   RAMP_IDX_*            — named constants for transition time indices
 """
@@ -420,20 +421,42 @@ class C4RampCluster(_C4LocalOnlyReadMixin, CustomCluster):
 
 
 class C4RampClusterOutlet2(C4RampCluster):
-    """Ramp cluster for outlet 2 of a dual-outlet dimmer (LOZ-5D1-W).
+    """Local-only ramp-time cache for outlet 2 of a dual-outlet dimmer (LOZ-5D1-W).
 
-    UNCONFIRMED on real hardware. Channel 01 is a guess by direct analogy
-    with c4.dm.tv's own outlet-index byte (00/01) used to select which
-    physical output a level-set command targets (see
-    C4Outlet2DimmerLevelControl in control4_outlet_dimmer.py) — channel 00
-    is the only value ever actually captured on the wire for a ramp Set
-    command (see this module's docstring), and that capture was against a
-    single-output dimmer/outlet 1, never outlet 2. It's possible outlet 2
-    doesn't honor a ramp-set command on any channel, or uses a different
-    shape entirely. Needs verification on real hardware: write a value to
-    "2 Ramp Rate Up"/"2 Ramp Rate Down" and confirm outlet 2's actual
-    on/off transition changes.
+    Outlet 2 (synthetic EP11) has no real ZCL circuit and no confirmed
+    persistent "transition time" table of its own on the wire (unlike
+    outlet 1/the plain APD120, where c4.dm.tv channel 00 is confirmed to
+    both read and durably store 9 transition-time parameters on the
+    device itself). Disassembling the real driver
+    (outlet_ip_control4.c4l — SetRampRate(SingleOutletInfo*, int,
+    RampTypes)) confirmed Control4's own analogous "Hold/Click Ramp Rate"
+    Composer fields are NEVER sent to the device either: the function
+    only validates/cascades the paired value and notifies the Composer
+    UI — no call into SendMIBPacketWithHexParams/SendZclPacket, and no
+    dedicated MIB variable-name string exists for it (every wire-facing
+    feature in that driver has one, e.g. s_MIBRampToLevelStr;
+    ramp-rate has none). The controller instead uses the locally-cached
+    value purely to pace its OWN sequence of live ramp commands.
+
+    This class replicates that: writing "2 Ramp Rate Up"/"2 Ramp Rate
+    Down" (on_ramp_ms/off_ramp_ms) only updates the local cache — nothing
+    is sent to the device. C4Outlet2DimmerLevelControl/C4Outlet2OnOff
+    (control4_outlet_dimmer.py) read the cache via get_ramp_ms() and use
+    it as the <time_ms> argument of a c4.dm.rtl RAMP_TO_LEVEL command
+    whenever outlet 2's level actually changes, instead of the old
+    instant c4.dm.tv SET_LEVEL send.
     """
 
-    _SYNC_EP_ID = 11
-    CHANNEL = 0x01
+    async def _send_ramp_set(self, index: int, time_ms: int) -> None:
+        """Cache locally only — see class docstring. Overrides the base
+        class's wire-sending implementation entirely; this covers both
+        Number-entity writes (write_attributes) and the inherited
+        set_ramp_rate/set_on_ramp/set_off_ramp ZCL commands, since all of
+        them funnel through this method.
+        """
+        time_ms = max(0, min(65535, int(time_ms)))
+        self._ramp_times[index] = time_ms
+        if index == RAMP_IDX_ON:
+            self._update_attribute(self.AttributeDefs.on_ramp_ms.id, time_ms)
+        elif index == RAMP_IDX_OFF:
+            self._update_attribute(self.AttributeDefs.off_ramp_ms.id, time_ms)
