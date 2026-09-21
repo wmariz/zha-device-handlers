@@ -26,6 +26,11 @@ Patch 5 — Endpoint.get_model_info
 
 _C4_MODEL_QUIRK_MAP is populated by each device module at import time via
   _C4_MODEL_QUIRK_MAP["model_string"] = QuirkClass
+Values can be either a legacy CustomDevice subclass (constructed directly)
+or a QuirkBuilder v2 QuirksV2RegistryEntry (from QuirkBuilder(...)
+.add_to_registry()) — device modules are being migrated to v2 one file at a
+time. See _c4_wrap_device()/_c4_quirk_label() below, which dispatch on
+whichever shape a given model's entry has.
 """
 
 import logging
@@ -60,6 +65,30 @@ _LOGGER.info("=== C4 QUIRK FILE LOADED (multi-device) ===")
 #   _C4_MODEL_QUIRK_MAP["C4-APD120"] = Control4APD120Dimmer
 # ---------------------------------------------------------------------------
 _C4_MODEL_QUIRK_MAP: dict = {}
+
+
+def _c4_wrap_device(quirk_obj, device):
+    """Wrap `device` with a C4 quirk, old-style class or QuirkBuilder v2 entry.
+
+    Device modules are being migrated one at a time from legacy CustomDevice
+    subclasses (constructed directly) to QuirkBuilder v2 QuirksV2RegistryEntry
+    objects (built via QuirkBuilder(...).add_to_registry(), applied via their
+    own .create_device(device) method) — this lets _C4_MODEL_QUIRK_MAP hold a
+    mix of both during the migration without touching every call site again
+    each time a device file is converted.
+    """
+    if hasattr(quirk_obj, "create_device"):
+        return quirk_obj.create_device(device)
+    return quirk_obj(device._application, device.ieee, device.nwk, device)
+
+
+def _c4_quirk_label(quirk_obj) -> str:
+    """Human-readable name for a quirk map value, for logging only."""
+    if hasattr(quirk_obj, "create_device"):
+        primary = quirk_obj.manufacturer_model_metadata[0]
+        return f"{primary.manufacturer}/{primary.model} (v2)"
+    return quirk_obj.__name__
+
 
 # ---------------------------------------------------------------------------
 # Patch 1: Auto-complete C4 endpoint interviews (skip Simple_Desc_req)
@@ -297,27 +326,22 @@ try:
                         )
 
                 if model and isinstance(model, str):
-                    quirk_cls = _C4_MODEL_QUIRK_MAP.get(model)
-                    if quirk_cls is not None:
+                    quirk_obj = _C4_MODEL_QUIRK_MAP.get(model)
+                    if quirk_obj is not None:
                         device.model = model
                         device.manufacturer = manuf or "Control4"
                         _LOGGER.debug(
-                            "C4 get_device: direct-instantiating %s for "
+                            "C4 get_device: wrapping with %s for "
                             "model=%r manuf=%r ieee=%s",
-                            quirk_cls.__name__, model, manuf, ieee,
+                            _c4_quirk_label(quirk_obj), model, manuf, ieee,
                         )
                         try:
-                            return quirk_cls(
-                                device._application,
-                                device.ieee,
-                                device.nwk,
-                                device,
-                            )
+                            return _c4_wrap_device(quirk_obj, device)
                         except Exception as exc:
                             _LOGGER.error(
-                                "C4 get_device: failed to instantiate %s: %s — "
+                                "C4 get_device: failed to wrap with %s: %s — "
                                 "falling back to default get_device",
-                                quirk_cls.__name__, exc,
+                                _c4_quirk_label(quirk_obj), exc,
                             )
 
             return _orig_zq_get_device(device, registry)
@@ -423,21 +447,16 @@ try:
                             )
 
                     if model and isinstance(model, str):
-                        quirk_cls = _C4_MODEL_QUIRK_MAP.get(model)
-                        if quirk_cls is not None:
+                        quirk_obj = _C4_MODEL_QUIRK_MAP.get(model)
+                        if quirk_obj is not None:
                             device.model = model
                             device.manufacturer = manuf or "Control4"
                             _LOGGER.debug(
-                                "C4 zha.resolve: direct-instantiating %s for "
+                                "C4 zha.resolve: wrapping with %s for "
                                 "model=%r ieee=%s",
-                                quirk_cls.__name__, model, ieee,
+                                _c4_quirk_label(quirk_obj), model, ieee,
                             )
-                            return quirk_cls(
-                                device._application,
-                                device.ieee,
-                                device.nwk,
-                                device,
-                            )
+                            return _c4_wrap_device(quirk_obj, device)
             except Exception as exc:
                 _LOGGER.error(
                     "C4 zha.resolve: mapping error, falling back to "

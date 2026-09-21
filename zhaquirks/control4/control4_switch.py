@@ -9,36 +9,27 @@ if _QUIRK_DIR not in sys.path:
     sys.path.insert(0, _QUIRK_DIR)
 
 from zigpy.profiles import zha
-from zigpy.quirks import CustomCluster, CustomDevice
+from zigpy.quirks import CustomCluster
+from zigpy.quirks.v2 import QuirkBuilder
 from zigpy.zcl import foundation
 from zigpy.zcl.foundation import Status as ZCLStatus
-from zigpy.zcl.clusters.general import Groups, Identify, OnOff, Scenes
+from zigpy.zcl.clusters.general import Groups, OnOff, Scenes
 
 from zhaquirks.const import (
     CLUSTER_ID,
     COMMAND,
-    DEVICE_TYPE,
     DOUBLE_PRESS,
     TRIPLE_PRESS,
     QUADRUPLE_PRESS,
     ENDPOINT_ID,
-    ENDPOINTS,
-    INPUT_CLUSTERS,
-    MODELS_INFO,
-    OUTPUT_CLUSTERS,
-    PROFILE_ID,
-    SKIP_CONFIGURATION,
 )
 
-# Ensure patches are installed before this device class is used
+# Ensure patches are installed before this quirk is registered
 import c4_hooks
 
 import c4_helpers as C4
 from c4_helpers import (
     C4_BUTTON_CLUSTER_ID,
-    C4_MANUF_CLUSTER,
-    C4_PROFILE_BUTTON,
-    C4_PROFILE_NETWORK,
     DIMMER_BUTTON_MAP,
     C4DimmerManufCluster,
     C4ConfigCluster,
@@ -85,102 +76,71 @@ class C4SwitchOnOff(CustomCluster, OnOff):
 
 
 # ---------------------------------------------------------------------------
-# Device quirk
+# Device quirk (QuirkBuilder v2)
+#
+# EP1 is real and answers a genuine Simple_Desc_req; only its cluster list
+# changes (Identify/the 0xFFFF output cluster are left untouched).
+#
+# EP196/EP197 are real endpoints too — c4_hooks.py's Endpoint.initialize
+# patch injects their profile/device_type/clusters at interview time,
+# since they never answer Simple_Desc_req on the wire — but their sole
+# real-wire cluster (C4_CLUSTER_ID / 0x0001) carries no useful ZCL schema.
+# It's swapped for a ZHA-side-only virtual cluster (C4ConfigCluster /
+# C4SwitchButtonCluster, both on manufacturer-specific IDs the real
+# protocol never uses) and the endpoint's profile is forced from the C4
+# proprietary profile to the standard ZHA profile, matching the original
+# CustomDevice replacement dict — ZHA only builds entities for clusters
+# under the ZHA profile.
+#
+# EP2 does not exist on the wire at all for this model (absent from the
+# original signature's ENDPOINTS) — it's purely a ZHA-side config
+# endpoint, hence adds_endpoint() instead of replaces_endpoint().
 # ---------------------------------------------------------------------------
 
-class Control4SW120Switch(CustomDevice):
-    """Control4 C4-SW120277 (and similar) on/off wall switch."""
+_c4_sw120_trigger_actions = ("click", "press", "release", DOUBLE_PRESS, TRIPLE_PRESS, QUADRUPLE_PRESS)
 
-    @classmethod
-    def match(cls, device):
-        model = getattr(device, 'model', None)
-        manuf = getattr(device, 'manufacturer', None)
-        _LOGGER.debug(
-            "C4 SW120.match called: model=%r manuf=%r ieee=%s",
-            model, manuf, getattr(device, 'ieee', '?'),
-        )
-        return super().match(device)
-
-    signature = {
-        "manufacturer_code": 0x1040,
-        MODELS_INFO: [
-            ("Control4", "C4-SW120277"),
-            (None, "C4-SW120277"),
-            ("Control4", None),
-        ],
-        ENDPOINTS: {
-            1: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0100,
-                INPUT_CLUSTERS:  [Identify.cluster_id, C4_MANUF_CLUSTER],
-                OUTPUT_CLUSTERS: [C4_MANUF_CLUSTER],
-            },
-            196: {
-                PROFILE_ID: C4_PROFILE_NETWORK,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4.C4_CLUSTER_ID],
-                OUTPUT_CLUSTERS: [],
-            },
-            197: {
-                PROFILE_ID: C4_PROFILE_BUTTON,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4.C4_CLUSTER_ID],
-                OUTPUT_CLUSTERS: [],
-            },
-        },
-    }
-
-    replacement = {
-        SKIP_CONFIGURATION: True,
-        ENDPOINTS: {
-            1: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0100,
-                INPUT_CLUSTERS: [
-                    C4BasicCluster,
-                    Identify.cluster_id,
-                    Groups.cluster_id,
-                    Scenes.cluster_id,
-                    C4SwitchOnOff,
-                    C4DimmerManufCluster,
-                ],
-                OUTPUT_CLUSTERS: [C4_MANUF_CLUSTER],
-            },
-            2: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4ConfigCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-            196: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4ConfigCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-            197: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4SwitchButtonCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-        },
-    }
-
-    device_automation_triggers = {
-        (_action, _btn_name): {
-            COMMAND: _action,
-            CLUSTER_ID: C4_BUTTON_CLUSTER_ID,
-            ENDPOINT_ID: 197,
+_c4_sw120_entry = (
+    QuirkBuilder(manufacturer="Control4", model="C4-SW120277")
+    .also_applies_to("Control4", "LSZ-101")
+    .also_applies_to("Control4", "LSZ-102")
+    .also_applies_to("Control4", "C4-LSZ-101")
+    .also_applies_to("Control4", "C4-LSZ-102")
+    .skip_configuration()
+    # --- EP1: real endpoint, cluster-level changes only ---
+    .adds(C4BasicCluster, endpoint_id=1)
+    .replaces(C4DimmerManufCluster, endpoint_id=1)
+    .adds(Groups, endpoint_id=1)
+    .adds(Scenes, endpoint_id=1)
+    .adds(C4SwitchOnOff, endpoint_id=1)
+    # --- EP2: ZHA-side-only virtual config endpoint (not on the wire) ---
+    .adds_endpoint(2, profile_id=zha.PROFILE_ID, device_type=0x0000)
+    .adds(C4ConfigCluster, endpoint_id=2)
+    # --- EP196: real endpoint, injected at interview time ---
+    .replaces_endpoint(196, profile_id=zha.PROFILE_ID, device_type=0x0000)
+    .removes(C4.C4_CLUSTER_ID, endpoint_id=196)
+    .adds(C4ConfigCluster, endpoint_id=196)
+    # --- EP197: real endpoint, injected at interview time ---
+    .replaces_endpoint(197, profile_id=zha.PROFILE_ID, device_type=0x0000)
+    .removes(C4.C4_CLUSTER_ID, endpoint_id=197)
+    .adds(C4SwitchButtonCluster, endpoint_id=197)
+    .device_automation_triggers(
+        {
+            (_action, _btn_name): {
+                COMMAND: _action,
+                CLUSTER_ID: C4_BUTTON_CLUSTER_ID,
+                ENDPOINT_ID: 197,
+            }
+            for _btn_id, _btn_name in DIMMER_BUTTON_MAP.items()
+            for _action in _c4_sw120_trigger_actions
         }
-        for _btn_id, _btn_name in DIMMER_BUTTON_MAP.items()
-        for _action in ("click", "press", "release", DOUBLE_PRESS, TRIPLE_PRESS, QUADRUPLE_PRESS)
-    }
+    )
+    .add_to_registry()
+)
 
 # ---------------------------------------------------------------------------
 # Self-register with the get_device patch
 # ---------------------------------------------------------------------------
-_C4_MODEL_QUIRK_MAP["C4-SW120277"] = Control4SW120Switch
+_C4_MODEL_QUIRK_MAP["C4-SW120277"] = _c4_sw120_entry
 # The LSZ-101 / LSZ-102 in-wall switches speak the same proprietary protocol
 # as the SW120277 and expose the standard cluster set on endpoint 1. They are
 # on/off only (not dimmable), so they are mapped to the switch quirk, not the
@@ -190,6 +150,6 @@ for _c4_alias in (
     "LSZ-101", "LSZ-102",
     "C4-LSZ-101", "C4-LSZ-102",
 ):
-    _C4_MODEL_QUIRK_MAP[_c4_alias] = Control4SW120Switch
+    _C4_MODEL_QUIRK_MAP[_c4_alias] = _c4_sw120_entry
 _LOGGER.info("C4 SW120277: registered LSZ-101 switch aliases")
 _LOGGER.info("C4 SW120277: registered C4-SW120277 in _C4_MODEL_QUIRK_MAP")
