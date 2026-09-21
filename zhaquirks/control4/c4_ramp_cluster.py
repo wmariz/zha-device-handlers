@@ -212,10 +212,23 @@ class C4RampCluster(_C4LocalOnlyReadMixin, CustomCluster):
             id=0x0001, type=t.uint16_t, is_manufacturer_specific=True,
         )
 
+    # Default seed for the two user-facing Number entities (on_ramp_ms/
+    # off_ramp_ms): 750 ms for BOTH, by explicit user request ("750ms is
+    # Control4's default"). This intentionally differs from
+    # RAMP_DEFAULTS_MS[RAMP_IDX_OFF] (2000 ms) — that dict documents the
+    # real APD120 provisioning-time capture for all 9 indices and is left
+    # untouched for its other uses (get_off_ramp_tenths()'s no-cluster
+    # fallback, get_ramp_ms()'s fallback); only the entity-facing seed
+    # below is overridden.
+    _ENTITY_DEFAULT_ON_MS = 750
+    _ENTITY_DEFAULT_OFF_MS = 750
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Initialize cache with defaults
         self._ramp_times = dict(RAMP_DEFAULTS_MS)
+        self._ramp_times[RAMP_IDX_ON] = self._ENTITY_DEFAULT_ON_MS
+        self._ramp_times[RAMP_IDX_OFF] = self._ENTITY_DEFAULT_OFF_MS
         self._update_attribute(
             self.AttributeDefs.on_ramp_ms.id, self._ramp_times[RAMP_IDX_ON]
         )
