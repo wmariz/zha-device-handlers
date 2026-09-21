@@ -115,36 +115,26 @@ if _QUIRK_DIR not in sys.path:
     sys.path.insert(0, _QUIRK_DIR)
 
 from zigpy.profiles import zha
-from zigpy.quirks import CustomDevice
-from zigpy.zcl.clusters.general import BinaryInput, Identify
+from zigpy.quirks.v2 import QuirkBuilder
+from zigpy.zcl.clusters.general import BinaryInput
 
 from zhaquirks.const import (
     CLUSTER_ID,
     COMMAND,
-    DEVICE_TYPE,
     DOUBLE_PRESS,
     TRIPLE_PRESS,
     QUADRUPLE_PRESS,
     ENDPOINT_ID,
-    ENDPOINTS,
-    INPUT_CLUSTERS,
     LONG_PRESS,
     LONG_RELEASE,
-    MODELS_INFO,
-    OUTPUT_CLUSTERS,
-    PROFILE_ID,
     SHORT_PRESS,
-    SKIP_CONFIGURATION,
 )
 
-# Ensure patches are installed before this device class is used
+# Ensure patches are installed before this quirk is registered
 import c4_hooks
 
 import c4_helpers as C4
 from c4_helpers import (
-    C4_MANUF_CLUSTER,
-    C4_PROFILE_BUTTON,
-    C4_PROFILE_NETWORK,
     KPZ6B1_BUTTON_EP_MAP,
     KPZ6B1_BUTTON_MAP,
     KPZ6B1_LED_EP_MAP,
@@ -161,135 +151,89 @@ _LOGGER = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Device quirk
+# Device quirk (QuirkBuilder v2)
+#
+# EP1, EP196, EP197 are all real, normally-interviewed endpoints (EP196/197
+# populated by c4_hooks.py's Endpoint.initialize patch, since they never
+# answer Simple_Desc_req). Their profile/device_type is forced to the
+# standard ZHA profile (EP1's device_type also changes, from 0x0101 to the
+# Non-Color Scene Controller type 0x0830 — no light entity) and their one
+# real wire cluster is swapped for the ZHA-side virtual cluster, exactly
+# matching the original CustomDevice replacement dict. There is no EP2 for
+# this model (unlike the dimmer/switch/outlet quirks). Every virtual
+# per-button/LED endpoint below never existed in the old signature at all —
+# same "declared only in replacement" pattern used elsewhere in this fork.
 # ---------------------------------------------------------------------------
 
-class Control4KPZ6B1Keypad(CustomDevice):
-    """Control4 C4-KPZ-6B1 Keypad (6 buttons)."""
+_c4_kpz6b1_entry = (
+    QuirkBuilder(manufacturer="Control4", model="KPZ-6B1")
+    .skip_configuration()
+    # --- EP1: real endpoint, device_type AND clusters change ---
+    .replaces_endpoint(1, profile_id=zha.PROFILE_ID, device_type=0x0830)
+    .adds(C4BasicCluster, endpoint_id=1)
+    .replaces(C4DimmerManufCluster, endpoint_id=1)
+    # --- EP196: real endpoint, injected at interview time ---
+    .replaces_endpoint(196, profile_id=zha.PROFILE_ID, device_type=0x0000)
+    .removes(C4.C4_CLUSTER_ID, endpoint_id=196)
+    .adds(C4ConfigCluster, endpoint_id=196)
+    # --- EP197: real endpoint, injected at interview time ---
+    .replaces_endpoint(197, profile_id=zha.PROFILE_ID, device_type=0x0000)
+    .removes(C4.C4_CLUSTER_ID, endpoint_id=197)
+    .adds(C4KeypadButtonCluster, endpoint_id=197)
+    .adds(C4KeypadAllLedCluster, endpoint_id=197)
+)
 
-    @classmethod
-    def match(cls, device):
-        model = getattr(device, "model", None)
-        manuf = getattr(device, "manufacturer", None)
-        _LOGGER.debug(
-            "C4 KPZ-6B1.match called: model=%r manuf=%r ieee=%s",
-            model, manuf, getattr(device, "ieee", "?"),
+# Virtual per-button endpoints — one binary_sensor entity each in ZHA
+# (press/release). See C4KeypadButtonCluster / KPZ6B1_BUTTON_EP_MAP.
+for _btn_id, _ep_id in KPZ6B1_BUTTON_EP_MAP.items():
+    _c4_kpz6b1_entry = (
+        _c4_kpz6b1_entry
+        .adds_endpoint(_ep_id, profile_id=zha.PROFILE_ID, device_type=0x0000)
+        .adds(_KPZ6B1_BUTTON_CLUSTERS[_btn_id], endpoint_id=_ep_id)
+    )
+
+# Virtual per-button LED-color endpoints — one RGB light entity each in ZHA
+# (current color). See c4_keypad_led_rgb.py. DEVICE_TYPE matters here
+# (unlike the button endpoints above): ZHA's light-vs-switch platform
+# tiebreak for an OnOff cluster with Level/Color siblings apparently
+# consults it — COLOR_DIMMABLE_LIGHT is the CONFIRMED working value from
+# the dimmer's own LED entities.
+for _btn_id, _ep_id in KPZ6B1_LED_EP_MAP.items():
+    _c4_kpz6b1_entry = (
+        _c4_kpz6b1_entry
+        .adds_endpoint(
+            _ep_id,
+            profile_id=zha.PROFILE_ID,
+            device_type=zha.DeviceType.COLOR_DIMMABLE_LIGHT,
         )
-        if model == "KPZ-6B1":
-            _LOGGER.debug("C4 KPZ-6B1.match: accepting on model match")
-            return True
-        return super().match(device)
+        .adds(C4LedOnOff, endpoint_id=_ep_id)
+        .adds(C4LedLevelControl, endpoint_id=_ep_id)
+        .adds(_KEYPAD_LED_COLOR_CLUSTERS[_btn_id], endpoint_id=_ep_id)
+    )
 
-    signature = {
-        "manufacturer_code": 0x1040,
-        MODELS_INFO: [
-            ("Control4", "KPZ-6B1"),
-            (None, "KPZ-6B1"),
-        ],
-        ENDPOINTS: {
-            1: {
-                PROFILE_ID:      zha.PROFILE_ID,
-                DEVICE_TYPE:     0x0101,
-                INPUT_CLUSTERS:  [Identify.cluster_id, C4_MANUF_CLUSTER],
-                OUTPUT_CLUSTERS: [C4_MANUF_CLUSTER],
-            },
-            196: {
-                PROFILE_ID:      C4_PROFILE_NETWORK,
-                DEVICE_TYPE:     0x0000,
-                INPUT_CLUSTERS:  [C4.C4_CLUSTER_ID],
-                OUTPUT_CLUSTERS: [],
-            },
-            197: {
-                PROFILE_ID:      C4_PROFILE_BUTTON,
-                DEVICE_TYPE:     0x0000,
-                INPUT_CLUSTERS:  [C4.C4_CLUSTER_ID],
-                OUTPUT_CLUSTERS: [],
-            },
-        },
-    }
-
-    replacement = {
-        SKIP_CONFIGURATION: True,
-        ENDPOINTS: {
-            1: {
-                PROFILE_ID:  zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0830,   # Non-Color Scene Controller — no light entity
-                INPUT_CLUSTERS: [
-                    C4BasicCluster,
-                    Identify.cluster_id,
-                    C4DimmerManufCluster,
-                ],
-                OUTPUT_CLUSTERS: [C4_MANUF_CLUSTER],
-            },
-            2: {
-                PROFILE_ID:      zha.PROFILE_ID,
-                DEVICE_TYPE:     0x0000,
-                INPUT_CLUSTERS:  [C4ConfigCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-            196: {
-                PROFILE_ID:      zha.PROFILE_ID,
-                DEVICE_TYPE:     0x0000,
-                INPUT_CLUSTERS:  [C4ConfigCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-            197: {
-                PROFILE_ID:      zha.PROFILE_ID,
-                DEVICE_TYPE:     0x0000,
-                INPUT_CLUSTERS:  [C4KeypadButtonCluster, C4KeypadAllLedCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-            # Virtual per-button endpoints — one binary_sensor entity
-            # each in ZHA (press/release). See C4KeypadButtonCluster /
-            # KPZ6B1_BUTTON_EP_MAP.
-            **{
-                ep_id: {
-                    PROFILE_ID:      zha.PROFILE_ID,
-                    DEVICE_TYPE:     0x0000,
-                    INPUT_CLUSTERS:  [_KPZ6B1_BUTTON_CLUSTERS[btn_id]],
-                    OUTPUT_CLUSTERS: [],
-                }
-                for btn_id, ep_id in KPZ6B1_BUTTON_EP_MAP.items()
-            },
-            # Virtual per-button LED-color endpoints — one RGB light
-            # entity each in ZHA (current color). See c4_keypad_led_rgb.py.
-            # DEVICE_TYPE matters here (unlike the button endpoints
-            # above): ZHA's light-vs-switch platform tiebreak for an
-            # OnOff cluster with Level/Color siblings apparently
-            # consults it — COLOR_DIMMABLE_LIGHT is the CONFIRMED
-            # working value from the dimmer's own LED entities.
-            **{
-                ep_id: {
-                    PROFILE_ID:      zha.PROFILE_ID,
-                    DEVICE_TYPE:     zha.DeviceType.COLOR_DIMMABLE_LIGHT,
-                    INPUT_CLUSTERS:  [
-                        C4LedOnOff, C4LedLevelControl,
-                        _KEYPAD_LED_COLOR_CLUSTERS[btn_id],
-                    ],
-                    OUTPUT_CLUSTERS: [],
-                }
-                for btn_id, ep_id in KPZ6B1_LED_EP_MAP.items()
-            },
-        },
-    }
-
-    # One trigger entry per (action, button_name). CLUSTER_ID must match
-    # the virtual endpoint's real cluster identity — BinaryInput — since
-    # that's the cluster ZHA tags the fired zha_event with (see the
-    # dimmer's own device_automation_triggers for the same reasoning).
-    device_automation_triggers = {
-        (_action, _btn_name): {
-            COMMAND:     _action,
-            CLUSTER_ID:  BinaryInput.cluster_id,
-            ENDPOINT_ID: KPZ6B1_BUTTON_EP_MAP[_btn_id],
+# One trigger entry per (action, button_name). CLUSTER_ID must match the
+# virtual endpoint's real cluster identity — BinaryInput — since that's the
+# cluster ZHA tags the fired zha_event with (see the dimmer's own
+# device_automation_triggers for the same reasoning).
+_c4_kpz6b1_entry = (
+    _c4_kpz6b1_entry
+    .device_automation_triggers(
+        {
+            (_action, _btn_name): {
+                COMMAND:     _action,
+                CLUSTER_ID:  BinaryInput.cluster_id,
+                ENDPOINT_ID: KPZ6B1_BUTTON_EP_MAP[_btn_id],
+            }
+            for _btn_id, _btn_name in KPZ6B1_BUTTON_MAP.items()
+            for _action in ("press", SHORT_PRESS, DOUBLE_PRESS, TRIPLE_PRESS, QUADRUPLE_PRESS, LONG_PRESS, LONG_RELEASE)
         }
-        for _btn_id, _btn_name in KPZ6B1_BUTTON_MAP.items()
-        for _action in ("press", SHORT_PRESS, DOUBLE_PRESS, TRIPLE_PRESS, QUADRUPLE_PRESS, LONG_PRESS, LONG_RELEASE)
-    }
+    )
+    .add_to_registry()
+)
 
 
 # ---------------------------------------------------------------------------
 # Self-register with the get_device patch
 # ---------------------------------------------------------------------------
-_C4_MODEL_QUIRK_MAP["KPZ-6B1"] = Control4KPZ6B1Keypad
+_C4_MODEL_QUIRK_MAP["KPZ-6B1"] = _c4_kpz6b1_entry
 _LOGGER.info("C4 KPZ-6B1: registered KPZ-6B1 in _C4_MODEL_QUIRK_MAP")

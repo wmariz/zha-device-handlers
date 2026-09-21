@@ -50,7 +50,8 @@ if _QUIRK_DIR not in sys.path:
     sys.path.insert(0, _QUIRK_DIR)
 
 from zigpy.profiles import zha
-from zigpy.quirks import CustomCluster, CustomDevice
+from zigpy.quirks import CustomCluster
+from zigpy.quirks.v2 import ClusterType, QuirkBuilder
 from zigpy.zcl import foundation
 from zigpy.zcl.foundation import Status as ZCLStatus
 from zigpy.zcl.clusters.general import (
@@ -60,17 +61,10 @@ from zigpy.zcl.clusters.general import (
 from zhaquirks.const import (
     CLUSTER_ID,
     COMMAND,
-    DEVICE_TYPE,
     ENDPOINT_ID,
-    ENDPOINTS,
-    INPUT_CLUSTERS,
-    MODELS_INFO,
-    OUTPUT_CLUSTERS,
-    PROFILE_ID,
-    SKIP_CONFIGURATION,
 )
 
-# Ensure patches are installed before this device class is used
+# Ensure patches are installed before this quirk is registered
 import c4_hooks
 
 import c4_helpers as C4
@@ -82,8 +76,6 @@ from c4_helpers import (
     C4_CLUSTER_ID,
     C4_MANUF_CLUSTER,
     C4_PROFILE_BUTTON,
-    C4_PROFILE_NETWORK,
-    C4_PROFILE_OUTLET,
     C4_PROVISION_DELAY,
     OUTLET_EP_MAP,
     _INVALID_MODELS,
@@ -372,125 +364,66 @@ class C4Outlet1OnOff(C4OutletOnOff):
 
 
 # ---------------------------------------------------------------------------
-# Device quirk
+# Device quirk (QuirkBuilder v2)
+#
+# EP1, EP2, EP196, EP197, EP198 are all real, normally-interviewed endpoints
+# (EP2/196/197 populated by c4_hooks.py's Endpoint.initialize patch, since
+# they never answer Simple_Desc_req; EP198 answers for real and is the
+# reliable signature discriminator for this model — see module docstring).
+# Their profile/device_type is forced to the standard ZHA profile and their
+# one real wire cluster is swapped for the ZHA-side virtual cluster, exactly
+# matching the original CustomDevice replacement dict. EP11 (second outlet)
+# never existed in the old signature at all — same "declared only in
+# replacement" virtual-endpoint pattern used elsewhere in this fork.
 # ---------------------------------------------------------------------------
 
-class Control4LOZ5S1WOutlet(CustomDevice):
-    """Control4 LOZ-5S1-W Switched Outlet."""
-
-    signature = {
-        "manufacturer_code": 0x1040,
-        MODELS_INFO: [
-            ("Control4", "loz-5s1-w"),
-            (None, "loz-5s1-w"),
-            ("Control4", None),
-        ],
-        ENDPOINTS: {
-            1: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0101,
-                INPUT_CLUSTERS: [
-                    Basic.cluster_id,
-                    Identify.cluster_id,
-                    Groups.cluster_id,
-                    Scenes.cluster_id,
-                    OnOff.cluster_id,
-                    LevelControl.cluster_id,
-                    Time.cluster_id,
-                ],
-                OUTPUT_CLUSTERS: [],
-            },
-            2: {
-                PROFILE_ID: C4_PROFILE_NETWORK,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4_CLUSTER_ID],
-                OUTPUT_CLUSTERS: [],
-            },
-            196: {
-                PROFILE_ID: C4_PROFILE_NETWORK,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4_CLUSTER_ID],
-                OUTPUT_CLUSTERS: [],
-            },
-            197: {
-                PROFILE_ID: C4_PROFILE_BUTTON,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4_CLUSTER_ID],
-                OUTPUT_CLUSTERS: [],
-            },
-            # EP 198 is the key discriminator — APD120 and SW120 lack it.
-            198: {
-                PROFILE_ID: C4_PROFILE_OUTLET,
-                DEVICE_TYPE: 0x0101,
-                INPUT_CLUSTERS:  [Basic.cluster_id],
-                OUTPUT_CLUSTERS: [],
-            },
-        },
-    }
-
-    replacement = {
-        SKIP_CONFIGURATION: True,
-        ENDPOINTS: {
-            1: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0100,   # On/Off — no dimming for an outlet
-                INPUT_CLUSTERS: [
-                    C4BasicCluster,
-                    Identify.cluster_id,
-                    Groups.cluster_id,
-                    Scenes.cluster_id,
-                    C4OutletOnOff,
-                    C4DimmerManufCluster,
-                ],
-                OUTPUT_CLUSTERS: [C4_MANUF_CLUSTER],
-            },
-            11: {                       # synthetic EP for outlet 2
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0100,
-                INPUT_CLUSTERS:  [C4Outlet1OnOff],
-                OUTPUT_CLUSTERS: [],
-            },
-            2: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4OutletConfigCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-            196: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4OutletConfigCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-            197: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4DualOutletButtonCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-            198: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4OutletStateCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-        },
-    }
-
-    device_automation_triggers = {
-        ("click",   "outlet_1"): {COMMAND: "click",   CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
-        ("press",   "outlet_1"): {COMMAND: "press",   CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
-        ("release", "outlet_1"): {COMMAND: "release", CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
-        ("click",   "outlet_2"): {COMMAND: "click",   CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
-        ("press",   "outlet_2"): {COMMAND: "press",   CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
-        ("release", "outlet_2"): {COMMAND: "release", CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
-    }
+_c4_loz5s1w_entry = (
+    QuirkBuilder(manufacturer="Control4", model="loz-5s1-w")
+    .skip_configuration()
+    # --- EP1: real endpoint, device_type AND clusters change ---
+    .replaces_endpoint(1, profile_id=zha.PROFILE_ID, device_type=0x0100)
+    .replaces(C4BasicCluster, endpoint_id=1)
+    .replaces(C4OutletOnOff, endpoint_id=1)
+    .removes(LevelControl.cluster_id, endpoint_id=1)
+    .removes(Time.cluster_id, endpoint_id=1)
+    .adds(C4DimmerManufCluster, endpoint_id=1)
+    .adds(C4_MANUF_CLUSTER, cluster_type=ClusterType.Client, endpoint_id=1)
+    # --- EP11: synthetic endpoint for the second outlet (not on the wire) ---
+    .adds_endpoint(11, profile_id=zha.PROFILE_ID, device_type=0x0100)
+    .adds(C4Outlet1OnOff, endpoint_id=11)
+    # --- EP2: real endpoint, injected at interview time ---
+    .replaces_endpoint(2, profile_id=zha.PROFILE_ID, device_type=0x0000)
+    .removes(C4.C4_CLUSTER_ID, endpoint_id=2)
+    .adds(C4OutletConfigCluster, endpoint_id=2)
+    # --- EP196: real endpoint, injected at interview time ---
+    .replaces_endpoint(196, profile_id=zha.PROFILE_ID, device_type=0x0000)
+    .removes(C4.C4_CLUSTER_ID, endpoint_id=196)
+    .adds(C4OutletConfigCluster, endpoint_id=196)
+    # --- EP197: real endpoint, injected at interview time ---
+    .replaces_endpoint(197, profile_id=zha.PROFILE_ID, device_type=0x0000)
+    .removes(C4.C4_CLUSTER_ID, endpoint_id=197)
+    .adds(C4DualOutletButtonCluster, endpoint_id=197)
+    # --- EP198: real endpoint, the model discriminator (see docstring) ---
+    .replaces_endpoint(198, profile_id=zha.PROFILE_ID, device_type=0x0000)
+    .replaces(C4OutletStateCluster, endpoint_id=198)
+    .device_automation_triggers(
+        {
+            ("click",   "outlet_1"): {COMMAND: "click",   CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
+            ("press",   "outlet_1"): {COMMAND: "press",   CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
+            ("release", "outlet_1"): {COMMAND: "release", CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
+            ("click",   "outlet_2"): {COMMAND: "click",   CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
+            ("press",   "outlet_2"): {COMMAND: "press",   CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
+            ("release", "outlet_2"): {COMMAND: "release", CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
+        }
+    )
+    .add_to_registry()
+)
 
 
 # ---------------------------------------------------------------------------
 # Self-register with the get_device patch
 # ---------------------------------------------------------------------------
-_C4_MODEL_QUIRK_MAP["loz-5s1-w"] = Control4LOZ5S1WOutlet
+_C4_MODEL_QUIRK_MAP["loz-5s1-w"] = _c4_loz5s1w_entry
 _LOGGER.info("C4 LOZ-5S1-W: registered loz-5s1-w in _C4_MODEL_QUIRK_MAP")
 # LOZ-5D1-W (dimmer variant) has its own quirk — see
 # control4_outlet_dimmer.py — and is no longer aliased to this switch-only

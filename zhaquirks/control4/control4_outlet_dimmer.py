@@ -439,27 +439,18 @@ if _QUIRK_DIR not in sys.path:
     sys.path.insert(0, _QUIRK_DIR)
 
 from zigpy.profiles import zha
-from zigpy.quirks import CustomDevice
+from zigpy.quirks.v2 import ClusterType, QuirkBuilder
 from zigpy.zcl import foundation
 from zigpy.zcl.foundation import Status as ZCLStatus
-from zigpy.zcl.clusters.general import (
-    Basic, Groups, Identify, LevelControl, OnOff, Scenes, Time,
-)
+from zigpy.zcl.clusters.general import LevelControl, OnOff, Time
 
 from zhaquirks.const import (
     CLUSTER_ID,
     COMMAND,
-    DEVICE_TYPE,
     ENDPOINT_ID,
-    ENDPOINTS,
-    INPUT_CLUSTERS,
-    MODELS_INFO,
-    OUTPUT_CLUSTERS,
-    PROFILE_ID,
-    SKIP_CONFIGURATION,
 )
 
-# Ensure patches are installed before this device class is used
+# Ensure patches are installed before this quirk is registered
 import c4_hooks
 
 from c4_helpers import (
@@ -467,8 +458,6 @@ from c4_helpers import (
     C4_CLUSTER_ID,
     C4_MANUF_CLUSTER,
     C4_PROFILE_BUTTON,
-    C4_PROFILE_NETWORK,
-    C4_PROFILE_OUTLET,
     OUTLET_EP_MAP,
     C4ConfigCluster,
     C4DimmerManufCluster,
@@ -1023,140 +1012,67 @@ class C4DualOutletDimmerButtonCluster(C4DualOutletButtonCluster):
 
 
 # ---------------------------------------------------------------------------
-# Device quirk
+# Device quirk (QuirkBuilder v2)
+#
+# Outlet 1 (EP1) uses real ZCL Level Control (confirmed working). Outlet 2
+# (synthetic EP11) uses a graduated c4.dm.tv level (unverified — see module
+# docstring for the reasoning and what to check when testing).
+#
+# EP1, EP2, EP196, EP197, EP198 are all real, normally-interviewed endpoints
+# (EP2/196/197 populated by c4_hooks.py's Endpoint.initialize patch, since
+# they never answer Simple_Desc_req; EP198 answers for real, assumed present
+# on this model too — see module docstring). Their profile/device_type is
+# forced to the standard ZHA profile (except EP1, whose device_type is
+# already 0x0101 in both signature and replacement, so no endpoint-level
+# override is needed there) and their one real wire cluster is swapped for
+# the ZHA-side virtual cluster, exactly matching the original CustomDevice
+# replacement dict. EP11 (second outlet) never existed in the old signature
+# at all — same "declared only in replacement" virtual-endpoint pattern used
+# elsewhere in this fork.
 # ---------------------------------------------------------------------------
 
-class Control4LOZ5D1WDimmer(CustomDevice):
-    """Control4 LOZ-5D1-W Dimming Outlet — both outlets dimmable.
-
-    Outlet 1 (EP1) uses real ZCL Level Control (confirmed working). Outlet 2
-    (synthetic EP11) uses a graduated c4.dm.tv level (unverified — see
-    module docstring for the reasoning and what to check when testing).
-    """
-
-    signature = {
-        "manufacturer_code": 0x1040,
-        MODELS_INFO: [
-            ("Control4", "LOZ-5D1-W"),
-            ("Control4", "loz-5d1-w"),
-            (None, "LOZ-5D1-W"),
-            (None, "loz-5d1-w"),
-            ("Control4", None),
-        ],
-        ENDPOINTS: {
-            1: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0101,
-                INPUT_CLUSTERS: [
-                    Basic.cluster_id,
-                    Identify.cluster_id,
-                    Groups.cluster_id,
-                    Scenes.cluster_id,
-                    OnOff.cluster_id,
-                    LevelControl.cluster_id,
-                    Time.cluster_id,
-                ],
-                OUTPUT_CLUSTERS: [],
-            },
-            2: {
-                PROFILE_ID: C4_PROFILE_NETWORK,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4_CLUSTER_ID],
-                OUTPUT_CLUSTERS: [],
-            },
-            196: {
-                PROFILE_ID: C4_PROFILE_NETWORK,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4_CLUSTER_ID],
-                OUTPUT_CLUSTERS: [],
-            },
-            197: {
-                PROFILE_ID: C4_PROFILE_BUTTON,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4_CLUSTER_ID],
-                OUTPUT_CLUSTERS: [],
-            },
-            # EP 198 is the key discriminator on the LOZ-5S1-W — assumed
-            # present here too (still unverified for this model).
-            198: {
-                PROFILE_ID: C4_PROFILE_OUTLET,
-                DEVICE_TYPE: 0x0101,
-                INPUT_CLUSTERS:  [Basic.cluster_id],
-                OUTPUT_CLUSTERS: [],
-            },
-        },
-    }
-
-    replacement = {
-        SKIP_CONFIGURATION: True,
-        ENDPOINTS: {
-            1: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0101,   # Dimmable light — real ZCL passthrough
-                INPUT_CLUSTERS: [
-                    C4BasicCluster,
-                    Identify.cluster_id,
-                    Groups.cluster_id,
-                    Scenes.cluster_id,
-                    C4DimmerOnOff,
-                    # Adds an optimistic current_level/on_off sync on top of
-                    # C4DimmerLevelControl, including caching on_level so a
-                    # plain on() restores the last dimmed level — see its
-                    # docstring (attempt 16).
-                    C4DimmerLevelControlWithOptimisticSync,
-                    C4DimmerManufCluster,
-                ],
-                OUTPUT_CLUSTERS: [C4_MANUF_CLUSTER],
-            },
-            11: {                       # synthetic EP for outlet 2
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0101,   # Dimmable light — graduated c4.dm.tv
-                INPUT_CLUSTERS: [
-                    # Confirmed direct on/off transport (index 0x00) — does
-                    # NOT redirect through LevelControl, unlike outlet 1.
-                    # Syncs current_level and restores the last dimmed
-                    # level on a plain on() — see C4Outlet2OnOff's
-                    # docstring (attempt 17).
-                    C4Outlet2OnOff,
-                    C4Outlet2DimmerLevelControl,
-                ],
-                OUTPUT_CLUSTERS: [],
-            },
-            2: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4ConfigCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-            196: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4ConfigCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-            197: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4DualOutletDimmerButtonCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-            198: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4OutletStateCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-        },
-    }
-
-    device_automation_triggers = {
-        ("click",   "outlet_1"): {COMMAND: "click",   CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
-        ("press",   "outlet_1"): {COMMAND: "press",   CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
-        ("release", "outlet_1"): {COMMAND: "release", CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
-        ("click",   "outlet_2"): {COMMAND: "click",   CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
-        ("press",   "outlet_2"): {COMMAND: "press",   CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
-        ("release", "outlet_2"): {COMMAND: "release", CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
-    }
+_c4_loz5d1w_entry = (
+    QuirkBuilder(manufacturer="Control4", model="LOZ-5D1-W")
+    .also_applies_to("Control4", "loz-5d1-w")
+    .skip_configuration()
+    # --- EP1: real endpoint, cluster-level changes only (device_type unchanged) ---
+    .replaces(C4BasicCluster, endpoint_id=1)
+    .replaces(C4DimmerOnOff, endpoint_id=1)
+    .replaces(C4DimmerLevelControlWithOptimisticSync, endpoint_id=1)
+    .removes(Time.cluster_id, endpoint_id=1)
+    .adds(C4DimmerManufCluster, endpoint_id=1)
+    .adds(C4_MANUF_CLUSTER, cluster_type=ClusterType.Client, endpoint_id=1)
+    # --- EP11: synthetic endpoint for the second outlet (not on the wire) ---
+    .adds_endpoint(11, profile_id=zha.PROFILE_ID, device_type=0x0101)
+    .adds(C4Outlet2OnOff, endpoint_id=11)
+    .adds(C4Outlet2DimmerLevelControl, endpoint_id=11)
+    # --- EP2: real endpoint, injected at interview time ---
+    .replaces_endpoint(2, profile_id=zha.PROFILE_ID, device_type=0x0000)
+    .removes(C4_CLUSTER_ID, endpoint_id=2)
+    .adds(C4ConfigCluster, endpoint_id=2)
+    # --- EP196: real endpoint, injected at interview time ---
+    .replaces_endpoint(196, profile_id=zha.PROFILE_ID, device_type=0x0000)
+    .removes(C4_CLUSTER_ID, endpoint_id=196)
+    .adds(C4ConfigCluster, endpoint_id=196)
+    # --- EP197: real endpoint, injected at interview time ---
+    .replaces_endpoint(197, profile_id=zha.PROFILE_ID, device_type=0x0000)
+    .removes(C4_CLUSTER_ID, endpoint_id=197)
+    .adds(C4DualOutletDimmerButtonCluster, endpoint_id=197)
+    # --- EP198: real endpoint, the model discriminator (see docstring) ---
+    .replaces_endpoint(198, profile_id=zha.PROFILE_ID, device_type=0x0000)
+    .replaces(C4OutletStateCluster, endpoint_id=198)
+    .device_automation_triggers(
+        {
+            ("click",   "outlet_1"): {COMMAND: "click",   CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
+            ("press",   "outlet_1"): {COMMAND: "press",   CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
+            ("release", "outlet_1"): {COMMAND: "release", CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
+            ("click",   "outlet_2"): {COMMAND: "click",   CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
+            ("press",   "outlet_2"): {COMMAND: "press",   CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
+            ("release", "outlet_2"): {COMMAND: "release", CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
+        }
+    )
+    .add_to_registry()
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1165,7 +1081,7 @@ class Control4LOZ5D1WDimmer(CustomDevice):
 for _c4_alias in (
     "loz-5d1-w", "LOZ-5D1-W", "C4-loz-5d1-w", "C4-LOZ-5D1-W",
 ):
-    _C4_MODEL_QUIRK_MAP[_c4_alias] = Control4LOZ5D1WDimmer
+    _C4_MODEL_QUIRK_MAP[_c4_alias] = _c4_loz5d1w_entry
 _LOGGER.info(
     "C4 LOZ-5D1-W: registered dimmer aliases "
     "(outlet 1 real ZCL, outlet 2 graduated c4.dm.tv)"

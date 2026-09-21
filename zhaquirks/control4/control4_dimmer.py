@@ -259,45 +259,33 @@ if _QUIRK_DIR not in sys.path:
     sys.path.insert(0, _QUIRK_DIR)
 
 from zigpy.profiles import zha
-from zigpy.quirks import CustomCluster, CustomDevice
+from zigpy.quirks import CustomCluster
+from zigpy.quirks.v2 import QuirkBuilder
 from zigpy.zcl import foundation
 from zigpy.zcl.foundation import Status as ZCLStatus
-from zigpy.zcl.clusters.general import (
-    BinaryInput, Groups, Identify, LevelControl, OnOff, Scenes,
-)
+from zigpy.zcl.clusters.general import BinaryInput, Groups, LevelControl, OnOff, Scenes
 
 from zhaquirks.const import (
-    BUTTON,
     CLUSTER_ID,
     COMMAND,
-    DEVICE_TYPE,
     DOUBLE_PRESS,
     TRIPLE_PRESS,
     QUADRUPLE_PRESS,
     ENDPOINT_ID,
-    ENDPOINTS,
-    INPUT_CLUSTERS,
     LONG_PRESS,
     LONG_RELEASE,
-    MODELS_INFO,
-    OUTPUT_CLUSTERS,
-    PROFILE_ID,
     SHORT_PRESS,
-    SKIP_CONFIGURATION,
 )
 
-# Ensure patches are installed before this device class is used
+# Ensure patches are installed before this quirk is registered
 import c4_hooks
 
 import c4_helpers as C4
 from c4_helpers import (
     APD120_BUTTON_MAP,
     C4_DEFAULT_ON_LEVEL,
-    C4_MANUF_CLUSTER,
     C4_OFF_TRANSITION,
     C4_ON_TRANSITION,
-    C4_PROFILE_BUTTON,
-    C4_PROFILE_NETWORK,
     DIMMER_BUTTON_EVENT_EP_MAP,
     C4DimmerManufCluster,
     C4ConfigCluster,
@@ -640,195 +628,144 @@ class C4DimmerLevelControl(CustomCluster, LevelControl):
 
 
 # ---------------------------------------------------------------------------
-# Device quirk
+# Device quirk (QuirkBuilder v2)
+#
+# EP1 is real and answers a genuine Simple_Desc_req; only its cluster list
+# changes. EP196/EP197 are real endpoints too (populated by c4_hooks.py's
+# Endpoint.initialize patch, since they never answer Simple_Desc_req) but
+# their one real wire cluster (C4_CLUSTER_ID/0x0001) is inert — removed and
+# replaced by the ZHA-side virtual cluster, with the endpoint profile
+# forced from the C4 proprietary profile to the ZHA profile, matching the
+# original CustomDevice replacement dict.
+#
+# EP2, EP4, and every virtual per-button/LED/attached-switch endpoint below
+# never existed in the old signature at all — same "declared only in
+# replacement" virtual-endpoint pattern, added via adds_endpoint() instead
+# of replaces_endpoint(). The LED-color endpoints' DEVICE_TYPE (unlike
+# every other virtual endpoint here) is COLOR_DIMMABLE_LIGHT, not the
+# generic 0 — ZHA's light-vs-switch platform tiebreak for an OnOff cluster
+# with siblings leans on it, not just cluster presence.
 # ---------------------------------------------------------------------------
 
-class Control4APD120Dimmer(CustomDevice):
-    """Control4 C4-APD120 Adaptive Phase Dimmer."""
+_c4_apd120_entry = (
+    QuirkBuilder(manufacturer="Control4", model="C4-APD120")
+    .also_applies_to("Control4", "LDZ-101")
+    .also_applies_to("Control4", "LDZ-102")
+    .also_applies_to("Control4", "C4-LDZ-101")
+    .also_applies_to("Control4", "C4-LDZ-102")
+    .skip_configuration()
+    # --- EP1: real endpoint, cluster-level changes only ---
+    .adds(C4BasicCluster, endpoint_id=1)
+    .replaces(C4DimmerManufCluster, endpoint_id=1)
+    .adds(Groups, endpoint_id=1)
+    .adds(Scenes, endpoint_id=1)
+    .adds(C4DimmerOnOff, endpoint_id=1)
+    .adds(C4DimmerLevelControl, endpoint_id=1)
+    # --- EP2: ZHA-side-only virtual config endpoint (not on the wire) ---
+    .adds_endpoint(2, profile_id=zha.PROFILE_ID, device_type=0x0000)
+    .adds(C4ConfigCluster, endpoint_id=2)
+    # --- EP196: real endpoint, injected at interview time ---
+    .replaces_endpoint(196, profile_id=zha.PROFILE_ID, device_type=0x0000)
+    .removes(C4.C4_CLUSTER_ID, endpoint_id=196)
+    .adds(C4ConfigCluster, endpoint_id=196)
+    # --- EP197: real endpoint, injected at interview time ---
+    .replaces_endpoint(197, profile_id=zha.PROFILE_ID, device_type=0x0000)
+    .removes(C4.C4_CLUSTER_ID, endpoint_id=197)
+    .adds(C4DimmerButtonCluster, endpoint_id=197)
+    # --- EP4: virtual ramp-rate config endpoint ---
+    .adds_endpoint(4, profile_id=zha.PROFILE_ID, device_type=0x0000)
+    .adds(C4RampCluster, endpoint_id=4)
+)
 
-    @classmethod
-    def match(cls, device):
-        model = getattr(device, 'model', None)
-        manuf = getattr(device, 'manufacturer', None)
-        _LOGGER.debug(
-            "C4 APD120.match called: model=%r manuf=%r ieee=%s",
-            model, manuf, getattr(device, 'ieee', '?'),
+# Virtual per-button endpoints — one Event/binary_sensor entity each in ZHA.
+# See C4DimmerButtonCluster / DIMMER_BUTTON_EVENT_EP_MAP.
+for _btn_name, _ep_id in DIMMER_BUTTON_EVENT_EP_MAP.items():
+    _c4_apd120_entry = (
+        _c4_apd120_entry
+        .adds_endpoint(_ep_id, profile_id=zha.PROFILE_ID, device_type=0x0000)
+        .adds(_DIMMER_BUTTON_CLUSTERS[_btn_name], endpoint_id=_ep_id)
+    )
+
+# Virtual button/led-attached endpoints — one Switch entity each in ZHA.
+# See c4_attached_switch.py.
+for _attach_name, _attach_cls in (
+    ("button_attached", C4ButtonAttachedOnOff),
+    ("led_attached", C4LedAttachedOnOff),
+):
+    _ep_id = ATTACHED_SWITCH_EP_MAP[_attach_name]
+    _c4_apd120_entry = (
+        _c4_apd120_entry
+        .adds_endpoint(_ep_id, profile_id=zha.PROFILE_ID, device_type=0x0000)
+        .adds(_attach_cls, endpoint_id=_ep_id)
+    )
+
+# Virtual per-button LED-color/off-color endpoints — one RGB light entity
+# each in ZHA. See c4_led_rgb.py.
+for _ep_id, _color_cls in (
+    (LED_COLOR_EP_MAP["top"], C4TopLedColorCluster),
+    (LED_COLOR_EP_MAP["bottom"], C4BottomLedColorCluster),
+    (LED_OFF_COLOR_EP_MAP["top"], C4TopLedOffColorCluster),
+    (LED_OFF_COLOR_EP_MAP["bottom"], C4BottomLedOffColorCluster),
+):
+    _c4_apd120_entry = (
+        _c4_apd120_entry
+        .adds_endpoint(
+            _ep_id,
+            profile_id=zha.PROFILE_ID,
+            device_type=zha.DeviceType.COLOR_DIMMABLE_LIGHT,
         )
-        return super().match(device)
+        .adds(C4LedOnOff, endpoint_id=_ep_id)
+        .adds(C4LedLevelControl, endpoint_id=_ep_id)
+        .adds(_color_cls, endpoint_id=_ep_id)
+    )
 
-    signature = {
-        "manufacturer_code": 0x1040,
-        MODELS_INFO: [
-            ("Control4", "C4-APD120"),
-            (None, "C4-APD120"),
-            ("Control4", None),
-        ],
-        ENDPOINTS: {
-            1: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0101,
-                INPUT_CLUSTERS:  [Identify.cluster_id, C4_MANUF_CLUSTER],
-                OUTPUT_CLUSTERS: [C4_MANUF_CLUSTER],
-            },
-            196: {
-                PROFILE_ID: C4_PROFILE_NETWORK,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4.C4_CLUSTER_ID],
-                OUTPUT_CLUSTERS: [],
-            },
-            197: {
-                PROFILE_ID: C4_PROFILE_BUTTON,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4.C4_CLUSTER_ID],
-                OUTPUT_CLUSTERS: [],
-            },
-        },
-    }
-
-    replacement = {
-        SKIP_CONFIGURATION: True,
-        ENDPOINTS: {
-            1: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0101,
-                INPUT_CLUSTERS: [
-                    C4BasicCluster,
-                    Identify.cluster_id,
-                    Groups.cluster_id,
-                    Scenes.cluster_id,
-                    C4DimmerOnOff,
-                    C4DimmerLevelControl,
-                    C4DimmerManufCluster,
-                ],
-                OUTPUT_CLUSTERS: [C4_MANUF_CLUSTER],
-            },
-            2: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4ConfigCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-            196: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4ConfigCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-            197: {
-                PROFILE_ID: zha.PROFILE_ID,
-                DEVICE_TYPE: 0x0000,
-                INPUT_CLUSTERS:  [C4DimmerButtonCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-            4: {
-                PROFILE_ID:      zha.PROFILE_ID,
-                DEVICE_TYPE:     0x0000,
-                INPUT_CLUSTERS:  [C4RampCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-            # Virtual per-button endpoints — one Event entity each in ZHA.
-            # See C4DimmerButtonCluster / DIMMER_BUTTON_EVENT_EP_MAP.
-            **{
-                ep_id: {
-                    PROFILE_ID:      zha.PROFILE_ID,
-                    DEVICE_TYPE:     0x0000,
-                    INPUT_CLUSTERS:  [_DIMMER_BUTTON_CLUSTERS[btn_name]],
-                    OUTPUT_CLUSTERS: [],
-                }
-                for btn_name, ep_id in DIMMER_BUTTON_EVENT_EP_MAP.items()
-            },
-            # Virtual button/led-attached endpoints — one Switch entity
-            # each in ZHA. See c4_attached_switch.py.
-            ATTACHED_SWITCH_EP_MAP["button_attached"]: {
-                PROFILE_ID:      zha.PROFILE_ID,
-                DEVICE_TYPE:     0x0000,
-                INPUT_CLUSTERS:  [C4ButtonAttachedOnOff],
-                OUTPUT_CLUSTERS: [],
-            },
-            ATTACHED_SWITCH_EP_MAP["led_attached"]: {
-                PROFILE_ID:      zha.PROFILE_ID,
-                DEVICE_TYPE:     0x0000,
-                INPUT_CLUSTERS:  [C4LedAttachedOnOff],
-                OUTPUT_CLUSTERS: [],
-            },
-            # Virtual per-button LED-color endpoints — one RGB light
-            # entity each in ZHA. See c4_led_rgb.py. DEVICE_TYPE matters
-            # here (unlike every other virtual endpoint on this device):
-            # ZHA's light-vs-switch platform tiebreak for an OnOff cluster
-            # with siblings apparently leans on it, not just cluster
-            # presence — COLOR_DIMMABLE_LIGHT matches the confirmed real
-            # pattern in zhaquirks/siglis/zigfred.py's own LED endpoint.
-            LED_COLOR_EP_MAP["top"]: {
-                PROFILE_ID:      zha.PROFILE_ID,
-                DEVICE_TYPE:     zha.DeviceType.COLOR_DIMMABLE_LIGHT,
-                INPUT_CLUSTERS:  [C4LedOnOff, C4LedLevelControl, C4TopLedColorCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-            LED_COLOR_EP_MAP["bottom"]: {
-                PROFILE_ID:      zha.PROFILE_ID,
-                DEVICE_TYPE:     zha.DeviceType.COLOR_DIMMABLE_LIGHT,
-                INPUT_CLUSTERS:  [C4LedOnOff, C4LedLevelControl, C4BottomLedColorCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-            # Virtual per-button LED off-color endpoints — same pattern
-            # as the on-color ones above, targeting the confirmed
-            # c4.dm.l0f/l1f wire commands instead.
-            LED_OFF_COLOR_EP_MAP["top"]: {
-                PROFILE_ID:      zha.PROFILE_ID,
-                DEVICE_TYPE:     zha.DeviceType.COLOR_DIMMABLE_LIGHT,
-                INPUT_CLUSTERS:  [C4LedOnOff, C4LedLevelControl, C4TopLedOffColorCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-            LED_OFF_COLOR_EP_MAP["bottom"]: {
-                PROFILE_ID:      zha.PROFILE_ID,
-                DEVICE_TYPE:     zha.DeviceType.COLOR_DIMMABLE_LIGHT,
-                INPUT_CLUSTERS:  [C4LedOnOff, C4LedLevelControl, C4BottomLedOffColorCluster],
-                OUTPUT_CLUSTERS: [],
-            },
-        },
-    }
-
-    # CONFIRMED vs. dead: "click"/"release" never fired (nothing in
-    # c4_button_cluster.py's DIMMER_EVENT_MAP produces those exact literal
-    # strings), while SHORT_PRESS/LONG_PRESS/LONG_RELEASE were already being
-    # fired for real (via c4.dmx.cc=1 / hc / he) but were missing from this
-    # list entirely, so HA's automation UI never offered them as triggers
-    # for this device. "press" (c4.dmx.bp, immediate press-down before a
-    # click/hold resolves) is newly wired up in DIMMER_EVENT_MAP to match.
-    #
-    # ENDPOINT_ID points at DIMMER_BUTTON_EVENT_EP_MAP's virtual per-button
-    # endpoints, not at 197 (this cluster's own endpoint) — since
-    # C4DimmerButtonCluster started firing zha_send_event there instead, to
-    # also get a dedicated binary_sensor entity per button (see its
-    # docstring). CLUSTER_ID must match the virtual endpoint's real
-    # cluster identity — BinaryInput (0x000F, see c4_button_cluster.py's
-    # _make_dimmer_button_cluster), not the C4_BUTTON_CLUSTER_ID used on
-    # EP197 itself, since that's the cluster ZHA tags the fired zha_event
-    # with (a stale value here would silently break trigger matching).
-    # Iterates APD120_BUTTON_MAP (c4_helpers.py) — the real, confirmed
-    # 0=top/1=bottom scheme for this device's c4.dm.* protocol — not the
-    # shared DIMMER_BUTTON_MAP, which uses an unrelated older on/off-
-    # button id scheme still needed by C4SwitchButtonCluster/
-    # C4DualOutletButtonCluster for their own physical devices.
-    device_automation_triggers = {
-        (_action, _btn_name): {
-            COMMAND: _action,
-            CLUSTER_ID: BinaryInput.cluster_id,
-            ENDPOINT_ID: DIMMER_BUTTON_EVENT_EP_MAP[_btn_name],
+# CONFIRMED vs. dead: "click"/"release" never fired (nothing in
+# c4_button_cluster.py's DIMMER_EVENT_MAP produces those exact literal
+# strings), while SHORT_PRESS/LONG_PRESS/LONG_RELEASE were already being
+# fired for real (via c4.dmx.cc=1 / hc / he) but were missing from this
+# list entirely, so HA's automation UI never offered them as triggers
+# for this device. "press" (c4.dmx.bp, immediate press-down before a
+# click/hold resolves) is newly wired up in DIMMER_EVENT_MAP to match.
+#
+# ENDPOINT_ID points at DIMMER_BUTTON_EVENT_EP_MAP's virtual per-button
+# endpoints, not at 197 (this cluster's own endpoint) — since
+# C4DimmerButtonCluster started firing zha_send_event there instead, to
+# also get a dedicated binary_sensor entity per button (see its
+# docstring). CLUSTER_ID must match the virtual endpoint's real
+# cluster identity — BinaryInput (0x000F, see c4_button_cluster.py's
+# _make_dimmer_button_cluster), not the C4_BUTTON_CLUSTER_ID used on
+# EP197 itself, since that's the cluster ZHA tags the fired zha_event
+# with (a stale value here would silently break trigger matching).
+# Iterates APD120_BUTTON_MAP (c4_helpers.py) — the real, confirmed
+# 0=top/1=bottom scheme for this device's c4.dm.* protocol — not the
+# shared DIMMER_BUTTON_MAP, which uses an unrelated older on/off-
+# button id scheme still needed by C4SwitchButtonCluster/
+# C4DualOutletButtonCluster for their own physical devices.
+_c4_apd120_entry = (
+    _c4_apd120_entry
+    .device_automation_triggers(
+        {
+            (_action, _btn_name): {
+                COMMAND: _action,
+                CLUSTER_ID: BinaryInput.cluster_id,
+                ENDPOINT_ID: DIMMER_BUTTON_EVENT_EP_MAP[_btn_name],
+            }
+            for _btn_id, _btn_name in APD120_BUTTON_MAP.items()
+            for _action in (
+                "press",
+                SHORT_PRESS, DOUBLE_PRESS, TRIPLE_PRESS, QUADRUPLE_PRESS,
+                LONG_PRESS, LONG_RELEASE,
+            )
         }
-        for _btn_id, _btn_name in APD120_BUTTON_MAP.items()
-        for _action in (
-            "press",
-            SHORT_PRESS, DOUBLE_PRESS, TRIPLE_PRESS, QUADRUPLE_PRESS,
-            LONG_PRESS, LONG_RELEASE,
-        )
-    }
+    )
+    .add_to_registry()
+)
 
 
 # ---------------------------------------------------------------------------
 # Self-register with the get_device patch
 # ---------------------------------------------------------------------------
-_C4_MODEL_QUIRK_MAP["C4-APD120"] = Control4APD120Dimmer
+_C4_MODEL_QUIRK_MAP["C4-APD120"] = _c4_apd120_entry
 
 # The LSZ-101 / LDZ-101 in-wall dimmers speak the same proprietary protocol as
 # the APD120 but report manufacturer code 0xABCD and expose the standard
@@ -838,6 +775,6 @@ for _c4_alias in (
     "LDZ-101", "LDZ-102",
     "C4-LDZ-101", "C4-LDZ-102",
 ):
-    _C4_MODEL_QUIRK_MAP[_c4_alias] = Control4APD120Dimmer
+    _C4_MODEL_QUIRK_MAP[_c4_alias] = _c4_apd120_entry
 _LOGGER.info("C4 APD120: registered LDZ-101 dimmer aliases")
 _LOGGER.info("C4 APD120: registered C4-APD120 in _C4_MODEL_QUIRK_MAP")
