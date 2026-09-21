@@ -50,7 +50,10 @@ turns any OnOff cluster into a real Switch entity. See that file's
 docstring for detail.
 
 Exported:
-  C4RampCluster         — cluster with ramp-rate + hardware-config commands
+  C4RampCluster         — cluster with ramp-rate + hardware-config commands,
+                          plus on_ramp_ms/off_ramp_ms attributes for the
+                          Home Assistant "Ramp Rate Up"/"Ramp Rate Down"
+                          Number config entities
   C4_RAMP_CLUSTER_ID    — cluster ID (0xFC44)
   RAMP_IDX_*            — named constants for transition time indices
 """
@@ -59,6 +62,7 @@ import asyncio
 import logging
 import os
 import sys
+from typing import Final
 
 _QUIRK_DIR = os.path.dirname(os.path.abspath(__file__))
 if _QUIRK_DIR not in sys.path:
@@ -66,7 +70,13 @@ if _QUIRK_DIR not in sys.path:
 
 from zigpy.quirks import CustomCluster
 import zigpy.types as t
-from zigpy.zcl.foundation import BaseCommandDefs, ZCLCommandDef
+from zigpy.zcl import foundation
+from zigpy.zcl.foundation import (
+    BaseAttributeDefs,
+    BaseCommandDefs,
+    ZCLAttributeDef,
+    ZCLCommandDef,
+)
 
 from c4_helpers import (
     C4_PROFILE_BUTTON,
@@ -75,6 +85,7 @@ from c4_helpers import (
     _build_c4_frame,
     next_c4_seq,
 )
+from c4_led_rgb import _C4LocalOnlyReadMixin
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -132,7 +143,7 @@ def _ms_to_zcl_tenths(ms: int) -> int:
     return max(0, (ms + 50) // 100)  # round to nearest tenth
 
 
-class C4RampCluster(CustomCluster):
+class C4RampCluster(_C4LocalOnlyReadMixin, CustomCluster):
     """Ramp/transition time cluster for Control4 dimmers.
 
     Provides commands to read and write dimmer ramp rates via the C4
@@ -144,6 +155,15 @@ class C4RampCluster(CustomCluster):
 
     The cluster caches the current ramp times locally so that
     C4DimmerOnOff can read them for on/off transition commands.
+
+    on_ramp_ms/off_ramp_ms are exposed as real ZCL attributes (added on
+    top of the pre-existing set_on_ramp/set_off_ramp commands, kept
+    unchanged) purely so QuirkBuilder's .number() can bind Home
+    Assistant "Ramp Rate Up"/"Ramp Rate Down" Number config entities to
+    them — writing either one calls the exact same _send_ramp_set() the
+    old commands already used. Reads never touch the wire (see
+    _C4LocalOnlyReadMixin, c4_led_rgb.py): there's nothing real to read,
+    only the local cache _send_ramp_set() keeps in sync.
 
     Usage from Home Assistant (via zha.issue_zigbee_cluster_command):
       service: zha.issue_zigbee_cluster_command
@@ -167,10 +187,45 @@ class C4RampCluster(CustomCluster):
     # Local cache: index → time in ms
     _ramp_times: dict[int, int] = {}
 
+    class AttributeDefs(BaseAttributeDefs):
+        """Purely local attributes — see class docstring."""
+
+        on_ramp_ms: Final = ZCLAttributeDef(
+            id=0x0000, type=t.uint16_t, is_manufacturer_specific=True,
+        )
+        off_ramp_ms: Final = ZCLAttributeDef(
+            id=0x0001, type=t.uint16_t, is_manufacturer_specific=True,
+        )
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Initialize cache with defaults
         self._ramp_times = dict(RAMP_DEFAULTS_MS)
+        self._update_attribute(
+            self.AttributeDefs.on_ramp_ms.id, self._ramp_times[RAMP_IDX_ON]
+        )
+        self._update_attribute(
+            self.AttributeDefs.off_ramp_ms.id, self._ramp_times[RAMP_IDX_OFF]
+        )
+
+    async def write_attributes(self, attributes, manufacturer=None):
+        """Translate a Number entity write into the same wire Set command
+        set_on_ramp/set_off_ramp already send — see class docstring.
+        """
+        for attr, value in attributes.items():
+            attr_id = (
+                self.find_attribute(attr).id if isinstance(attr, str) else attr
+            )
+            if attr_id == self.AttributeDefs.on_ramp_ms.id:
+                await self._send_ramp_set(RAMP_IDX_ON, int(value))
+            elif attr_id == self.AttributeDefs.off_ramp_ms.id:
+                await self._send_ramp_set(RAMP_IDX_OFF, int(value))
+            else:
+                _LOGGER.debug(
+                    "C4 Ramp: ignoring write to unrecognized attr 0x%04X = %s",
+                    attr_id, value,
+                )
+        return [[foundation.WriteAttributesStatusRecord(foundation.Status.SUCCESS)]]
 
     class ServerCommandDefs(BaseCommandDefs):
         """Server commands exposed to ZHA UI and service calls."""
@@ -302,6 +357,13 @@ class C4RampCluster(CustomCluster):
 
             # Sync ZCL LevelControl transition attributes on EP 1
             self._sync_zcl_transition_attrs()
+
+            # Keep the Number config entities' own cached value in sync,
+            # regardless of which path (command or attribute write) got here.
+            if index == RAMP_IDX_ON:
+                self._update_attribute(self.AttributeDefs.on_ramp_ms.id, time_ms)
+            elif index == RAMP_IDX_OFF:
+                self._update_attribute(self.AttributeDefs.off_ramp_ms.id, time_ms)
 
         except Exception as e:
             _LOGGER.warning(

@@ -466,6 +466,7 @@ from c4_helpers import (
 )
 from c4_basic_cluster import C4BasicCluster
 from c4_button_cluster import C4DualOutletButtonCluster
+from c4_ramp_cluster import C4RampCluster
 from c4_hooks import _C4_MODEL_QUIRK_MAP
 
 # C4DimmerOnOff reused UNCHANGED for outlet 1: real-ZCL transport, same as
@@ -1050,6 +1051,37 @@ _c4_loz5d1w_entry = (
     .prevent_default_entity_creation(
         endpoint_id=1, cluster_id=LevelControl.cluster_id,
         unique_id_suffix="on_level",
+    )
+    # --- EP4: virtual ramp-rate config endpoint, outlet 1 only — it's the
+    # same real dimming circuit/protocol as the plain APD120/LDZ-101 (see
+    # C4DimmerOnOff, reused unchanged above). Outlet 2 (EP11) has no
+    # confirmed ramp-rate protocol of its own — it's a synthetic endpoint
+    # with no real ZCL circuit behind it, and c4.dm.tv's ramp-set shape
+    # (channel 00, hardcoded — see c4_ramp_cluster.py) was only ever
+    # confirmed for the single-output dimmer, not extended here on a guess.
+    .adds_endpoint(4, profile_id=zha.PROFILE_ID, device_type=0x0000)
+    .adds(C4RampCluster, endpoint_id=4)
+    .number(
+        attribute_name=C4RampCluster.AttributeDefs.on_ramp_ms.name,
+        cluster_id=C4RampCluster.cluster_id,
+        endpoint_id=4,
+        min_value=0,
+        max_value=65535,
+        step=1,
+        unit="ms",
+        translation_key="ramp_rate_up",
+        fallback_name="Ramp Rate Up",
+    )
+    .number(
+        attribute_name=C4RampCluster.AttributeDefs.off_ramp_ms.name,
+        cluster_id=C4RampCluster.cluster_id,
+        endpoint_id=4,
+        min_value=0,
+        max_value=65535,
+        step=1,
+        unit="ms",
+        translation_key="ramp_rate_down",
+        fallback_name="Ramp Rate Down",
     )
     # --- EP11: synthetic endpoint for the second outlet (not on the wire) ---
     .adds_endpoint(11, profile_id=zha.PROFILE_ID, device_type=0x0101)
