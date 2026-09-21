@@ -222,6 +222,57 @@ class C4RampCluster(_C4LocalOnlyReadMixin, CustomCluster):
         self._update_attribute(
             self.AttributeDefs.off_ramp_ms.id, self._ramp_times[RAMP_IDX_OFF]
         )
+        # Push the defaults to the device on every HA startup — see
+        # _push_ramp_defaults()'s own docstring for why this is needed and
+        # why it's scheduled from here rather than a framework hook.
+        asyncio.ensure_future(self._push_ramp_defaults())
+
+    async def _push_ramp_defaults(self):
+        """Send the just-initialized ramp times to the device.
+
+        CONFIRMED gap on real hardware: without this, __init__ only seeds
+        the LOCAL ZCL attribute cache with RAMP_DEFAULTS_MS — the Number
+        entities show 750/2000 ms in Home Assistant, but nothing is ever
+        actually sent to the device until the user explicitly edits a
+        value. After a restart, the device's own hardware state (whatever
+        it was left at before — its own factory value, or a value set in
+        a prior HA session) silently drifts out of sync with whatever HA
+        displays, since this quirk has no cross-restart storage of "the
+        last value the user set" — only zigpy's own in-memory attribute
+        cache, which __init__ always resets to RAMP_DEFAULTS_MS on every
+        fresh process. Sending here keeps the device and the UI in
+        agreement, and explicitly applies Control4's own 750 ms/2000 ms
+        on-ramp/off-ramp default (rather than leaving it a cosmetic-only
+        UI value) every time HA starts.
+
+        Scheduled via asyncio.ensure_future() from __init__ instead of a
+        zigpy/zha framework "device ready" hook: this fork's quirks all
+        call .skip_configuration() (see every QuirkBuilder chain in this
+        package), which short-circuits zha's own
+        Device.async_initialize()/initialize_cluster_configs() path
+        entirely — confirmed by reading zha/zigbee/device.py in the real
+        zha==2.2.2 package: `if aggregated and not self.skip_configuration`
+        never runs when skip_configuration is set. A prior version of
+        this method tried overriding zigpy.zcl.Cluster.async_initialize()
+        directly (mirroring c4_basic_cluster.py's C4BasicCluster), but
+        that method doesn't exist at all on Cluster in the installed
+        zigpy==2.2.0 (confirmed via inspecting the MRO directly) — calling
+        super().async_initialize() raised AttributeError immediately in
+        testing. Firing here instead mirrors the already-proven pattern
+        in c4_button_cluster.py's C4KeypadButtonCluster (schedule via
+        asyncio.ensure_future from a sync context) rather than relying on
+        an initialization hook that turns out not to fire for this fork's
+        devices. _send_ramp_set() already wraps its own device.request()
+        in try/except, so a failure here (e.g. the network stack not
+        being ready yet at construction time) just logs a warning instead
+        of raising — same risk profile as today, not a regression.
+
+        On C4RampClusterOutlet2 (outlet 2, local-only — see its own
+        docstring/_send_ramp_set override), this only re-affirms the
+        local cache; it never touches the wire.
+        """
+        await self._send_ramp_set(RAMP_IDX_ON, self._ramp_times[RAMP_IDX_ON])
+        await self._send_ramp_set(RAMP_IDX_OFF, self._ramp_times[RAMP_IDX_OFF])
 
     async def write_attributes(self, attributes, manufacturer=None):
         """Translate a Number entity write into the same wire Set command
