@@ -148,6 +148,7 @@ from c4_helpers import (
     C4ConfigCluster,
     _build_c4_frame,
     next_c4_seq,
+    strip_c4_endpoint,
 )
 from c4_basic_cluster import C4BasicCluster
 from c4_button_cluster import C4KeypadButtonCluster, _KPZ6B1_BUTTON_CLUSTERS
@@ -277,13 +278,14 @@ _c4_kpz6b1_entry = (
     .replaces_endpoint(1, profile_id=zha.PROFILE_ID, device_type=0x0830)
     .adds(C4BasicCluster, endpoint_id=1)
     .replaces(C4DimmerManufCluster, endpoint_id=1)
-    # --- EP196: real endpoint, injected at interview time ---
-    .replaces_endpoint(196, profile_id=zha.PROFILE_ID, device_type=0x0000)
-    .removes(C4.C4_CLUSTER_ID, endpoint_id=196)
-    .adds(C4ConfigCluster, endpoint_id=196)
-    # --- EP197: real endpoint, injected at interview time ---
-    .replaces_endpoint(197, profile_id=zha.PROFILE_ID, device_type=0x0000)
-    .removes(C4.C4_CLUSTER_ID, endpoint_id=197)
+)
+# --- EP196: real endpoint, injected at interview time ---
+_c4_kpz6b1_entry = strip_c4_endpoint(_c4_kpz6b1_entry, 196).adds(
+    C4ConfigCluster, endpoint_id=196
+)
+# --- EP197: real endpoint, injected at interview time ---
+_c4_kpz6b1_entry = (
+    strip_c4_endpoint(_c4_kpz6b1_entry, 197)
     .adds(C4KeypadButtonCluster, endpoint_id=197)
     .adds(C4KeypadAllLedCluster, endpoint_id=197)
 )

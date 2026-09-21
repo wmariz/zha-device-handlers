@@ -40,7 +40,6 @@ Outlet-specific notes:
   • On/off commands use C4 serial protocol (c4.dm.tv), NOT standard ZCL OnOff.
 """
 
-import asyncio
 import logging
 import os
 import sys
@@ -54,9 +53,7 @@ from zigpy.quirks import CustomCluster
 from zigpy.quirks.v2 import ClusterType, QuirkBuilder
 from zigpy.zcl import foundation
 from zigpy.zcl.foundation import Status as ZCLStatus
-from zigpy.zcl.clusters.general import (
-    Basic, Groups, Identify, LevelControl, OnOff, Scenes, Time,
-)
+from zigpy.zcl.clusters.general import Basic, LevelControl, OnOff, Time
 
 from zhaquirks.const import (
     CLUSTER_ID,
@@ -76,14 +73,12 @@ from c4_helpers import (
     C4_CLUSTER_ID,
     C4_MANUF_CLUSTER,
     C4_PROFILE_BUTTON,
-    C4_PROVISION_DELAY,
-    OUTLET_EP_MAP,
-    _INVALID_MODELS,
     _build_c4_frame,
     _sync_ep1_onoff,
     next_c4_seq,
     C4ConfigCluster,
     C4DimmerManufCluster,
+    strip_c4_endpoint,
 )
 from c4_basic_cluster import C4BasicCluster
 from c4_button_cluster import C4DualOutletButtonCluster
@@ -391,21 +386,20 @@ _c4_loz5s1w_entry = (
     # --- EP11: synthetic endpoint for the second outlet (not on the wire) ---
     .adds_endpoint(11, profile_id=zha.PROFILE_ID, device_type=0x0100)
     .adds(C4Outlet1OnOff, endpoint_id=11)
-    # --- EP2: real endpoint, injected at interview time ---
-    .replaces_endpoint(2, profile_id=zha.PROFILE_ID, device_type=0x0000)
-    .removes(C4.C4_CLUSTER_ID, endpoint_id=2)
-    .adds(C4OutletConfigCluster, endpoint_id=2)
-    # --- EP196: real endpoint, injected at interview time ---
-    .replaces_endpoint(196, profile_id=zha.PROFILE_ID, device_type=0x0000)
-    .removes(C4.C4_CLUSTER_ID, endpoint_id=196)
-    .adds(C4OutletConfigCluster, endpoint_id=196)
-    # --- EP197: real endpoint, injected at interview time ---
-    .replaces_endpoint(197, profile_id=zha.PROFILE_ID, device_type=0x0000)
-    .removes(C4.C4_CLUSTER_ID, endpoint_id=197)
-    .adds(C4DualOutletButtonCluster, endpoint_id=197)
     # --- EP198: real endpoint, the model discriminator (see docstring) ---
     .replaces_endpoint(198, profile_id=zha.PROFILE_ID, device_type=0x0000)
     .replaces(C4OutletStateCluster, endpoint_id=198)
+)
+# --- EP2/EP196/EP197: real endpoints, injected at interview time ---
+for _ep_id in (2, 196):
+    _c4_loz5s1w_entry = strip_c4_endpoint(_c4_loz5s1w_entry, _ep_id).adds(
+        C4OutletConfigCluster, endpoint_id=_ep_id
+    )
+_c4_loz5s1w_entry = strip_c4_endpoint(_c4_loz5s1w_entry, 197).adds(
+    C4DualOutletButtonCluster, endpoint_id=197
+)
+_c4_loz5s1w_entry = (
+    _c4_loz5s1w_entry
     .device_automation_triggers(
         {
             ("click",   "outlet_1"): {COMMAND: "click",   CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},

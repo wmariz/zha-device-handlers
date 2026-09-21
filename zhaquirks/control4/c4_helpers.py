@@ -3,6 +3,11 @@
 Shared clusters defined here (used by 2+ device files):
   C4DimmerManufCluster  — EP 1 manufacturer cluster (all devices)
   C4ConfigCluster       — EP 2 / EP 196 config cluster (dimmer, switch)
+
+Shared QuirkBuilder v2 helper:
+  strip_c4_endpoint()   — the replaces_endpoint()+removes(C4_CLUSTER_ID)
+                          pair every device quirk repeats for its real
+                          C4-proprietary endpoints (EP2/196/197/198)
 """
 
 import asyncio
@@ -18,6 +23,7 @@ _QUIRK_DIR = os.path.dirname(os.path.abspath(__file__))
 if _QUIRK_DIR not in sys.path:
     sys.path.insert(0, _QUIRK_DIR)
 
+from zigpy.profiles import zha
 from zigpy.quirks import CustomCluster
 from zigpy.zcl import foundation
 from zigpy.zcl.foundation import Status as ZCLStatus
@@ -311,6 +317,49 @@ def _build_c4_frame(seq_num, ascii_cmd: str) -> bytes:
     commands encode identically to ASCII.
     """
     return (ascii_cmd + "\r\n").encode("latin-1")
+
+
+# ---------------------------------------------------------------------------
+# QuirkBuilder v2 helper
+# ---------------------------------------------------------------------------
+
+def strip_c4_endpoint(
+    quirk_builder,
+    endpoint_id: int,
+    device_type: int = 0x0000,
+    remove_cluster_id: int | None = None,
+):
+    """Force a real endpoint onto the ZHA profile and strip its one
+    inert real-wire cluster, leaving the caller to .adds() whatever
+    ZHA-side virtual cluster(s) replace it.
+
+    Every C4 device's EP2/196/197 is a real endpoint injected by
+    c4_hooks.py's Endpoint.initialize patch, since it never answers
+    Simple_Desc_req on the wire — but its sole real cluster
+    (C4_CLUSTER_ID / 0x0001, the default here) carries no useful ZCL
+    schema, so every device quirk replaces it with a virtual cluster that
+    actually exposes something to HA, and forces the endpoint's profile
+    from the C4 proprietary profile to the standard ZHA profile (ZHA only
+    builds entities for clusters under its own profile). This exact
+    two-step (replaces_endpoint + removes(...)) was repeated identically
+    across all five device quirks; centralized here after the fact once
+    the pattern was confirmed identical everywhere.
+
+    Some models' EP198 (and, defensively, other virtual per-button/LED
+    endpoints on the same hardware family — see control4_dimmer.py's/
+    control4_switch.py's own comments) turned out to be a REAL endpoint
+    on the wire too, but with a Basic cluster instead of C4_CLUSTER_ID —
+    pass remove_cluster_id=Basic.cluster_id for those instead of adding a
+    second near-identical helper.
+    """
+    return (
+        quirk_builder
+        .replaces_endpoint(endpoint_id, profile_id=zha.PROFILE_ID, device_type=device_type)
+        .removes(
+            remove_cluster_id if remove_cluster_id is not None else C4_CLUSTER_ID,
+            endpoint_id=endpoint_id,
+        )
+    )
 
 
 async def _c4_send_controller_identity(device, source="unknown", zcl_seq=None):

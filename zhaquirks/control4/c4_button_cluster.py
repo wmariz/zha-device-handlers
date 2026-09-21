@@ -11,6 +11,7 @@ Classes exported:
   _KPZ6B1_BUTTON_CLUSTERS          — per-button virtual cluster dict for the KPZ-6B1
   _make_dimmer_button_cluster()    — factory for the dimmer's per-button BinaryInput cluster
   _make_keypad_button_cluster()    — factory for the KPZ-6B1's per-button BinaryInput cluster
+  _make_binary_button_cluster()    — shared base factory both of the above delegate to
 """
 
 import logging
@@ -502,8 +503,14 @@ class C4ButtonCluster(EventableCluster):
 # Dimmer variant — adds a dedicated sensor entity per physical button
 # ---------------------------------------------------------------------------
 
-def _make_dimmer_button_cluster(button_name: str) -> type:
-    """Return a unique BinaryInput-based cluster for one dimmer button.
+def _make_binary_button_cluster(display_name: str, class_name: str) -> type:
+    """Return a unique BinaryInput-based per-button virtual cluster.
+
+    Shared by _make_dimmer_button_cluster (dimmer/switch top/bottom
+    buttons) and _make_keypad_button_cluster (KPZ-6B1's 6 buttons) — the
+    exact same class was independently confirmed correct for both device
+    families, differing only in `name`/generated class name, so it's
+    built once here and both factories just supply those two strings.
 
     CONFIRMED WRONG on real hardware, twice: (1) a bare EventableCluster,
     on the (unverified) assumption that ZHA creates a dedicated Event
@@ -523,8 +530,7 @@ def _make_dimmer_button_cluster(button_name: str) -> type:
     overriding it with a custom per-button name (as both earlier
     attempts did) silently breaks discovery. Each button still gets its
     own independent entity because it lives on its own dedicated virtual
-    endpoint (DIMMER_BUTTON_EVENT_EP_MAP), not because of a unique
-    ep_attribute.
+    endpoint, not because of a unique ep_attribute.
 
     Uses BinaryInput instead of MultistateInput per the user's own
     suggestion: present_value=True on press, False on release/click-
@@ -534,7 +540,7 @@ def _make_dimmer_button_cluster(button_name: str) -> type:
 
     class _ButtonCluster(CustomCluster, BinaryInput):
         cluster_id   = BinaryInput.cluster_id
-        name         = f"{button_name.capitalize()} Button"
+        name         = display_name
         _c4_custom_handler = False  # no physical routing
 
         def __init__(self, *args, **kwargs):
@@ -557,9 +563,22 @@ def _make_dimmer_button_cluster(button_name: str) -> type:
                 BinaryInput.AttributeDefs.present_value.id, pressed,
             )
 
-    _ButtonCluster.__name__     = f"C4Dimmer{button_name.capitalize()}ButtonCluster"
-    _ButtonCluster.__qualname__ = _ButtonCluster.__name__
+    _ButtonCluster.__name__     = class_name
+    _ButtonCluster.__qualname__ = class_name
     return _ButtonCluster
+
+
+def _make_dimmer_button_cluster(button_name: str) -> type:
+    """Return _make_binary_button_cluster's class for one dimmer/switch button.
+
+    See _make_binary_button_cluster's docstring for the full "two wrong
+    turns" history behind this shape. DIMMER_BUTTON_EVENT_EP_MAP keys
+    ("top"/"bottom") give each button its own virtual endpoint.
+    """
+    return _make_binary_button_cluster(
+        f"{button_name.capitalize()} Button",
+        f"C4Dimmer{button_name.capitalize()}ButtonCluster",
+    )
 
 
 # One cluster class per dimmer button — keyed by button name ("top"/"bottom")
@@ -832,42 +851,17 @@ class C4DualOutletButtonCluster(C4SwitchButtonCluster):
 # ---------------------------------------------------------------------------
 
 def _make_keypad_button_cluster(btn_id: int) -> type:
-    """Return a BinaryInput-based cluster for one KPZ-6B1 physical button.
+    """Return _make_binary_button_cluster's class for one KPZ-6B1 button.
 
-    Mirrors _make_dimmer_button_cluster exactly (same CONFIRMED fix:
-    ep_attribute MUST stay BinaryInput's own inherited default for ZHA's
-    ClusterHandler discovery to create a binary_sensor entity — per-button
-    uniqueness comes from each one living on its own virtual endpoint,
-    not from ep_attribute). Physical Zigbee frames never arrive here —
-    routing is done by C4KeypadButtonCluster._fire_button_zha_event().
+    Mirrors _make_dimmer_button_cluster exactly (see
+    _make_binary_button_cluster's docstring for the shared "two wrong
+    turns" history). Physical Zigbee frames never arrive here — routing
+    is done by C4KeypadButtonCluster._fire_button_zha_event().
     """
-
-    class _ButtonCluster(CustomCluster, BinaryInput):
-        cluster_id   = BinaryInput.cluster_id
-        name         = f"Button {btn_id + 1}"
-        _c4_custom_handler = False  # no physical routing
-
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self._update_attribute(
-                BinaryInput.AttributeDefs.present_value.id, False,
-            )
-
-        def handle_message(self, hdr, args):
-            pass  # no physical packets arrive here
-
-        def handle_cluster_request(self, hdr, args, *, dst_addressing=None):
-            pass
-
-        def set_pressed(self, pressed: bool):
-            """Set present_value — True while held, False once released."""
-            self._update_attribute(
-                BinaryInput.AttributeDefs.present_value.id, pressed,
-            )
-
-    _ButtonCluster.__name__     = f"C4Keypad{btn_id}ButtonCluster"
-    _ButtonCluster.__qualname__ = _ButtonCluster.__name__
-    return _ButtonCluster
+    return _make_binary_button_cluster(
+        f"Button {btn_id + 1}",
+        f"C4Keypad{btn_id}ButtonCluster",
+    )
 
 
 # One cluster class per keypad button — keyed by button id (0-5)

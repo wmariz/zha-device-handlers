@@ -37,6 +37,7 @@ from c4_helpers import (
     DIMMER_BUTTON_MAP,
     C4DimmerManufCluster,
     C4ConfigCluster,
+    strip_c4_endpoint,
 )
 from c4_basic_cluster import C4BasicCluster
 from c4_button_cluster import C4SwitchButtonClusterWithBinarySensor, _DIMMER_BUTTON_CLUSTERS
@@ -146,14 +147,13 @@ _c4_sw120_entry = (
     # --- EP2: ZHA-side-only virtual config endpoint (not on the wire) ---
     .adds_endpoint(2, profile_id=zha.PROFILE_ID, device_type=0x0000)
     .adds(C4ConfigCluster, endpoint_id=2)
-    # --- EP196: real endpoint, injected at interview time ---
-    .replaces_endpoint(196, profile_id=zha.PROFILE_ID, device_type=0x0000)
-    .removes(C4.C4_CLUSTER_ID, endpoint_id=196)
-    .adds(C4ConfigCluster, endpoint_id=196)
-    # --- EP197: real endpoint, injected at interview time ---
-    .replaces_endpoint(197, profile_id=zha.PROFILE_ID, device_type=0x0000)
-    .removes(C4.C4_CLUSTER_ID, endpoint_id=197)
-    .adds(C4SwitchButtonClusterWithBinarySensor, endpoint_id=197)
+)
+# --- EP196/EP197: real endpoints, injected at interview time ---
+_c4_sw120_entry = strip_c4_endpoint(_c4_sw120_entry, 196).adds(
+    C4ConfigCluster, endpoint_id=196
+)
+_c4_sw120_entry = strip_c4_endpoint(_c4_sw120_entry, 197).adds(
+    C4SwitchButtonClusterWithBinarySensor, endpoint_id=197
 )
 
 # Virtual per-button endpoints — one binary_sensor entity each in ZHA
@@ -164,9 +164,7 @@ for _btn_ep_name, _btn_ep_id, _btn_label in (
     ("bottom", DIMMER_BUTTON_EVENT_EP_MAP["bottom"], "Button Bottom"),
 ):
     _c4_sw120_entry = (
-        _c4_sw120_entry
-        .replaces_endpoint(_btn_ep_id, profile_id=zha.PROFILE_ID, device_type=0x0000)
-        .removes(Basic.cluster_id, endpoint_id=_btn_ep_id)
+        strip_c4_endpoint(_c4_sw120_entry, _btn_ep_id, remove_cluster_id=Basic.cluster_id)
         .adds(_DIMMER_BUTTON_CLUSTERS[_btn_ep_name], endpoint_id=_btn_ep_id)
         .change_entity_metadata(
             endpoint_id=_btn_ep_id,
@@ -184,9 +182,7 @@ for _attach_name, _attach_cls, _attach_label in (
 ):
     _ep_id = ATTACHED_SWITCH_EP_MAP[_attach_name]
     _c4_sw120_entry = (
-        _c4_sw120_entry
-        .replaces_endpoint(_ep_id, profile_id=zha.PROFILE_ID, device_type=0x0000)
-        .removes(Basic.cluster_id, endpoint_id=_ep_id)
+        strip_c4_endpoint(_c4_sw120_entry, _ep_id, remove_cluster_id=Basic.cluster_id)
         .adds(_attach_cls, endpoint_id=_ep_id)
         .change_entity_metadata(
             endpoint_id=_ep_id,
@@ -205,13 +201,11 @@ for _ep_id, _color_cls, _led_label in (
     (LED_OFF_COLOR_EP_MAP["bottom"], C4BottomLedOffColorCluster, "LED Bottom Off"),
 ):
     _c4_sw120_entry = (
-        _c4_sw120_entry
-        .replaces_endpoint(
-            _ep_id,
-            profile_id=zha.PROFILE_ID,
+        strip_c4_endpoint(
+            _c4_sw120_entry, _ep_id,
             device_type=zha.DeviceType.COLOR_DIMMABLE_LIGHT,
+            remove_cluster_id=Basic.cluster_id,
         )
-        .removes(Basic.cluster_id, endpoint_id=_ep_id)
         .adds(C4LedOnOff, endpoint_id=_ep_id)
         .adds(C4LedLevelControl, endpoint_id=_ep_id)
         .adds(_color_cls, endpoint_id=_ep_id)

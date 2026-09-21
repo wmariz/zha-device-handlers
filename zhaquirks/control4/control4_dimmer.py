@@ -290,6 +290,7 @@ from c4_helpers import (
     DIMMER_BUTTON_EVENT_EP_MAP,
     C4DimmerManufCluster,
     C4ConfigCluster,
+    strip_c4_endpoint,
 )
 from c4_basic_cluster import C4BasicCluster
 from c4_button_cluster import C4DimmerButtonCluster, _DIMMER_BUTTON_CLUSTERS
@@ -665,14 +666,16 @@ _c4_apd120_entry = (
     # --- EP2: ZHA-side-only virtual config endpoint (not on the wire) ---
     .adds_endpoint(2, profile_id=zha.PROFILE_ID, device_type=0x0000)
     .adds(C4ConfigCluster, endpoint_id=2)
-    # --- EP196: real endpoint, injected at interview time ---
-    .replaces_endpoint(196, profile_id=zha.PROFILE_ID, device_type=0x0000)
-    .removes(C4.C4_CLUSTER_ID, endpoint_id=196)
-    .adds(C4ConfigCluster, endpoint_id=196)
-    # --- EP197: real endpoint, injected at interview time ---
-    .replaces_endpoint(197, profile_id=zha.PROFILE_ID, device_type=0x0000)
-    .removes(C4.C4_CLUSTER_ID, endpoint_id=197)
-    .adds(C4DimmerButtonCluster, endpoint_id=197)
+)
+# --- EP196/EP197: real endpoints, injected at interview time ---
+_c4_apd120_entry = strip_c4_endpoint(_c4_apd120_entry, 196).adds(
+    C4ConfigCluster, endpoint_id=196
+)
+_c4_apd120_entry = strip_c4_endpoint(_c4_apd120_entry, 197).adds(
+    C4DimmerButtonCluster, endpoint_id=197
+)
+_c4_apd120_entry = (
+    _c4_apd120_entry
     # --- EP4: virtual ramp-rate config endpoint ---
     .adds_endpoint(4, profile_id=zha.PROFILE_ID, device_type=0x0000)
     .adds(C4RampCluster, endpoint_id=4)
@@ -723,9 +726,7 @@ _c4_apd120_entry = (
 # endpoint on this device.
 _top_ep_id = DIMMER_BUTTON_EVENT_EP_MAP["top"]
 _c4_apd120_entry = (
-    _c4_apd120_entry
-    .replaces_endpoint(_top_ep_id, profile_id=zha.PROFILE_ID, device_type=0x0000)
-    .removes(Basic.cluster_id, endpoint_id=_top_ep_id)
+    strip_c4_endpoint(_c4_apd120_entry, _top_ep_id, remove_cluster_id=Basic.cluster_id)
     .adds(_DIMMER_BUTTON_CLUSTERS["top"], endpoint_id=_top_ep_id)
     .change_entity_metadata(
         endpoint_id=_top_ep_id,

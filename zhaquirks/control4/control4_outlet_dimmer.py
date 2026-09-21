@@ -463,6 +463,7 @@ from c4_helpers import (
     C4DimmerManufCluster,
     _build_c4_frame,
     next_c4_seq,
+    strip_c4_endpoint,
 )
 from c4_basic_cluster import C4BasicCluster
 from c4_button_cluster import C4DualOutletButtonCluster
@@ -1091,21 +1092,21 @@ _c4_loz5d1w_entry = (
         endpoint_id=11, cluster_id=LevelControl.cluster_id,
         unique_id_suffix="on_level",
     )
-    # --- EP2: real endpoint, injected at interview time ---
-    .replaces_endpoint(2, profile_id=zha.PROFILE_ID, device_type=0x0000)
-    .removes(C4_CLUSTER_ID, endpoint_id=2)
-    .adds(C4ConfigCluster, endpoint_id=2)
-    # --- EP196: real endpoint, injected at interview time ---
-    .replaces_endpoint(196, profile_id=zha.PROFILE_ID, device_type=0x0000)
-    .removes(C4_CLUSTER_ID, endpoint_id=196)
-    .adds(C4ConfigCluster, endpoint_id=196)
-    # --- EP197: real endpoint, injected at interview time ---
-    .replaces_endpoint(197, profile_id=zha.PROFILE_ID, device_type=0x0000)
-    .removes(C4_CLUSTER_ID, endpoint_id=197)
-    .adds(C4DualOutletDimmerButtonCluster, endpoint_id=197)
     # --- EP198: real endpoint, the model discriminator (see docstring) ---
     .replaces_endpoint(198, profile_id=zha.PROFILE_ID, device_type=0x0000)
     .replaces(C4OutletStateCluster, endpoint_id=198)
+)
+# --- EP2/EP196: real endpoints, injected at interview time ---
+for _ep_id in (2, 196):
+    _c4_loz5d1w_entry = strip_c4_endpoint(_c4_loz5d1w_entry, _ep_id).adds(
+        C4ConfigCluster, endpoint_id=_ep_id
+    )
+# --- EP197: real endpoint, injected at interview time ---
+_c4_loz5d1w_entry = strip_c4_endpoint(_c4_loz5d1w_entry, 197).adds(
+    C4DualOutletDimmerButtonCluster, endpoint_id=197
+)
+_c4_loz5d1w_entry = (
+    _c4_loz5d1w_entry
     .device_automation_triggers(
         {
             ("click",   "outlet_1"): {COMMAND: "click",   CLUSTER_ID: C4_BUTTON_CLUSTER_ID, ENDPOINT_ID: 197},
