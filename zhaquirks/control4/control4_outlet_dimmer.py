@@ -1042,10 +1042,23 @@ _c4_loz5d1w_entry = (
     .removes(Time.cluster_id, endpoint_id=1)
     .adds(C4DimmerManufCluster, endpoint_id=1)
     .adds(C4_MANUF_CLUSTER, cluster_type=ClusterType.Client, endpoint_id=1)
+    # ZHA auto-creates an "On Level" Number config entity for any
+    # LevelControl cluster — on_level is a purely local cache here (never
+    # sent to the real device, see C4DimmerLevelControlWithOptimisticSync/
+    # C4Outlet2DimmerLevelControl's own _LOCAL_ATTRS handling), and the
+    # user asked for it to not show up in Configuration for either outlet.
+    .prevent_default_entity_creation(
+        endpoint_id=1, cluster_id=LevelControl.cluster_id,
+        unique_id_suffix="on_level",
+    )
     # --- EP11: synthetic endpoint for the second outlet (not on the wire) ---
     .adds_endpoint(11, profile_id=zha.PROFILE_ID, device_type=0x0101)
     .adds(C4Outlet2OnOff, endpoint_id=11)
     .adds(C4Outlet2DimmerLevelControl, endpoint_id=11)
+    .prevent_default_entity_creation(
+        endpoint_id=11, cluster_id=LevelControl.cluster_id,
+        unique_id_suffix="on_level",
+    )
     # --- EP2: real endpoint, injected at interview time ---
     .replaces_endpoint(2, profile_id=zha.PROFILE_ID, device_type=0x0000)
     .removes(C4_CLUSTER_ID, endpoint_id=2)
