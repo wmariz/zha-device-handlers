@@ -564,6 +564,25 @@ History:
   attempt — see the parity fix in C4DimmerLevelControlWithOptimisticSync
   below.
 
+  Also within attempt 21: the user asked for outlet 1's current_level
+  to update gradually while ramping (like outlet 2) instead of jumping
+  straight to the target. Re-enabled outlet 0 in
+  C4DualOutletDimmerButtonCluster._sync_level_for_outlet (reverting
+  attempt 14's exclusion — see that method's own docstring for the
+  full history and the regression risk this reopens), and — after the
+  user clarified they wanted the optimistic jump itself dropped too,
+  not just the suppression window that used to guard it — removed
+  C4DimmerLevelControlWithOptimisticSync's current_level jump entirely.
+  current_level is now driven purely by live confirmations
+  (EP2/EP196's _sync_ep1_level plus outlet 0's now-re-enabled
+  c4.dm.tc). on_off still updates immediately (it's binary, nothing to
+  ramp), and on_level caching is untouched. The same change was made to
+  the plain LDZ-101/APD120's own C4DimmerLevelControl
+  (control4_dimmer.py) — that file's separate, more elaborate
+  optimistic-jump-plus-suppression mechanism (c4_suppress_level_sync(),
+  _LEVEL_SYNC_SUPPRESS_SECONDS) was removed outright, reverting to
+  trusting _sync_ep1_level's live reports directly.
+
 Implementation:
   • Outlet 1 (EP1) reuses C4DimmerOnOff UNCHANGED from control4_dimmer.py
     for on/off, paired with C4DimmerLevelControlWithOptimisticSync (this
@@ -684,20 +703,26 @@ def _c4_pct_to_zcl_level(level_pct: int) -> int:
 # ---------------------------------------------------------------------------
 
 class C4DimmerLevelControlWithOptimisticSync(C4DimmerLevelControl):
-    """C4DimmerLevelControl, but also optimistically updates current_level.
+    """C4DimmerLevelControl, plus outlet-1-specific fixes bundled below.
 
-    CONFIRMED bug found on real hardware: after dimming outlet 1, turning
-    it off then back on made the UI keep showing the *stale pre-off level*
-    even though the physical light correctly went to 100%. C4DimmerOnOff's
-    on()/off() handlers (control4_dimmer.py) redirect into a real ZCL
+    HISTORY (the "OptimisticSync" this class is named for): originally
+    added because, after dimming outlet 1 then turning it off and back
+    on, the UI kept showing the *stale pre-off level* even though the
+    physical light correctly went to 100% — C4DimmerOnOff's on()/off()
+    handlers (control4_dimmer.py) redirect into a real ZCL
     move_to_level_with_on_off frame via C4DimmerLevelControl, which just
-    forwards it to a real wire send — it has no optimistic update of its
+    forwards it to a real wire send with no optimistic update of its
     own, relying entirely on the device reporting current_level back
-    (EP2/EP196's C4ConfigCluster -> _sync_ep1_level). That confirmation
-    apparently isn't arriving reliably enough for this specific device to
-    keep the UI in sync, unlike the real C4-APD120 this class was written
-    for — hence a subclass scoped to this file instead of a change to
-    control4_dimmer.py itself, which is left untouched.
+    (EP2/EP196's C4ConfigCluster -> _sync_ep1_level). Fixed at the time
+    by jumping current_level straight to the target immediately.
+    "Attempt 21" REMOVED that jump: the user asked for outlet 1 to show
+    current_level updating gradually while ramping (like outlet 2, via
+    C4DualOutletDimmerButtonCluster._sync_level_for_outlet below, now
+    also enabled for outlet 0) rather than snapping straight to the
+    final value — current_level is left entirely to live confirmations.
+    Kept as a subclass scoped to this file (rather than changing
+    control4_dimmer.py itself) for the other fixes below, which remain
+    outlet-1-specific.
 
     This also fixes the same args-vs-kwargs gap found in outlet 2's
     C4Outlet2DimmerLevelControl (see module docstring, attempt 10):
@@ -809,12 +834,28 @@ class C4DimmerLevelControlWithOptimisticSync(C4DimmerLevelControl):
             else:
                 level_zcl = None
             if level_zcl is not None:
+                # "Attempt 21": no longer jumps current_level straight to
+                # level_zcl here — the user asked to drop the optimistic
+                # jump entirely (both for this class and the plain
+                # LDZ-101's own C4DimmerLevelControl, control4_dimmer.py)
+                # in favor of letting current_level update gradually from
+                # real confirmations: EP2/EP196's C4ConfigCluster reports
+                # (_sync_ep1_level, unchanged) plus, now that "Attempt
+                # 21" also re-enabled outlet 0 in
+                # C4DualOutletDimmerButtonCluster._sync_level_for_outlet
+                # below, the device's own c4.dm.tc announcements while
+                # ramping. on_off's own optimistic update was ALSO
+                # dropped, on the same reasoning as control4_dimmer.py's
+                # equivalent: the command completing doesn't mean the
+                # light has actually finished ramping to that state, so
+                # showing "on"/"off" instantly misrepresents reality —
+                # _sync_level_for_outlet already flips on_off from the
+                # exact same c4.dm.tc reports that drive current_level,
+                # so it stays in sync without a separate write here.
                 _LOGGER.debug(
-                    "C4 DimmerLevel outlet1: optimistic current_level=%d "
-                    "on_off=%s", level_zcl, level_zcl > 0,
-                )
-                self._update_attribute(
-                    LevelControl.AttributeDefs.current_level.id, level_zcl
+                    "C4 DimmerLevel outlet1: move_to_level target=%d — "
+                    "current_level and on_off both left to live reports",
+                    level_zcl,
                 )
                 if level_zcl > 0:
                     # Remember the last non-zero level as on_level so a
@@ -826,11 +867,6 @@ class C4DimmerLevelControlWithOptimisticSync(C4DimmerLevelControl):
                     # before, not get zeroed along with current_level.
                     self._update_attribute(
                         LevelControl.AttributeDefs.on_level.id, level_zcl
-                    )
-                onoff = self.endpoint.in_clusters.get(OnOff.cluster_id)
-                if onoff is not None:
-                    onoff.update_attribute(
-                        OnOff.AttributeDefs.on_off.id, level_zcl > 0
                     )
         return result
 
@@ -870,12 +906,11 @@ class C4Outlet2OnOff(C4Outlet1OnOff):
     the original failure is now understood to be an ApplicationController
     boot-timing race, fixed separately in c4_ramp_cluster.py).
 
-    Also keeps current_level optimistically in sync with on_off, as
-    before this fix: outlet 1 never needs this because its on/off
-    redirects through a real ZCL Level Control frame (C4DimmerOnOff /
-    C4DimmerLevelControl), so on_off and current_level arrive and update
-    together in the same round trip; outlet 2 has no such single round
-    trip, so this class keeps them consistent by hand.
+    No longer optimistically updates current_level/on_off itself (see
+    "Attempt 21" in the module docstring) — both are left to
+    C4DualOutletDimmerButtonCluster._sync_level_for_outlet, which
+    already flips them together from the device's own c4.dm.tc reports
+    as the ramp actually progresses.
     """
 
     async def command(
@@ -919,6 +954,15 @@ class C4Outlet2OnOff(C4Outlet1OnOff):
             # is now understood to be the same ApplicationController
             # boot-timing race fixed in c4_ramp_cluster.py, not a
             # RAMP_TO_LEVEL/level-value issue.
+            #
+            # No optimistic current_level/on_off update here either: the
+            # command completing doesn't mean the light has actually
+            # finished ramping to that state — _sync_level_for_outlet
+            # (C4DualOutletDimmerButtonCluster, below) already flips
+            # both from the same c4.dm.tc reports that already drive
+            # current_level while ramping, so a separate optimistic
+            # write here would just misrepresent progress before the
+            # first real report arrives.
             if level_cluster is not None:
                 ramp_ms = level_cluster._get_outlet2_ramp_ms("up")
                 await level_cluster._send_c4_outlet_ramp_to_level(level_pct, ramp_ms)
@@ -929,17 +973,13 @@ class C4Outlet2OnOff(C4Outlet1OnOff):
                     self.endpoint.endpoint_id,
                 )
                 await self._send_c4_outlet_command(True)
-            self._update_attribute(OnOff.AttributeDefs.on_off.id, True)
-            if level_cluster is not None:
-                level_cluster.update_attribute(
-                    LevelControl.AttributeDefs.current_level.id, level_zcl
-                )
             return self._SUCCESS
 
         if command_id == OnOff.ServerCommandDefs.off.id:
             # "Attempt 21": ramps to 0 via c4.dm.rtl (using "2 Ramp Rate
             # Down") instead of the instant c4.dm.tv 01 00 00 — see
-            # module docstring.
+            # module docstring. No optimistic update here either, same
+            # reasoning as on() above.
             if level_cluster is not None:
                 ramp_ms = level_cluster._get_outlet2_ramp_ms("down")
                 _LOGGER.debug(
@@ -953,12 +993,6 @@ class C4Outlet2OnOff(C4Outlet1OnOff):
                     self.endpoint.endpoint_id,
                 )
                 await self._send_c4_outlet_command(False)
-            self._update_attribute(OnOff.AttributeDefs.on_off.id, False)
-            if level_cluster is not None:
-                level_cluster.update_attribute(
-                    LevelControl.AttributeDefs.current_level.id,
-                    _c4_pct_to_zcl_level(0),
-                )
             return self._SUCCESS
 
         result = await super().command(
@@ -1184,32 +1218,24 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
             )
             await self._send_c4_outlet_ramp_to_level(level_pct, ramp_ms)
 
-            # Optimistic update — device will confirm via a c4.dm.tc announce
-            _LOGGER.debug(
-                "C4 Outlet2DimmerLevel: optimistic update current_level=%d "
-                "on_off=%s", level_zcl, level_zcl > 0,
-            )
-            self._update_attribute(
-                LevelControl.AttributeDefs.current_level.id, level_zcl
-            )
+            # "Attempt 21": no optimistic current_level/on_off update
+            # here anymore — the device confirms via a stream of
+            # c4.dm.tc announcements while the ramp actually progresses
+            # (C4DualOutletDimmerButtonCluster._sync_level_for_outlet),
+            # and the user asked for those live values to drive the UI
+            # instead of an immediate jump that doesn't reflect reality
+            # yet (the light hasn't actually reached this level the
+            # moment the command is sent — it's only just starting to
+            # ramp toward it).
             if level_zcl > 0:
                 # Remember the last non-zero level so C4Outlet2OnOff's
                 # plain on() can restore it instead of forcing 100% — see
                 # module docstring, attempt 17. Same on_level-as-local-
-                # cache mechanism outlet 1 uses.
+                # cache mechanism outlet 1 uses. Kept as command-time
+                # state (not from live c4.dm.tc reports), same reasoning
+                # as control4_dimmer.py's own on_level caching.
                 self._update_attribute(
                     LevelControl.AttributeDefs.on_level.id, level_zcl
-                )
-            onoff = self.endpoint.in_clusters.get(OnOff.cluster_id)
-            if onoff is not None:
-                onoff.update_attribute(
-                    OnOff.AttributeDefs.on_off.id, level_zcl > 0
-                )
-            else:
-                _LOGGER.warning(
-                    "C4 Outlet2DimmerLevel: no OnOff cluster found on "
-                    "endpoint %s to optimistically update",
-                    self.endpoint.endpoint_id,
                 )
             return self._SUCCESS
 
@@ -1256,14 +1282,14 @@ class C4DualOutletDimmerButtonCluster(C4DualOutletButtonCluster):
             except (ValueError, TypeError):
                 outlet_idx = None
 
-            if outlet_idx == 1:
+            if outlet_idx in (0, 1):
                 try:
                     level_pct = int(data[1], 16)
                     _LOGGER.debug(
-                        "C4 dual outlet dimmer: c4.dm.tc outlet=1 level=%d",
-                        level_pct,
+                        "C4 dual outlet dimmer: c4.dm.tc outlet=%d level=%d",
+                        outlet_idx, level_pct,
                     )
-                    self._sync_level_for_outlet(1, level_pct)
+                    self._sync_level_for_outlet(outlet_idx, level_pct)
                 except (ValueError, TypeError) as e:
                     _LOGGER.warning(
                         "C4 dual outlet dimmer: failed to parse c4.dm.tc: "
@@ -1271,27 +1297,33 @@ class C4DualOutletDimmerButtonCluster(C4DualOutletButtonCluster):
                     )
                 return
 
-        # Outlet index 0 (owned by real ZCL instead) and anything else fall
-        # through to the base on/off-only sync — see REVERTED note below.
+        # Anything else falls through to the base on/off-only sync.
         super()._handle_state_announcement(namespace, data)
 
     def _sync_level_for_outlet(self, outlet_idx, level_pct):
         """Sync current_level/on_off for one outlet from a c4.dm.tc announce.
 
-        Outlet 1 (EP11) ONLY — this is its sole confirmation path, and has
-        shown no issues. A prior revision of this method also handled
-        outlet 0 (EP1), on the theory that it needed a second confirmation
-        path alongside real-ZCL (C4DimmerLevelControlWithOptimisticSync)
-        and EP2/EP196. REVERTED: real-hardware testing showed the real
-        APD120-style circuit sends MULTIPLE c4.dm.tc announcements while
-        ramping (e.g. 3%, 34%, 73%, 97%... while transitioning toward a
-        target), and syncing every one of them raced against the reliable
-        real-ZCL optimistic update — outlet 1 started settling on a
-        transient mid-ramp value (e.g. 73%) instead of the correct target
-        (100%) whenever the announcement stream didn't end exactly on the
-        target or arrived out of order. Outlet 0 is intentionally back to
-        on/off-only syncing (via the base class's _sync_onoff_for_outlet)
-        so its current_level is owned exclusively by the real-ZCL path.
+        "Attempt 21" RE-ENABLED outlet 0 (EP1) here, reverting attempt 14.
+        History: attempt 13 first wired up both outlets; attempt 14
+        reverted outlet 0 specifically after real-hardware testing showed
+        it settling on a transient mid-ramp value (e.g. 73%) instead of
+        the correct target (100%) — theorized as a race between this
+        announcement-driven sync and the real-ZCL optimistic update in
+        C4DimmerLevelControlWithOptimisticSync, whenever the announcement
+        stream didn't end exactly on the target or arrived out of order.
+
+        The user explicitly asked for outlet 1's gradual, in-progress
+        current_level updates (this exact mechanism, already relied on
+        for outlet_idx==1/EP11 with no reported issues) on outlet 0 too,
+        preferring that over the abrupt "jump to final value only" look
+        outlet 0 had without it. Re-enabled on that basis: outlet 0 now
+        uses the IDENTICAL dual-path design (an immediate optimistic
+        jump in C4DimmerLevelControlWithOptimisticSync.command(), plus
+        this method's own repeated updates as announcements stream in)
+        that already works reliably for outlet 1 — not new/riskier code,
+        the same mechanism extended to the other outlet. If attempt 14's
+        wrong-final-value symptom reappears specifically for outlet 0,
+        that's the first thing to check.
         """
         ep_id = OUTLET_EP_MAP.get(outlet_idx)
         if ep_id is None:

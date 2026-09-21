@@ -281,7 +281,6 @@ from zhaquirks.const import (
 # Ensure patches are installed before this quirk is registered
 import c4_hooks
 
-import c4_helpers as C4
 from c4_helpers import (
     APD120_BUTTON_MAP,
     C4_DEFAULT_ON_LEVEL,
@@ -317,18 +316,6 @@ from c4_led_rgb import (
 from c4_hooks import _C4_MODEL_QUIRK_MAP
 
 _LOGGER = logging.getLogger(__name__)
-
-# How long to ignore live c4.dm.t0c/c4.dmx.dim/c4.dmx.ls/EP2-EP196 level
-# announcements after C4DimmerLevelControl optimistically jumps
-# current_level to a just-commanded target (see its command() and
-# _sync_ep1_level in c4_helpers.py). CONFIRMED on real hardware: the
-# device emits several intermediate readings while physically ramping,
-# taking up to ~1.3s to turn on and ~2.5s to turn off (see this module's
-# History) — this window comfortably covers both directions with margin,
-# so those readings don't overwrite the optimistic value and flash the
-# UI through the live ramp. A real physical adjustment at the wall
-# switch is still picked up normally once the window has passed.
-_LEVEL_SYNC_SUPPRESS_SECONDS = 3.0
 
 
 # ---------------------------------------------------------------------------
@@ -625,50 +612,36 @@ class C4DimmerLevelControl(CustomCluster, LevelControl):
         ):
             level_zcl = args[0] if args else kwargs.get("level")
             if level_zcl is not None:
-                # CONFIRMED on real hardware: without this, current_level
-                # only ever changed when a genuine c4.dm.t0c announcement
-                # arrived — and since the device actually reports EVERY
-                # intermediate value while physically ramping (e.g. 10%,
-                # 95%, 99% while turning on over ~1s), HA's UI visibly
-                # flashed through each of them instead of jumping straight
-                # to the target, unlike the LOZ-5D1-W outlet dimmer (whose
-                # C4DimmerLevelControlWithOptimisticSync already does
-                # exactly this). The user asked for consistency: jump
-                # optimistically to the requested target immediately, the
-                # same way the outlet dimmer does.
+                # History: this block used to also optimistically jump
+                # current_level straight to level_zcl, plus (briefly)
+                # suppress live c4.dm.t0c readings for a few seconds so
+                # that jump wouldn't immediately get overwritten by the
+                # device's own intermediate ramp reports (see git history
+                # for the full back-and-forth — both added and later
+                # removed within this same file).
                 #
-                # CONFIRMED bug in the first version of this fix: jumping
-                # optimistically wasn't enough by itself — the very next
-                # intermediate c4.dm.t0c reading (arriving ~100ms later)
-                # immediately overwrote it via _sync_ep1_level
-                # (c4_helpers.py), so the UI flashed through the live ramp
-                # anyway, right after an extra flash to the target first.
-                # c4_suppress_level_sync() (c4_helpers.py) tells
-                # _sync_ep1_level to ignore announcements for a few
-                # seconds after this fires, so only the FINAL settled
-                # reading (once the window has passed) can still correct
-                # current_level — e.g. if the device's real settled level
-                # ends up slightly different from what was asked (99%
-                # instead of 100%, a device firmware characteristic — see
-                # module docstring). See module docstring for why this
-                # stores the deadline on the `device` object rather than
-                # anywhere in c4_helpers.py's own state.
+                # "Attempt 21": the user settled on preferring the
+                # gradual, in-progress current_level updates outlet 2
+                # (LOZ-5D1-W) already shows while ramping over a jump to
+                # the final value, and asked for both the optimistic
+                # jump and the suppression window to be dropped entirely
+                # — current_level is now driven purely by
+                # _sync_ep1_level's live c4.dm.t0c/EP2-EP196 reports
+                # (c4_helpers.py), with no jump of its own here.
+                # on_off's own optimistic update was ALSO dropped for
+                # the same reason: the command completing doesn't mean
+                # the light has actually finished ramping to that state
+                # yet, so showing "on"/"off" instantly misrepresents
+                # reality the same way an instant brightness jump did —
+                # _sync_ep1_level already flips on_off from the exact
+                # same live reports that drive current_level (see its
+                # own body, c4_helpers.py), so it stays in sync without
+                # a separate optimistic write here.
                 _LOGGER.debug(
-                    "C4 Level: optimistic current_level=%d on_off=%s "
-                    "(suppressing live announcements for %.1fs)",
-                    level_zcl, level_zcl > 0, _LEVEL_SYNC_SUPPRESS_SECONDS,
+                    "C4 Level: move_to_level target=%d — current_level "
+                    "and on_off both left to live c4.dm.t0c reports",
+                    level_zcl,
                 )
-                self._update_attribute(
-                    LevelControl.AttributeDefs.current_level.id, level_zcl
-                )
-                C4.c4_suppress_level_sync(
-                    self.endpoint.device, _LEVEL_SYNC_SUPPRESS_SECONDS
-                )
-                onoff = self.endpoint.in_clusters.get(OnOff.cluster_id)
-                if onoff is not None:
-                    onoff.update_attribute(
-                        OnOff.AttributeDefs.on_off.id, level_zcl > 0
-                    )
                 # Cache the requested target level as on_level too, but
                 # only from the command actually SENT — not from the
                 # device's own c4.dm.t0c announcements
