@@ -294,7 +294,11 @@ from c4_helpers import (
 )
 from c4_basic_cluster import C4BasicCluster
 from c4_button_cluster import C4DimmerButtonCluster, _DIMMER_BUTTON_CLUSTERS
-from c4_ramp_cluster import C4RampCluster, C4_RAMP_CLUSTER_ID
+from c4_ramp_cluster import (
+    C4RampCluster,
+    EXPLICIT_TRANSITION_THRESHOLD_TENTHS,
+    find_ramp_cluster,
+)
 from c4_attached_switch import (
     ATTACHED_SWITCH_EP_MAP,
     C4ButtonAttachedOnOff,
@@ -344,12 +348,9 @@ class C4DimmerOnOff(CustomCluster, OnOff):
     def _get_ramp_cluster(self):
         """Find the C4RampCluster on EP 4, if available."""
         try:
-            ep4 = self.endpoint.device.endpoints.get(4)
-            if ep4 is not None:
-                return ep4.in_clusters.get(C4_RAMP_CLUSTER_ID)
+            return find_ramp_cluster(self.endpoint.device)
         except Exception:
-            pass
-        return None
+            return None
 
     def _get_on_transition(self) -> int:
         """Return the on-ramp time in ZCL 1/10-second units."""
@@ -537,6 +538,62 @@ class C4DimmerLevelControl(CustomCluster, LevelControl):
             LevelControl.ServerCommandDefs.move_to_level.id,
             LevelControl.ServerCommandDefs.move_to_level_with_on_off.id,
         ):
+            # CONFIRMED gap on real hardware: a plain on()/off() toggle
+            # ramps (C4DimmerOnOff already injects
+            # _get_on_transition()/_get_off_transition() from the cached
+            # Ramp Rate — see this file's C4DimmerOnOff.command()), but
+            # dragging the brightness slider did not, because
+            # move_to_level(_with_on_off) reaches this cluster directly
+            # and gets forwarded to the real device as genuine ZCL
+            # passthrough with whatever transition_time HA computed —
+            # which, for a plain slider drag with no explicit
+            # `transition:`, is zha's own ~0.1s filler default (see
+            # EXPLICIT_TRANSITION_THRESHOLD_TENTHS's own comment,
+            # c4_ramp_cluster.py), not the user's configured Ramp Rate.
+            # Injects the cached Ramp Rate here too, mirroring
+            # control4_outlet_dimmer.py's C4DimmerLevelControlWithOptimistic
+            # Sync — an automation's own explicit transition_time still
+            # reaches the device unmodified, since this only overrides
+            # values at/below the threshold.
+            if args:
+                _inject_level_zcl = args[0]
+            elif "level" in kwargs:
+                _inject_level_zcl = kwargs["level"]
+            else:
+                _inject_level_zcl = None
+
+            if len(args) > 1:
+                _inject_transition_tenths = args[1]
+            elif "transition_time" in kwargs:
+                _inject_transition_tenths = kwargs["transition_time"]
+            else:
+                _inject_transition_tenths = None
+
+            if _inject_level_zcl is not None and (
+                _inject_transition_tenths is None
+                or _inject_transition_tenths <= EXPLICIT_TRANSITION_THRESHOLD_TENTHS
+            ):
+                _inject_ramp = find_ramp_cluster(self.endpoint.device)
+                if _inject_ramp is not None:
+                    _inject_current_zcl = self.get("current_level") or 0
+                    _inject_new_transition = (
+                        _inject_ramp.get_on_ramp_tenths()
+                        if _inject_level_zcl >= _inject_current_zcl
+                        else _inject_ramp.get_off_ramp_tenths()
+                    )
+                    _LOGGER.debug(
+                        "C4 Level: injecting cached Ramp Rate "
+                        "transition_time=%d tenths (caller gave %s)",
+                        _inject_new_transition, _inject_transition_tenths,
+                    )
+                    if len(args) > 1:
+                        args = (args[0], _inject_new_transition) + args[2:]
+                    elif args:
+                        args = (args[0], _inject_new_transition)
+                    else:
+                        kwargs = dict(kwargs)
+                        kwargs["transition_time"] = _inject_new_transition
+
             # Diagnostic only (no behavior change): this is the ONLY place
             # that logs what gets sent when HA/ZHA calls LevelControl
             # directly (e.g. dragging the brightness slider, or "set to

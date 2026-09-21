@@ -524,7 +524,7 @@ History:
   can't be trusted unconditionally without regressing the dimmer-slider
   behavior the user already confirmed working (which relies on our own
   cached Ramp Rate, not zha's tiny 0.1 s filler). Added
-  _EXPLICIT_TRANSITION_THRESHOLD_TENTHS (2 tenths = 200 ms): a
+  EXPLICIT_TRANSITION_THRESHOLD_TENTHS (c4_ramp_cluster.py, 2 tenths = 200 ms): a
   transition_time above that is treated as a real, explicit override and
   used directly as ramp_ms; at or below it, falls back to
   _get_outlet2_ramp_ms() as before.
@@ -639,6 +639,8 @@ from c4_ramp_cluster import (
     C4RampClusterOutlet2,
     RAMP_IDX_ON,
     RAMP_IDX_OFF,
+    EXPLICIT_TRANSITION_THRESHOLD_TENTHS,
+    find_ramp_cluster,
 )
 from c4_hooks import _C4_MODEL_QUIRK_MAP
 
@@ -674,21 +676,6 @@ def _c4_pct_to_zcl_level(level_pct: int) -> int:
     """Convert a C4 protocol level (0-100) to a ZCL Level Control value."""
     level_pct = max(0, min(100, int(level_pct)))
     return round(level_pct * 254 / 100)
-
-
-# A move_to_level(_with_on_off) call ALWAYS carries a transition_time —
-# even a plain dashboard brightness-slider drag with no explicit
-# `transition:` still gets one, computed by zha's light platform from
-# self._zha_config_transition (defaulting to _DEFAULT_MIN_TRANSITION_TIME
-# = 0.1 s = 1 tenth — confirmed by reading zha/application/platforms/
-# light/__init__.py directly). So transition_time alone can't tell "the
-# user/automation explicitly asked for this transition" apart from "zha's
-# own filler value" — only a call meaningfully ABOVE that filler is
-# treated as an explicit override; anything at/near it falls back to our
-# own cached "2 Ramp Rate Up/Down" instead. 2 tenths (200 ms) sits above
-# zha's 1-tenth filler with a small margin and comfortably below any sane
-# configured Ramp Rate.
-_EXPLICIT_TRANSITION_THRESHOLD_TENTHS = 2
 
 
 # ---------------------------------------------------------------------------
@@ -734,6 +721,12 @@ class C4DimmerLevelControlWithOptimisticSync(C4DimmerLevelControl):
     zha/application/platforms/light/__init__.py upstream). Outlet 2's
     C4Outlet2OnOff (below) does the analogous thing for the same reason —
     see attempt 17.
+
+    "Attempt 21": also injects the cached Ramp Rate Up/Down as this
+    command's transition_time when the caller didn't provide a
+    meaningful explicit one, so a dimmer-slider drag ramps the same way
+    a plain on()/off() toggle already does (via C4DimmerOnOff's own
+    _get_on_transition()/_get_off_transition()) — see module docstring.
     """
 
     async def command(
@@ -745,6 +738,61 @@ class C4DimmerLevelControlWithOptimisticSync(C4DimmerLevelControl):
         tsn=None,
         **kwargs,
     ):
+        if command_id in (
+            LevelControl.ServerCommandDefs.move_to_level.id,
+            LevelControl.ServerCommandDefs.move_to_level_with_on_off.id,
+        ):
+            if args:
+                level_zcl = args[0]
+            elif "level" in kwargs:
+                level_zcl = kwargs["level"]
+            else:
+                level_zcl = None
+
+            if len(args) > 1:
+                transition_tenths = args[1]
+            elif "transition_time" in kwargs:
+                transition_tenths = kwargs["transition_time"]
+            else:
+                transition_tenths = None
+
+            # "Attempt 21": inject the cached Ramp Rate as transition_time
+            # when the caller (typically a plain dimmer-slider drag)
+            # didn't give a meaningful explicit one — mirrors outlet 2's
+            # EXPLICIT_TRANSITION_THRESHOLD_TENTHS logic
+            # (c4_ramp_cluster.py). Without this, a slider drag reached
+            # the real device with zha's own ~0.1s filler transition
+            # instead of the configured Ramp Rate — ramping only applied
+            # to on()/off() (C4DimmerOnOff already injects
+            # _get_on/off_transition() for those), not to a graduated
+            # dim, the opposite gap from outlet 2 before this fix. Real
+            # ZCL passthrough (super().command() below) means an
+            # automation's own explicit transition_time still reaches
+            # the device unmodified, same as before.
+            if level_zcl is not None and (
+                transition_tenths is None
+                or transition_tenths <= EXPLICIT_TRANSITION_THRESHOLD_TENTHS
+            ):
+                ramp = find_ramp_cluster(self.endpoint.device)
+                if ramp is not None:
+                    current_zcl = self.get("current_level") or 0
+                    new_transition = (
+                        ramp.get_on_ramp_tenths() if level_zcl >= current_zcl
+                        else ramp.get_off_ramp_tenths()
+                    )
+                    _LOGGER.debug(
+                        "C4 DimmerLevel outlet1: injecting cached Ramp "
+                        "Rate transition_time=%d tenths (caller gave %s)",
+                        new_transition, transition_tenths,
+                    )
+                    if len(args) > 1:
+                        args = (args[0], new_transition) + args[2:]
+                    elif args:
+                        args = (args[0], new_transition)
+                    else:
+                        kwargs = dict(kwargs)
+                        kwargs["transition_time"] = new_transition
+
         result = await super().command(
             command_id, *args,
             manufacturer=manufacturer, expect_reply=expect_reply,
@@ -1027,10 +1075,7 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
         "down" (turning off / lowering the level). Falls back to 0
         (instant ramp) if EP14 or its ramp cluster isn't present.
         """
-        ramp_ep = self.endpoint.device.endpoints.get(14)
-        if ramp_ep is None:
-            return 0
-        ramp_cluster = ramp_ep.in_clusters.get(C4RampClusterOutlet2.cluster_id)
+        ramp_cluster = find_ramp_cluster(self.endpoint.device, ep_id=14)
         if ramp_cluster is None:
             return 0
         idx = RAMP_IDX_ON if direction == "up" else RAMP_IDX_OFF
@@ -1107,9 +1152,9 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
 
             # "Attempt 20": honor an explicit transition_time from the
             # caller (e.g. an automation's `transition:`) over our own
-            # cached Ramp Rate — see _EXPLICIT_TRANSITION_THRESHOLD_TENTHS'
-            # comment for why a threshold is needed rather than trusting
-            # transition_time unconditionally.
+            # cached Ramp Rate — see EXPLICIT_TRANSITION_THRESHOLD_TENTHS'
+            # comment (c4_ramp_cluster.py) for why a threshold is needed
+            # rather than trusting transition_time unconditionally.
             if len(args) > 1:
                 transition_tenths = args[1]
             elif "transition_time" in kwargs:
@@ -1122,7 +1167,7 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
             direction = "up" if level_zcl >= current_zcl else "down"
             if (
                 transition_tenths is not None
-                and transition_tenths > _EXPLICIT_TRANSITION_THRESHOLD_TENTHS
+                and transition_tenths > EXPLICIT_TRANSITION_THRESHOLD_TENTHS
             ):
                 ramp_ms = int(transition_tenths) * 100
                 _LOGGER.debug(

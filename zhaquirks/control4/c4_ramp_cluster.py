@@ -147,6 +147,34 @@ def _ms_to_zcl_tenths(ms: int) -> int:
     return max(0, (ms + 50) // 100)  # round to nearest tenth
 
 
+def find_ramp_cluster(device, ep_id: int = 4):
+    """Find a C4RampCluster (or subclass, e.g. C4RampClusterOutlet2) on the
+    given endpoint of a device, if present. Shared by both C4DimmerOnOff
+    (control4_dimmer.py) and the LevelControl classes in
+    control4_dimmer.py/control4_outlet_dimmer.py so on/off and slider
+    dimming read the exact same cached Ramp Rate.
+    """
+    ep = device.endpoints.get(ep_id)
+    if ep is None:
+        return None
+    return ep.in_clusters.get(C4_RAMP_CLUSTER_ID)
+
+
+# A move_to_level(_with_on_off) call ALWAYS carries a transition_time —
+# even a plain dashboard brightness-slider drag with no explicit
+# `transition:` still gets one, computed by zha's light platform from
+# self._zha_config_transition (defaulting to _DEFAULT_MIN_TRANSITION_TIME
+# = 0.1 s = 1 tenth — confirmed by reading zha/application/platforms/
+# light/__init__.py directly). So transition_time alone can't tell "the
+# user/automation explicitly asked for this transition" apart from "zha's
+# own filler value" — only a call meaningfully ABOVE that filler is
+# treated as an explicit override; anything at/near it falls back to the
+# cached Ramp Rate Up/Down instead. 2 tenths (200 ms) sits above zha's
+# 1-tenth filler with a small margin and comfortably below any sane
+# configured Ramp Rate.
+EXPLICIT_TRANSITION_THRESHOLD_TENTHS = 2
+
+
 class C4RampCluster(_C4LocalOnlyReadMixin, CustomCluster):
     """Ramp/transition time cluster for Control4 dimmers.
 
