@@ -202,6 +202,14 @@ class C4RampCluster(_C4LocalOnlyReadMixin, CustomCluster):
     # Local cache: index → time in ms
     _ramp_times: dict[int, int] = {}
 
+    # Delays (seconds) between retries of _push_ramp_defaults() after the
+    # first (immediate) attempt — see that method's docstring for why a
+    # retry is needed at all. Real-hardware logs show the
+    # "ApplicationController is not running" failure window lasting
+    # roughly 1-2 seconds after an HA restart; these delays comfortably
+    # cover that with margin for a slower-starting system.
+    _RAMP_DEFAULTS_RETRY_DELAYS = (3, 8, 20)
+
     class AttributeDefs(BaseAttributeDefs):
         """Purely local attributes — see class docstring."""
 
@@ -283,9 +291,36 @@ class C4RampCluster(_C4LocalOnlyReadMixin, CustomCluster):
         On C4RampClusterOutlet2 (outlet 2, local-only — see its own
         docstring/_send_ramp_set override), this only re-affirms the
         local cache; it never touches the wire.
+
+        CONFIRMED broken on real hardware (real HA debug log): the very
+        first attempt right after an HA restart reliably fails with
+        "C4 Ramp: failed to set on_ramp to 750 ms — ApplicationController
+        is not running" — the zigbee radio isn't ready yet at the exact
+        moment __init__ schedules this task, so the push silently never
+        reached the device on a normal boot despite this method existing.
+        Retries with increasing delays (_RAMP_DEFAULTS_RETRY_DELAYS) until
+        both sends report success, rather than firing once and giving up.
         """
-        await self._send_ramp_set(RAMP_IDX_ON, self._ramp_times[RAMP_IDX_ON])
-        await self._send_ramp_set(RAMP_IDX_OFF, self._ramp_times[RAMP_IDX_OFF])
+        delays = (0,) + self._RAMP_DEFAULTS_RETRY_DELAYS
+        for attempt, delay in enumerate(delays):
+            if delay:
+                await asyncio.sleep(delay)
+            on_ok = await self._send_ramp_set(
+                RAMP_IDX_ON, self._ramp_times[RAMP_IDX_ON]
+            )
+            off_ok = await self._send_ramp_set(
+                RAMP_IDX_OFF, self._ramp_times[RAMP_IDX_OFF]
+            )
+            if on_ok and off_ok:
+                return
+            _LOGGER.debug(
+                "C4 Ramp: default push attempt %d failed (on_ok=%s "
+                "off_ok=%s), will retry", attempt + 1, on_ok, off_ok,
+            )
+        _LOGGER.warning(
+            "C4 Ramp: giving up pushing defaults to the device after %d "
+            "attempts", len(delays),
+        )
 
     async def write_attributes(self, attributes, manufacturer=None):
         """Translate a Number entity write into the same wire Set command
@@ -399,8 +434,15 @@ class C4RampCluster(_C4LocalOnlyReadMixin, CustomCluster):
     # C4 command builder and transport
     # ------------------------------------------------------------------
 
-    async def _send_ramp_set(self, index: int, time_ms: int):
-        """Send a c4.dm.tv Set command to change a transition time."""
+    async def _send_ramp_set(self, index: int, time_ms: int) -> bool:
+        """Send a c4.dm.tv Set command to change a transition time.
+
+        Returns True if the wire send didn't raise, False otherwise —
+        used by _push_ramp_defaults() to decide whether a retry is
+        needed (see its docstring: the very first attempt right after
+        an HA restart reliably fails with "ApplicationController is not
+        running", confirmed on real hardware).
+        """
         device = self.endpoint.device
         name = RAMP_INDEX_NAMES.get(index, f"0x{index:02x}")
 
@@ -442,11 +484,13 @@ class C4RampCluster(_C4LocalOnlyReadMixin, CustomCluster):
                 self._update_attribute(self.AttributeDefs.on_ramp_ms.id, time_ms)
             elif index == RAMP_IDX_OFF:
                 self._update_attribute(self.AttributeDefs.off_ramp_ms.id, time_ms)
+            return True
 
         except Exception as e:
             _LOGGER.warning(
                 "C4 Ramp: failed to set %s to %d ms — %s", name, time_ms, e,
             )
+            return False
 
     def _sync_zcl_transition_attrs(self):
         """Push cached ramp times into _SYNC_EP_ID's LevelControl attribute cache.
@@ -511,12 +555,13 @@ class C4RampClusterOutlet2(C4RampCluster):
     instant c4.dm.tv SET_LEVEL send.
     """
 
-    async def _send_ramp_set(self, index: int, time_ms: int) -> None:
+    async def _send_ramp_set(self, index: int, time_ms: int) -> bool:
         """Cache locally only — see class docstring. Overrides the base
         class's wire-sending implementation entirely; this covers both
         Number-entity writes (write_attributes) and the inherited
         set_ramp_rate/set_on_ramp/set_off_ramp ZCL commands, since all of
-        them funnel through this method.
+        them funnel through this method. Always returns True (nothing to
+        retry — there's no wire send that could fail here).
         """
         time_ms = max(0, min(65535, int(time_ms)))
         self._ramp_times[index] = time_ms
@@ -524,3 +569,4 @@ class C4RampClusterOutlet2(C4RampCluster):
             self._update_attribute(self.AttributeDefs.on_ramp_ms.id, time_ms)
         elif index == RAMP_IDX_OFF:
             self._update_attribute(self.AttributeDefs.off_ramp_ms.id, time_ms)
+        return True
