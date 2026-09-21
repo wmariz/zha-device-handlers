@@ -54,6 +54,9 @@ Exported:
                           plus on_ramp_ms/off_ramp_ms attributes for the
                           Home Assistant "Ramp Rate Up"/"Ramp Rate Down"
                           Number config entities
+  C4RampClusterOutlet2  — same, for outlet 2 of a dual-outlet dimmer
+                          (LOZ-5D1-W). UNCONFIRMED on real hardware: see
+                          its own docstring below.
   C4_RAMP_CLUSTER_ID    — cluster ID (0xFC44)
   RAMP_IDX_*            — named constants for transition time indices
 """
@@ -183,6 +186,17 @@ class C4RampCluster(_C4LocalOnlyReadMixin, CustomCluster):
     name = "Control4 Ramp Control"
     ep_attribute = "c4_ramp_control"
     _c4_custom_handler = True
+
+    # c4.dm.tv channel byte this instance sends Set commands on. 00 is the
+    # only value ever captured on the wire (single-output APD120/LDZ-101 and
+    # outlet 1 of the LOZ-5D1-W). See C4RampClusterOutlet2 for the outlet-2
+    # variant.
+    CHANNEL = 0x00
+
+    # Endpoint whose LevelControl on/off transition attrs get synced from
+    # this cluster's cache — the endpoint hosting the OnOff/LevelControl
+    # pair this ramp cluster actually controls.
+    _SYNC_EP_ID = 1
 
     # Local cache: index → time in ms
     _ramp_times: dict[int, int] = {}
@@ -328,9 +342,8 @@ class C4RampCluster(_C4LocalOnlyReadMixin, CustomCluster):
         # Clamp to uint16 range
         time_ms = max(0, min(65535, time_ms))
 
-        # Channel is always 00 for single-output dimmer
         seq = next_c4_seq(device)
-        cmd = f"0s{seq:04x} c4.dm.tv 00 {index:02x} {time_ms:04x}"
+        cmd = f"0s{seq:04x} c4.dm.tv {self.CHANNEL:02x} {index:02x} {time_ms:04x}"
 
         _LOGGER.info(
             "C4 Ramp: setting %s (idx 0x%02x) to %d ms — cmd: %s",
@@ -355,7 +368,7 @@ class C4RampCluster(_C4LocalOnlyReadMixin, CustomCluster):
                 name, old_ms, time_ms, _ms_to_zcl_tenths(time_ms),
             )
 
-            # Sync ZCL LevelControl transition attributes on EP 1
+            # Sync ZCL LevelControl transition attributes on _SYNC_EP_ID
             self._sync_zcl_transition_attrs()
 
             # Keep the Number config entities' own cached value in sync,
@@ -371,7 +384,7 @@ class C4RampCluster(_C4LocalOnlyReadMixin, CustomCluster):
             )
 
     def _sync_zcl_transition_attrs(self):
-        """Push cached ramp times into the EP 1 LevelControl attribute cache.
+        """Push cached ramp times into _SYNC_EP_ID's LevelControl attribute cache.
 
         This keeps ZHA's attribute display consistent with the actual device
         ramp times and ensures C4DimmerOnOff uses the correct values.
@@ -379,10 +392,10 @@ class C4RampCluster(_C4LocalOnlyReadMixin, CustomCluster):
         try:
             from zigpy.zcl.clusters.general import LevelControl
 
-            ep1 = self.endpoint.device.endpoints.get(1)
-            if ep1 is None:
+            sync_ep = self.endpoint.device.endpoints.get(self._SYNC_EP_ID)
+            if sync_ep is None:
                 return
-            level_cluster = ep1.in_clusters.get(LevelControl.cluster_id)
+            level_cluster = sync_ep.in_clusters.get(LevelControl.cluster_id)
             if level_cluster is None:
                 return
 
@@ -404,3 +417,23 @@ class C4RampCluster(_C4LocalOnlyReadMixin, CustomCluster):
             )
         except Exception:
             _LOGGER.debug("C4 Ramp: ZCL attr sync failed", exc_info=True)
+
+
+class C4RampClusterOutlet2(C4RampCluster):
+    """Ramp cluster for outlet 2 of a dual-outlet dimmer (LOZ-5D1-W).
+
+    UNCONFIRMED on real hardware. Channel 01 is a guess by direct analogy
+    with c4.dm.tv's own outlet-index byte (00/01) used to select which
+    physical output a level-set command targets (see
+    C4Outlet2DimmerLevelControl in control4_outlet_dimmer.py) — channel 00
+    is the only value ever actually captured on the wire for a ramp Set
+    command (see this module's docstring), and that capture was against a
+    single-output dimmer/outlet 1, never outlet 2. It's possible outlet 2
+    doesn't honor a ramp-set command on any channel, or uses a different
+    shape entirely. Needs verification on real hardware: write a value to
+    "2 Ramp Rate Up"/"2 Ramp Rate Down" and confirm outlet 2's actual
+    on/off transition changes.
+    """
+
+    _SYNC_EP_ID = 11
+    CHANNEL = 0x01

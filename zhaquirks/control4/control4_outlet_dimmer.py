@@ -397,6 +397,24 @@ History:
   class unchanged (0x00 is unambiguous), with current_level still
   mirrored to match afterward, same as before this attempt.
 
+  Attempt 18: the user requested a second Ramp Rate Up/Down pair for
+  outlet 2, renaming outlet 1's existing pair to "1 Ramp Rate Up"/"1 Ramp
+  Rate Down" and adding "2 Ramp Rate Up"/"2 Ramp Rate Down", plus renaming
+  the two outlet Light entities to "Outlet 1"/"Outlet 2". Outlet 2's ramp
+  rate is UNCONFIRMED: added C4RampClusterOutlet2 (c4_ramp_cluster.py), a
+  channel-parameterized subclass sending its Set command on channel 01
+  instead of the confirmed channel 00, by analogy with the outlet-index
+  byte C4Outlet2DimmerLevelControl already uses for level-set — not an
+  independently captured wire frame. Lives on a new virtual EP14 (EP4+10,
+  matching the EP1/EP11 outlet-1/outlet-2 offset already used elsewhere in
+  this file). Needs real-hardware confirmation: write "2 Ramp Rate Up" and
+  check whether outlet 2's actual on-transition changes, or whether the
+  command is silently ignored. The Light entity renames use
+  change_entity_metadata() targeting each endpoint's OnOff cluster — per
+  this fork's established "sticky name" finding (see the Button/LED label
+  work on the other four device files), an already-paired device may need
+  removal + re-pair before the new names actually display.
+
 Implementation:
   • Outlet 1 (EP1) reuses C4DimmerOnOff UNCHANGED from control4_dimmer.py
     for on/off, paired with C4DimmerLevelControlWithOptimisticSync (this
@@ -467,7 +485,7 @@ from c4_helpers import (
 )
 from c4_basic_cluster import C4BasicCluster
 from c4_button_cluster import C4DualOutletButtonCluster
-from c4_ramp_cluster import C4RampCluster
+from c4_ramp_cluster import C4RampCluster, C4RampClusterOutlet2
 from c4_hooks import _C4_MODEL_QUIRK_MAP
 
 # C4DimmerOnOff reused UNCHANGED for outlet 1: real-ZCL transport, same as
@@ -1053,13 +1071,10 @@ _c4_loz5d1w_entry = (
         endpoint_id=1, cluster_id=LevelControl.cluster_id,
         unique_id_suffix="on_level",
     )
-    # --- EP4: virtual ramp-rate config endpoint, outlet 1 only — it's the
-    # same real dimming circuit/protocol as the plain APD120/LDZ-101 (see
-    # C4DimmerOnOff, reused unchanged above). Outlet 2 (EP11) has no
-    # confirmed ramp-rate protocol of its own — it's a synthetic endpoint
-    # with no real ZCL circuit behind it, and c4.dm.tv's ramp-set shape
-    # (channel 00, hardcoded — see c4_ramp_cluster.py) was only ever
-    # confirmed for the single-output dimmer, not extended here on a guess.
+    # --- EP4: virtual ramp-rate config endpoint, outlet 1 — it's the same
+    # real dimming circuit/protocol as the plain APD120/LDZ-101 (see
+    # C4DimmerOnOff, reused unchanged above), and c4.dm.tv's ramp-set shape
+    # (channel 00) is CONFIRMED for this exact circuit.
     .adds_endpoint(4, profile_id=zha.PROFILE_ID, device_type=0x0000)
     .adds(C4RampCluster, endpoint_id=4)
     .number(
@@ -1070,8 +1085,8 @@ _c4_loz5d1w_entry = (
         max_value=65535,
         step=1,
         unit="ms",
-        translation_key="ramp_rate_up",
-        fallback_name="Ramp Rate Up",
+        translation_key="ramp_rate_up_1",
+        fallback_name="1 Ramp Rate Up",
     )
     .number(
         attribute_name=C4RampCluster.AttributeDefs.off_ramp_ms.name,
@@ -1081,8 +1096,40 @@ _c4_loz5d1w_entry = (
         max_value=65535,
         step=1,
         unit="ms",
-        translation_key="ramp_rate_down",
-        fallback_name="Ramp Rate Down",
+        translation_key="ramp_rate_down_1",
+        fallback_name="1 Ramp Rate Down",
+    )
+    # --- EP14: virtual ramp-rate config endpoint, outlet 2 — UNCONFIRMED.
+    # Outlet 2 (EP11) is a synthetic endpoint with no real ZCL circuit
+    # behind it; c4.dm.tv's ramp-set command was only ever captured on the
+    # wire for channel 00 (the single-output dimmer / outlet 1). Channel 01
+    # here is a guess by analogy with the outlet-index byte
+    # C4Outlet2DimmerLevelControl already uses for level-set — see
+    # C4RampClusterOutlet2's own docstring in c4_ramp_cluster.py. Needs
+    # real-hardware confirmation that outlet 2 actually honors it.
+    .adds_endpoint(14, profile_id=zha.PROFILE_ID, device_type=0x0000)
+    .adds(C4RampClusterOutlet2, endpoint_id=14)
+    .number(
+        attribute_name=C4RampClusterOutlet2.AttributeDefs.on_ramp_ms.name,
+        cluster_id=C4RampClusterOutlet2.cluster_id,
+        endpoint_id=14,
+        min_value=0,
+        max_value=65535,
+        step=1,
+        unit="ms",
+        translation_key="ramp_rate_up_2",
+        fallback_name="2 Ramp Rate Up",
+    )
+    .number(
+        attribute_name=C4RampClusterOutlet2.AttributeDefs.off_ramp_ms.name,
+        cluster_id=C4RampClusterOutlet2.cluster_id,
+        endpoint_id=14,
+        min_value=0,
+        max_value=65535,
+        step=1,
+        unit="ms",
+        translation_key="ramp_rate_down_2",
+        fallback_name="2 Ramp Rate Down",
     )
     # --- EP11: synthetic endpoint for the second outlet (not on the wire) ---
     .adds_endpoint(11, profile_id=zha.PROFILE_ID, device_type=0x0101)
@@ -1095,6 +1142,19 @@ _c4_loz5d1w_entry = (
     # --- EP198: real endpoint, the model discriminator (see docstring) ---
     .replaces_endpoint(198, profile_id=zha.PROFILE_ID, device_type=0x0000)
     .replaces(C4OutletStateCluster, endpoint_id=198)
+    # Light entities default to a generic "Light" name — rename to match
+    # the two physical outlets. NOTE: HA entity registry names are sticky
+    # (see e.g. the Button/LED label rollout for the other devices in this
+    # fork) — an already-existing entity from a prior pairing may need a
+    # device removal + re-pair to actually pick up the new name.
+    .change_entity_metadata(
+        endpoint_id=1, cluster_id=OnOff.cluster_id,
+        new_fallback_name="Outlet 1",
+    )
+    .change_entity_metadata(
+        endpoint_id=11, cluster_id=OnOff.cluster_id,
+        new_fallback_name="Outlet 2",
+    )
 )
 # --- EP2/EP196: real endpoints, injected at interview time ---
 for _ep_id in (2, 196):
