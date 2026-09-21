@@ -496,6 +496,43 @@ History:
   the affected entities need to be deleted (or the device re-paired) so
   Home Assistant creates them fresh.
 
+  The user pushed back on attempt 20's on()/off() revert: the design
+  intent is for ramping to apply to on/off/toggle/dim alike, with an
+  automation's explicit `transition:` overriding the configured Ramp
+  Rate only when actually given — not for on/off to permanently give up
+  on ramping. Given RAMP_TO_LEVEL's 0%/100% failure is still unconfirmed
+  *why* (see attempt 20), the user chose to capture a fresh real-hardware
+  debug log (failing toggle vs. working dim, side by side) before trying
+  another wire-level hypothesis, rather than guess again — this file's
+  own History is full of costly wrong guesses for outlet 2's protocol
+  (attempts 1-9). Pending that capture, on()/off() stay on the confirmed
+  instant SET_LEVEL transport from attempt 20.
+
+  What WAS implemented now: honoring an explicit transition from the
+  caller in C4Outlet2DimmerLevelControl.command()'s move_to_level(_with_
+  on_off) path — reading zha/application/platforms/light/__init__.py
+  directly confirmed two things. First, a PLAIN toggle (no explicit
+  brightness/transition) never reaches this class at all — zha's light
+  platform calls the raw on_off_cluster.on()/off() for that case
+  specifically (only using move_to_level_with_on_off when brightness or
+  transition is explicitly given), which re-confirms attempt 20's revert
+  targeted the right code path for the toggle bug. Second, even a plain
+  slider drag with no explicit `transition:` still carries a computed
+  transition_time (zha's own _DEFAULT_MIN_TRANSITION_TIME = 0.1 s = 1
+  ZCL tenth, unless the user has set a non-default "default light
+  transition" in ZHA's own integration options) — so transition_time
+  can't be trusted unconditionally without regressing the dimmer-slider
+  behavior the user already confirmed working (which relies on our own
+  cached Ramp Rate, not zha's tiny 0.1 s filler). Added
+  _EXPLICIT_TRANSITION_THRESHOLD_TENTHS (2 tenths = 200 ms): a
+  transition_time above that is treated as a real, explicit override and
+  used directly as ramp_ms; at or below it, falls back to
+  _get_outlet2_ramp_ms() as before. Outlet 1 needs no equivalent change:
+  its LevelControl commands are genuine ZCL passthrough to the real
+  device (C4DimmerLevelControlWithOptimisticSync just forwards args/
+  kwargs), so an automation's transition_time already reaches the real
+  device's own native ZCL handling unmodified.
+
 Implementation:
   • Outlet 1 (EP1) reuses C4DimmerOnOff UNCHANGED from control4_dimmer.py
     for on/off, paired with C4DimmerLevelControlWithOptimisticSync (this
@@ -606,6 +643,21 @@ def _c4_pct_to_zcl_level(level_pct: int) -> int:
     """Convert a C4 protocol level (0-100) to a ZCL Level Control value."""
     level_pct = max(0, min(100, int(level_pct)))
     return round(level_pct * 254 / 100)
+
+
+# A move_to_level(_with_on_off) call ALWAYS carries a transition_time —
+# even a plain dashboard brightness-slider drag with no explicit
+# `transition:` still gets one, computed by zha's light platform from
+# self._zha_config_transition (defaulting to _DEFAULT_MIN_TRANSITION_TIME
+# = 0.1 s = 1 tenth — confirmed by reading zha/application/platforms/
+# light/__init__.py directly). So transition_time alone can't tell "the
+# user/automation explicitly asked for this transition" apart from "zha's
+# own filler value" — only a call meaningfully ABOVE that filler is
+# treated as an explicit override; anything at/near it falls back to our
+# own cached "2 Ramp Rate Up/Down" instead. 2 tenths (200 ms) sits above
+# zha's 1-tenth filler with a small margin and comfortably below any sane
+# configured Ramp Rate.
+_EXPLICIT_TRANSITION_THRESHOLD_TENTHS = 2
 
 
 # ---------------------------------------------------------------------------
@@ -1036,10 +1088,34 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
                 level_zcl = kwargs["level"]
             else:
                 level_zcl = 0
+
+            # "Attempt 20": honor an explicit transition_time from the
+            # caller (e.g. an automation's `transition:`) over our own
+            # cached Ramp Rate — see _EXPLICIT_TRANSITION_THRESHOLD_TENTHS'
+            # comment for why a threshold is needed rather than trusting
+            # transition_time unconditionally.
+            if len(args) > 1:
+                transition_tenths = args[1]
+            elif "transition_time" in kwargs:
+                transition_tenths = kwargs["transition_time"]
+            else:
+                transition_tenths = None
+
             level_pct = _zcl_level_to_c4_pct(level_zcl)
             current_zcl = self.get("current_level") or 0
             direction = "up" if level_zcl >= current_zcl else "down"
-            ramp_ms = self._get_outlet2_ramp_ms(direction)
+            if (
+                transition_tenths is not None
+                and transition_tenths > _EXPLICIT_TRANSITION_THRESHOLD_TENTHS
+            ):
+                ramp_ms = int(transition_tenths) * 100
+                _LOGGER.debug(
+                    "C4 Outlet2DimmerLevel: using caller-provided "
+                    "transition_time=%d tenths (%d ms) instead of cached "
+                    "Ramp Rate", transition_tenths, ramp_ms,
+                )
+            else:
+                ramp_ms = self._get_outlet2_ramp_ms(direction)
             _LOGGER.debug(
                 "C4 Outlet2DimmerLevel: move_to_level cmd=0x%02x args=%s "
                 "kwargs=%s zcl=%d -> c4_pct=%d ramp_ms=%d (%s)",
