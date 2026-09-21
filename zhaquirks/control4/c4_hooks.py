@@ -38,6 +38,8 @@ import os
 import sys
 import time
 
+import zigpy.endpoint
+
 _QUIRK_DIR = os.path.dirname(os.path.abspath(__file__))
 if _QUIRK_DIR not in sys.path:
     sys.path.insert(0, _QUIRK_DIR)
@@ -111,10 +113,50 @@ def _c4_wrap_device(quirk_obj, device):
             setattr(resolved, QUIRK_REGISTRY_ENTRY_ATTR, quirk_obj)
         except Exception:
             pass
+        _c4_mark_endpoints_initialized(resolved)
         return resolved
     if hasattr(quirk_obj, "create_device"):
-        return quirk_obj.create_device(device)
-    return quirk_obj(device._application, device.ieee, device.nwk, device)
+        built = quirk_obj.create_device(device)
+        _c4_mark_endpoints_initialized(built)
+        return built
+    built = quirk_obj(device._application, device.ieee, device.nwk, device)
+    _c4_mark_endpoints_initialized(built)
+    return built
+
+
+def _c4_mark_endpoints_initialized(device):
+    """Force every still-`NEW` endpoint on `device` to `Status.ZDO_INIT`.
+
+    CONFIRMED on real hardware (HA 2026.9.3, zigpy 2.2.0, zha 2.2.2): every
+    purely-virtual endpoint added via QuirkBuilder v2's adds_endpoint() (the
+    per-button/LED/attached-switch endpoints on the dimmer/keypad, the
+    second-outlet endpoint, the config endpoint on the switch, ...) is left
+    at its constructor default of Endpoint.Status.NEW — QuirkBuilder v2 has
+    no equivalent of the legacy CustomEndpoint's automatic "already
+    initialized" bookkeeping. Device.is_initialized (zigpy.device) requires
+    ALL non-ZDO endpoints to be != NEW, so any C4 device with even one
+    virtual endpoint — which by now is all five of them — permanently
+    reports is_initialized=False. Patch 2/4 below (custom_profile_
+    packet_received / the packet_received broadcast intercept) gate on
+    exactly that property before routing incoming C4-profile packets to
+    the marked button/state cluster, so this silently blocked every
+    physical button press and state announcement from ever reaching this
+    fork's protocol handling, on every migrated device, without raising
+    any error anywhere — entities still got created (a separate, ZHA-level
+    code path unrelated to is_initialized), so the device looked fully
+    working right up until you pressed a physical button.
+    """
+    try:
+        for ep_id, ep in device.endpoints.items():
+            if ep_id == 0:
+                continue
+            if ep.status == zigpy.endpoint.Status.NEW:
+                ep.status = zigpy.endpoint.Status.ZDO_INIT
+    except Exception:
+        _LOGGER.warning(
+            "C4: failed to mark virtual endpoints initialized for %s",
+            getattr(device, "ieee", "?"), exc_info=True,
+        )
 
 
 def _c4_quirk_label(quirk_obj) -> str:
