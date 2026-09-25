@@ -16,7 +16,6 @@ import logging
 import os
 import struct
 import sys
-import time
 
 # Make this directory importable by sibling modules regardless of load order.
 _QUIRK_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -54,6 +53,25 @@ from zhaquirks.const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# The event loop only keeps weak references to tasks, so a fire-and-forget
+# task with no other reference can be garbage-collected mid-run.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+def c4_spawn(coro) -> asyncio.Task:
+    """Schedule `coro` as a background task, keeping it alive until done."""
+    task = asyncio.ensure_future(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return task
+
+
+def parse_c4_model(raw: str) -> str:
+    """Model from a C4 attr 0x0007 string, e.g. "c4:control4_light:C4-APD120"."""
+    parts = raw.split(":", 2)
+    return parts[2] if len(parts) >= 3 else raw
+
+
 # ---------------------------------------------------------------------------
 # Profile / cluster IDs
 # ---------------------------------------------------------------------------
@@ -70,13 +88,11 @@ C4_BUTTON_CLUSTER_ID = 0xFC42  # ZHA-side virtual cluster for button events
 # ---------------------------------------------------------------------------
 # Transition times and defaults
 # ---------------------------------------------------------------------------
-# "Attempt 22": replaces the old C4_ON_TRANSITION (8 tenths/800ms) /
-# C4_OFF_TRANSITION (20 tenths/2000ms) split — a single 750ms default for
-# both, per explicit user request ("750ms is Control4's own default"),
-# used as the fallback when the standard on_transition_time/
-# off_transition_time Number config entities (ZHA-standard LevelControl
-# attributes) have never been set. See read_transition_tenths() below.
-C4_DEFAULT_TRANSITION_TENTHS = 8  # 750 ms in ZCL 1/10-second units
+# Fallback on/off ramp when the on_transition_time/off_transition_time
+# Number config entities have never been set — see read_transition_tenths()
+# below. ZCL transition times are whole tenths, so Control4's own 750 ms
+# default rounds up to 8 tenths (800 ms).
+C4_DEFAULT_TRANSITION_TENTHS = 8
 C4_DEFAULT_ON_LEVEL = 191 # ~75 % of 254
 
 # A move_to_level(_with_on_off) call ALWAYS carries a transition_time —
@@ -93,7 +109,8 @@ C4_DEFAULT_ON_LEVEL = 191 # ~75 % of 254
 # configured transition time.
 EXPLICIT_TRANSITION_THRESHOLD_TENTHS = 2
 
-# Delay between provisioning commands sent during bind()
+# Delay between consecutive provisioning commands (e.g. the KPZ-6B1's
+# per-button "keypad unmanaged" push)
 C4_PROVISION_DELAY = 0.05  # seconds
 
 # ---------------------------------------------------------------------------
@@ -156,7 +173,7 @@ APD120_BUTTON_MAP = {
     0x01: "bottom",
 }
 
-# Virtual endpoint IDs for the dimmer's per-button Event entities (ZHA-side
+# Virtual endpoint IDs for the dimmer's per-button binary_sensor entities (ZHA-side
 # only) — keyed by name, not by the raw button id, since DIMMER_BUTTON_MAP
 # maps two different ids (0x00, 0x01) onto the same "top" button.
 DIMMER_BUTTON_EVENT_EP_MAP = {
@@ -248,6 +265,10 @@ def get_model_from_ieee(key: str) -> str | None:
 
 
 def set_model_for_ieee(key: str, value: str) -> None:
+    # Called on every model-bearing keep-alive broadcast — only hit the
+    # disk when the model actually changes.
+    if _C4_IEEE_MODEL_MAP.get(key) == value:
+        return
     _C4_IEEE_MODEL_MAP[key] = value
     try:
         loop = asyncio.get_running_loop()
@@ -256,50 +277,6 @@ def set_model_for_ieee(key: str, value: str) -> None:
         _save_store(dict(_C4_IEEE_MODEL_MAP))
         return
     loop.run_in_executor(None, _save_store, dict(_C4_IEEE_MODEL_MAP))
-
-
-# ---------------------------------------------------------------------------
-# IEEE → Z2IO device settings persistence
-# ---------------------------------------------------------------------------
-_C4_Z2IO_SETTINGS_PATH = "/config/.storage/c4_z2io_settings.json"
-
-
-def _load_z2io_settings() -> dict:
-    try:
-        with open(_C4_Z2IO_SETTINGS_PATH) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-
-_C4_Z2IO_SETTINGS: dict[str, dict] = _load_z2io_settings()
-
-
-def _save_z2io_settings(data: dict) -> None:
-    os.makedirs(os.path.dirname(_C4_Z2IO_SETTINGS_PATH), exist_ok=True)
-    _LOGGER.debug("C4: saving Z2IO settings to %s: %s", _C4_Z2IO_SETTINGS_PATH, data)
-    with open(_C4_Z2IO_SETTINGS_PATH, "w") as f:
-        json.dump(data, f)
-
-
-def get_z2io_opt_mode(ieee: str) -> int | None:
-    """Return the persisted opt_mode for a Z2IO device, or None if not set."""
-    entry = _C4_Z2IO_SETTINGS.get(ieee)
-    if isinstance(entry, dict):
-        return entry.get("opt_mode")
-    return None
-
-
-def set_z2io_opt_mode(ieee: str, mode: int) -> None:
-    """Persist the opt_mode for a Z2IO device."""
-    entry = _C4_Z2IO_SETTINGS.setdefault(ieee, {})
-    entry["opt_mode"] = mode
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        _save_z2io_settings(dict(_C4_Z2IO_SETTINGS))
-        return
-    loop.run_in_executor(None, _save_z2io_settings, dict(_C4_Z2IO_SETTINGS))
 
 
 # ---------------------------------------------------------------------------
@@ -381,10 +358,15 @@ def strip_c4_endpoint(
     )
 
 
-async def _c4_send_controller_identity(device, source="unknown", zcl_seq=None):
-    """Send ZCL Read Attributes Response for attrs 0x0008/0x0009/0x000A on EP 2.
+async def _c4_send_controller_identity(
+    device, source="unknown", zcl_seq=None, report=False,
+):
+    """Send the coordinator's identity (attrs 0x0008/0x0009/0x000A) on EP 2.
 
-    APS payload (APS header generated by device.request()):
+    report=False: ZCL Read Attributes Response (cmd 0x01), answering the
+    device's own poll. report=True: Report Attributes (cmd 0x0A), whose
+    records omit the status byte. APS payload (header added by
+    device.request()), Read Attr Rsp form:
       08 [tsn] 01                   ZCL: global, server→client, Read Attr Rsp
       08 00 | 00 | 21 | 00 00       attr 0x0008 SUCCESS uint16 0x0000
       09 00 | 00 | f0 | [8 bytes]   attr 0x0009 SUCCESS EUI64  coordinator IEEE
@@ -399,18 +381,19 @@ async def _c4_send_controller_identity(device, source="unknown", zcl_seq=None):
         _LOGGER.error("C4 identity (%s): cannot determine coordinator IEEE", source)
         return
 
+    status = b"" if report else b"\x00"
     # ZCL frame control 0x08: global, server→client, default response enabled
-    zcl_hdr = struct.pack('<BBB', 0x08, zcl_seq & 0xFF, 0x01)
-
-    body  = struct.pack('<HBBH', 0x0008, 0x00, 0x21, 0x0000)
-    body += struct.pack('<HBB',  0x0009, 0x00, 0xF0)
+    zcl_hdr = struct.pack('<BBB', 0x08, zcl_seq & 0xFF, 0x0A if report else 0x01)
+    body  = struct.pack('<H', 0x0008) + status + struct.pack('<BH', 0x21, 0x0000)
+    body += struct.pack('<H', 0x0009) + status + struct.pack('<B', 0xF0)
     body += coordinator_ieee.serialize()
-    body += struct.pack('<HBBB', 0x000A, 0x00, 0x20, 0x02)
+    body += struct.pack('<H', 0x000A) + status + struct.pack('<BB', 0x20, 0x02)
     data = zcl_hdr + body
 
     _LOGGER.debug(
-        "C4 identity (%s): Read Attr Rsp to %s ep2→2 zcl_seq=0x%02x IEEE=%s data=%s",
-        source, device.ieee, zcl_seq, coordinator_ieee, data.hex(),
+        "C4 identity (%s): %s to %s ep2→2 zcl_seq=0x%02x IEEE=%s data=%s",
+        source, "Report Attr" if report else "Read Attr Rsp",
+        device.ieee, zcl_seq, coordinator_ieee, data.hex(),
     )
     try:
         await device.request(
@@ -421,44 +404,6 @@ async def _c4_send_controller_identity(device, source="unknown", zcl_seq=None):
         _LOGGER.debug("C4 identity (%s): sent successfully", source)
     except Exception as e:
         _LOGGER.error("C4 identity (%s): failed — %s", source, e)
-
-
-async def _c4_report_controller_identity(device, source="unknown", zcl_seq=None):
-    """Send ZCL Report Attributes for attrs 0x0008/0x0009/0x000A on EP 2.
-
-    Uses command 0x0A (Report Attributes) instead of 0x01 (Read Attr Rsp).
-    Report Attributes records omit the status byte.
-    """
-    try:
-        coordinator_ieee = device.application.state.node_info.ieee
-    except AttributeError:
-        coordinator_ieee = getattr(device.application, 'ieee', None)
-
-    if coordinator_ieee is None:
-        _LOGGER.error("C4 report identity (%s): cannot determine coordinator IEEE", source)
-        return
-
-    zcl_hdr = struct.pack('<BBB', 0x08, zcl_seq & 0xFF, 0x0A)
-
-    body  = struct.pack('<HBH',  0x0008, 0x21, 0x0000)
-    body += struct.pack('<HB',   0x0009, 0xF0)
-    body += coordinator_ieee.serialize()
-    body += struct.pack('<HBB',  0x000A, 0x20, 0x02)
-    data = zcl_hdr + body
-
-    _LOGGER.debug(
-        "C4 report identity (%s): Report Attr to %s ep2→2 zcl_seq=0x%02x IEEE=%s data=%s",
-        source, device.ieee, zcl_seq, coordinator_ieee, data.hex(),
-    )
-    try:
-        await device.request(
-            profile=C4_PROFILE_NETWORK, cluster=C4_CLUSTER_ID,
-            src_ep=2, dst_ep=2,
-            sequence=device.get_sequence(), data=data, expect_reply=False,
-        )
-        _LOGGER.debug("C4 report identity (%s): sent successfully", source)
-    except Exception as e:
-        _LOGGER.error("C4 report identity (%s): failed — %s", source, e)
 
 
 async def _send_many_to_one_route_request(app) -> None:
@@ -504,23 +449,12 @@ def read_transition_tenths(level_cluster, direction: str) -> int:
     LevelControl cluster, falling back to C4_DEFAULT_TRANSITION_TENTHS
     if the attribute has never been set.
 
-    "Attempt 22": replaces the earlier custom "Ramp Rate Up/Down"
-    Number entities (backed by a dedicated C4RampCluster on a virtual
-    endpoint, c4_ramp_cluster.py) with ZHA's own standard, already-
-    auto-discovered on_transition_time/off_transition_time entities —
-    both C4DimmerOnOff's on()/off() (redirecting into a real ZCL
-    move_to_level_with_on_off frame) and a direct move_to_level(_with_
-    on_off) call (e.g. a slider drag) now read from here, so there is
-    exactly one place per device to configure ramp timing instead of
-    two. Motivation: reading the real driver and real-hardware debug
-    logs confirmed the c4.dm.tv-backed custom mechanism never actually
-    influenced dimming behavior — a real move_to_level_with_on_off ZCL
-    command's own transition_time argument is what the device animates
-    against, not any device-side provisioning table. These attributes
-    are already cached locally and persisted via zigpy's own appdb (any
-    _update_attribute() call is persisted generically) with no custom
-    push/retry logic needed, unlike the old mechanism's hard-won
-    ApplicationController-readiness dance.
+    Used by C4DimmerOnOff's on()/off() and by a move_to_level(_with_
+    on_off) call without an explicit transition (e.g. a slider drag), on
+    both the LDZ-101 and the LOZ-5D1-W's two outlets. The command's own
+    transition_time argument is what the real device ramps against;
+    these attributes are only cached locally (persisted by zigpy's
+    appdb), never sent to the device.
 
     direction is "up" (on_transition_time) or "down"
     (off_transition_time).
@@ -582,104 +516,18 @@ def _c4_persist_device(device, source="unknown"):
     )
 
 
-# Attribute name used to stash the suppression deadline directly on the
-# zigpy Device object — see c4_suppress_level_sync()'s docstring for why.
-_LEVEL_SYNC_ATTR = "_c4_level_sync_suppress_until"
-
-
-def c4_suppress_level_sync(device, seconds: float) -> None:
-    """Make _sync_ep1_level ignore live level announcements for `device`.
-
-    Called by C4DimmerLevelControl.command() (control4_dimmer.py) right
-    after it optimistically jumps current_level to a just-commanded
-    target, so the several intermediate c4.dm.t0c announcements the
-    device emits while physically ramping don't immediately overwrite it
-    and flash the UI through the live ramp. See _sync_ep1_level's
-    docstring for the full history of two earlier, failed attempts at
-    this exact mechanism.
-
-    Stores the deadline directly on the zigpy Device object (via
-    object.__setattr__, bypassing any custom __setattr__ a quirk/zigpy
-    class might define) rather than in any module-level state. CONFIRMED
-    on real hardware, with an id()-logging debug capture, that a
-    module-level dict here was read back from a *different* dict object
-    than the one written to — Home Assistant's custom-quirks loader
-    evidently imports this file more than once, so this module does NOT
-    reliably behave as a singleton and its own top-level state cannot be
-    trusted to be shared across every file that imports it. `device`
-    itself has no such problem: it is a single, genuine zigpy object
-    reference passed by the caller, identical no matter which import of
-    this file happens to be running.
-    """
-    object.__setattr__(device, _LEVEL_SYNC_ATTR, time.monotonic() + seconds)
-    _LOGGER.debug(
-        "C4 suppress: SET device=%s until=%.3f (module id=%s)",
-        device.ieee, getattr(device, _LEVEL_SYNC_ATTR), id(sys.modules[__name__]),
-    )
-
-
 def _sync_ep1_level(device, level_raw: int, source="unknown"):
     """Push a dim level value to EP 1 LevelControl + OnOff attribute caches.
 
-    CONFIRMED bug, now reverted: this briefly also cached on_level here
-    whenever level_raw was non-zero, to let a plain on() restore the last
-    real dim level (see c4.dm.t0c in c4_button_cluster.py). That broke on
-    real hardware: off()/on() both ramp over ~2s / ~0.8s (see
-    C4DimmerOnOff._get_on_transition/_get_off_transition), and the device
-    emits several intermediate c4.dm.t0c announcements while ramping — so
-    turning off captured whatever small transient value happened to be
-    the last non-zero one just before hitting 0%, not the level the light
-    was actually at before being turned off. Each off/on cycle could
-    latch onto a smaller transient value than the last, making the light
-    settle dimmer and dimmer on every cycle. on_level is now cached from
-    the optimistic, command-time target level instead — see
-    C4DimmerLevelControl.command() in control4_dimmer.py — which reflects
-    what was actually asked for, immune to ramp timing.
+    Fed by the device's live reports (c4.dm.t0c, c4.dmx.dim/ls, EP2/EP196),
+    including every intermediate value while ramping, so HA shows the ramp
+    as it progresses.
 
-    CONFIRMED bug, also fixed: current_level itself has the exact same
-    problem. C4DimmerLevelControl.command() (control4_dimmer.py)
-    optimistically jumps current_level straight to the requested target
-    the instant a command is sent, so HA's UI doesn't have to wait for a
-    real confirmation — but every one of the several intermediate
-    c4.dm.t0c announcements the device emits while physically ramping
-    (e.g. 10%, 95%, 99% over about a second) was still landing here and
-    immediately overwriting that optimistic value, so the UI visibly
-    flashed through the live ramp anyway. Skips the current_level (and
-    on_off) update here for a short window after an optimistic update —
-    see c4_suppress_level_sync() above, called by
-    C4DimmerLevelControl.command() — so those intermediate readings are
-    ignored, while a later announcement (once the window has passed) is
-    still trusted normally, e.g. for a genuine physical adjustment at
-    the wall switch that this quirk never commanded itself.
-
-    CONFIRMED BUG in the first TWO versions of that suppression
-    mechanism, root-caused with an id()-logging debug capture:
-
-      1. Storing the deadline as a plain instance attribute on the
-         LevelControl cluster (self._optimistic_suppress_until = ...)
-         never read back correctly here via getattr(level_cluster, ...)
-         — the write's own debug log fired every time, but the read
-         here never once saw it, even milliseconds later.
-
-      2. Switching to a module-level dict here (keyed by device.ieee)
-         *looked* like the obvious fix, but failed identically. Logging
-         id() of the dict at both the write and read sites proved why:
-         they were two DIFFERENT dict objects. Home Assistant's
-         custom-quirks loader evidently imports c4_helpers.py more than
-         once — once for whatever loads control4_dimmer.py, and
-         separately again for whatever loads c4_button_cluster.py (which
-         calls this function) — so this module is NOT a reliable
-         singleton in this environment, and nothing stored in its own
-         top-level state can be assumed shared across every file that
-         imports it. (Whether the Cluster-attribute failure in (1) was
-         the same root cause or a second, independent one was never
-         determined — moving off both a Cluster instance attribute and
-         module-level state avoids needing to know.)
-
-    c4_suppress_level_sync() now stores the deadline directly on the
-    `device` object instead — genuinely one single object regardless of
-    which import of this file is running, since it's passed in by the
-    caller rather than looked up through this module.
+    Deliberately does NOT cache on_level: doing so latched onto the last
+    small transient value just before an off-ramp reached 0%, so the light
+    came back dimmer on every off/on cycle. on_level is cached from the
+    command-time target instead (C4DimmerLevelControl.command(),
+    control4_dimmer.py).
     """
     try:
         ep1 = device.endpoints.get(1)
@@ -687,20 +535,6 @@ def _sync_ep1_level(device, level_raw: int, source="unknown"):
             return
         level_cluster = ep1.in_clusters.get(LevelControl.cluster_id)
         onoff_cluster = ep1.in_clusters.get(OnOff.cluster_id)
-
-        suppress_until = getattr(device, _LEVEL_SYNC_ATTR, 0)
-        _LOGGER.debug(
-            "C4 suppress: GET device=%s found=%.3f now=%.3f (module id=%s)",
-            device.ieee, suppress_until, time.monotonic(),
-            id(sys.modules[__name__]),
-        )
-        if suppress_until and time.monotonic() < suppress_until:
-            _LOGGER.debug(
-                "C4 sync (%s): suppressed for %.1fs more (recent optimistic "
-                "update) — ignoring live level=%d",
-                source, suppress_until - time.monotonic(), level_raw,
-            )
-            return
 
         _LOGGER.debug("C4 sync (%s): level=%d", source, level_raw)
         if level_cluster is not None:
@@ -770,9 +604,7 @@ def _c4_sniff_model(device, inner: bytes) -> None:
         while remaining:
             attr, remaining = foundation.Attribute.deserialize(remaining)
             if attr.attrid == C4_ATTR_MODEL and isinstance(attr.value.value, str):
-                raw = attr.value.value
-                parts = raw.split(":")
-                model = parts[2] if len(parts) >= 3 else raw
+                model = parse_c4_model(attr.value.value)
                 if model and model not in _INVALID_MODELS:
                     _LOGGER.debug(
                         "C4 sniffer: caching ieee=%r -> model=%r",
@@ -784,10 +616,11 @@ def _c4_sniff_model(device, inner: bytes) -> None:
                     # model-bearing ReportAttributes from this device.
                     async def _send_handshake(dev=device, mod=model):
                         try:
-                            await _c4_report_controller_identity(
+                            await _c4_send_controller_identity(
                                 dev,
                                 f"model_report_{mod}",
                                 zcl_seq=dev.get_sequence(),
+                                report=True,
                             )
                             _LOGGER.debug(
                                 "C4 sniffer: identity sent for %s model=%r",
@@ -808,7 +641,7 @@ def _c4_sniff_model(device, inner: bytes) -> None:
                                 "C4 sniffer: MTORR failed for %s — %s",
                                 dev.ieee, e,
                             )
-                    asyncio.ensure_future(_send_handshake())
+                    c4_spawn(_send_handshake())
 
                 if not device.model or device.model in _INVALID_MODELS:
                     device.model = model
@@ -826,7 +659,7 @@ def _c4_sniff_model(device, inner: bytes) -> None:
                             dev.ieee, dev.model,
                         )
                         _c4_persist_device(dev, "sniffer_deferred")
-                    asyncio.ensure_future(_deferred_persist())
+                    c4_spawn(_deferred_persist())
                 else:
                     _LOGGER.debug(
                         "C4 sniffer: device.model already=%r on 0x%04X — not overwriting",
@@ -881,8 +714,7 @@ class C4ConfigCluster(CustomCluster):
                 self.endpoint.endpoint_id,
             )
             device = self.endpoint.device
-            parts = value.split(':', 2)
-            new_model = parts[2] if len(parts) >= 3 else value
+            new_model = parse_c4_model(value)
             if not device.model or device.model in _INVALID_MODELS:
                 device.model = new_model
                 device.manufacturer = "Control4"
@@ -962,7 +794,7 @@ class C4ConfigCluster(CustomCluster):
                 "sending controller identity",
                 self.endpoint.endpoint_id, hdr.tsn,
             )
-            asyncio.ensure_future(
+            c4_spawn(
                 _c4_send_controller_identity(
                     self.endpoint.device,
                     source="read_attr_response",

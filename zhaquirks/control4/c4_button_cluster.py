@@ -55,6 +55,7 @@ from c4_helpers import (
     _build_c4_frame,
     _sync_ep1_level,
     _sync_ep1_onoff,
+    c4_spawn,
     next_c4_seq,
 )
 
@@ -890,7 +891,7 @@ class C4KeypadButtonCluster(C4ButtonCluster):
         device = self.endpoint.device
         if not getattr(device, "_c4_kpz_managed_sent", False):
             device._c4_kpz_managed_sent = True
-            asyncio.ensure_future(self._ensure_all_buttons_unmanaged())
+            c4_spawn(self._ensure_all_buttons_unmanaged())
         super().handle_message(hdr, args)
 
     async def _ensure_all_buttons_unmanaged(self):
@@ -917,6 +918,7 @@ class C4KeypadButtonCluster(C4ButtonCluster):
         was last set via lv/lo/lf static across physical presses.
         """
         device = self.endpoint.device
+        all_sent = True
         for btn_id in KPZ6B1_BUTTON_MAP:
             seq = next_c4_seq(device)
             cmd = f"0s{seq:04x} c4.kp.llm {btn_id:x} 00"
@@ -936,12 +938,16 @@ class C4KeypadButtonCluster(C4ButtonCluster):
                     expect_reply=False,
                 )
             except Exception as e:
+                all_sent = False
                 _LOGGER.warning(
                     "C4 keypad (endpoint %d): failed to set button %d "
                     "keypad-unmanaged — %s",
                     self.endpoint.endpoint_id, btn_id, e,
                 )
             await asyncio.sleep(C4_PROVISION_DELAY)
+        if not all_sent:
+            # e.g. radio not ready yet at boot — retry on the next message.
+            device._c4_kpz_managed_sent = False
 
     def _fire_button_zha_event(self, action, button_id, button_name):
         ep_id = KPZ6B1_BUTTON_EP_MAP.get(button_id)

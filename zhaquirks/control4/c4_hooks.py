@@ -68,6 +68,9 @@ _LOGGER.info("=== C4 QUIRK FILE LOADED (multi-device) ===")
 # ---------------------------------------------------------------------------
 _C4_MODEL_QUIRK_MAP: dict = {}
 
+# Little-endian C4 profile IDs, as they appear in an app-level header.
+_C4_APP_HDR_PROFILES = (b'\x5d\xc2', b'\x5c\xc2', b'\x5e\xc2')
+
 
 def _c4_wrap_device(quirk_obj, device):
     """Wrap `device` with a C4 quirk — three possible shapes in _C4_MODEL_QUIRK_MAP:
@@ -157,6 +160,44 @@ def _c4_mark_endpoints_initialized(device):
             "C4: failed to mark virtual endpoints initialized for %s",
             getattr(device, "ieee", "?"), exc_info=True,
         )
+
+
+def _c4_apply_model_quirk(device, tag: str):
+    """Wrap a C4 device with its model's quirk from _C4_MODEL_QUIRK_MAP.
+
+    Shared by Patch 3 (zigpy get_device) and Patch 3b (zha registry
+    resolve). Resolves a missing/uninformative model from the IEEE→model
+    cache first. Returns the wrapped device, or None if `device` isn't a
+    C4 device or no quirk matches (caller falls back to the original
+    resolver). Exceptions from wrapping propagate to the caller.
+    """
+    ieee = str(getattr(device, "ieee", "")).lower()
+    if not ieee.startswith(C4_IEEE_PREFIX):
+        return None
+
+    model = getattr(device, "model", None)
+    manuf = getattr(device, "manufacturer", None)
+    if not model or model in _INVALID_MODELS:
+        model = get_model_from_ieee(ieee)
+        if model is None:
+            _LOGGER.debug("%s: ieee=%s model missing or uninformative", tag, ieee)
+            return None
+        manuf = "Control4"
+        _LOGGER.debug("%s: ieee=%s model=%r (from cache)", tag, ieee, model)
+
+    if not isinstance(model, str):
+        return None
+    quirk_obj = _C4_MODEL_QUIRK_MAP.get(model)
+    if quirk_obj is None:
+        return None
+
+    device.model = model
+    device.manufacturer = manuf or "Control4"
+    _LOGGER.debug(
+        "%s: wrapping with %s for model=%r manuf=%r ieee=%s",
+        tag, _c4_quirk_label(quirk_obj), model, manuf, ieee,
+    )
+    return _c4_wrap_device(quirk_obj, device)
 
 
 def _c4_quirk_label(quirk_obj) -> str:
@@ -386,43 +427,16 @@ try:
             )
 
         def _c4_patched_get_device(device, registry=_ZQ_REGISTRY):
-            ieee  = str(getattr(device, 'ieee',  '')).lower()
-            model = getattr(device, 'model',        None)
-            manuf = getattr(device, 'manufacturer', None)
-
-            if ieee.startswith(C4_IEEE_PREFIX):
-                if not model or model in _INVALID_MODELS:
-                    model = get_model_from_ieee(ieee)
-                    if model is not None:
-                        manuf = "Control4"
-                        _LOGGER.debug(
-                            "C4 get_device: ieee=%s model=%r (from cache)",
-                            ieee, model,
-                        )
-                    else:
-                        _LOGGER.debug(
-                            "C4 get_device: ieee=%s model missing or uninformative", ieee
-                        )
-
-                if model and isinstance(model, str):
-                    quirk_obj = _C4_MODEL_QUIRK_MAP.get(model)
-                    if quirk_obj is not None:
-                        device.model = model
-                        device.manufacturer = manuf or "Control4"
-                        _LOGGER.debug(
-                            "C4 get_device: wrapping with %s for "
-                            "model=%r manuf=%r ieee=%s",
-                            _c4_quirk_label(quirk_obj), model, manuf, ieee,
-                        )
-                        try:
-                            return _c4_wrap_device(quirk_obj, device)
-                        except Exception as exc:
-                            _LOGGER.error(
-                                "C4 get_device: failed to wrap with %s: %s — "
-                                "falling back to default get_device",
-                                _c4_quirk_label(quirk_obj), exc,
-                            )
-
+            try:
+                wrapped = _c4_apply_model_quirk(device, "C4 get_device")
+                if wrapped is not None:
+                    return wrapped
+            except Exception as exc:
+                _LOGGER.error(
+                    "C4 get_device: failed to wrap %s: %s — "
+                    "falling back to default get_device",
+                    getattr(device, "ieee", "?"), exc,
+                )
             return _orig_zq_get_device(device, registry)
 
         _zq.get_device           = _c4_patched_get_device
@@ -506,36 +520,9 @@ try:
 
         def _c4_zha_resolve(self, device, *args, **kwargs):
             try:
-                ieee  = str(getattr(device, "ieee", "")).lower()
-                model = getattr(device, "model", None)
-                manuf = getattr(device, "manufacturer", None)
-
-                if ieee.startswith(C4_IEEE_PREFIX):
-                    if not model or model in _INVALID_MODELS:
-                        resolved = get_model_from_ieee(ieee)
-                        if resolved is not None:
-                            model = resolved
-                            _LOGGER.debug(
-                                "C4 zha.resolve: ieee=%s model=%r (from cache)",
-                                ieee, model,
-                            )
-                        else:
-                            _LOGGER.debug(
-                                "C4 zha.resolve: ieee=%s model missing or "
-                                "uninformative", ieee,
-                            )
-
-                    if model and isinstance(model, str):
-                        quirk_obj = _C4_MODEL_QUIRK_MAP.get(model)
-                        if quirk_obj is not None:
-                            device.model = model
-                            device.manufacturer = manuf or "Control4"
-                            _LOGGER.debug(
-                                "C4 zha.resolve: wrapping with %s for "
-                                "model=%r ieee=%s",
-                                _c4_quirk_label(quirk_obj), model, ieee,
-                            )
-                            return _c4_wrap_device(quirk_obj, device)
+                wrapped = _c4_apply_model_quirk(device, "C4 zha.resolve")
+                if wrapped is not None:
+                    return wrapped
             except Exception as exc:
                 _LOGGER.error(
                     "C4 zha.resolve: mapping error, falling back to "
@@ -580,9 +567,6 @@ try:
                                 elif not isinstance(msg, (bytes, bytearray)):
                                     msg = bytes(msg)
                                 # Strip C4 app header if present
-                                _C4_APP_HDR_PROFILES = (
-                                    b'\x5d\xc2', b'\x5c\xc2', b'\x5e\xc2'
-                                )
                                 inner = (
                                     msg[8:]
                                     if len(msg) >= 8
@@ -695,7 +679,3 @@ try:
     import control4_keypad           # registers "KPZ-6B1"
 except Exception as _e:
     _LOGGER.error("C4: failed to import control4_keypad — %s", _e)
-
-# Other device modules self-register when they import c4_hooks (this file),
-# so they are always loaded before any get_device call — no explicit import
-# needed for control4_dimmer, control4_switch, control4_outlet, etc.

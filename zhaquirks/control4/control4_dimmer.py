@@ -344,19 +344,13 @@ class C4DimmerOnOff(CustomCluster, OnOff):
     _SUCCESS   = (foundation.GeneralCommand.Default_Response, ZCLStatus.SUCCESS)
 
     def _get_on_transition(self) -> int:
-        """Return the on-ramp time in ZCL 1/10-second units, from the
-        standard on_transition_time Number config entity — see
-        read_transition_tenths() (c4_helpers.py), "Attempt 22".
-        """
+        """On-ramp time (ZCL tenths) from the on_transition_time entity."""
         tenths = read_transition_tenths(self.endpoint.level, "up")
         _LOGGER.debug("C4 OnOff: on_transition_time = %d tenths", tenths)
         return tenths
 
     def _get_off_transition(self) -> int:
-        """Return the off-ramp time in ZCL 1/10-second units, from the
-        standard off_transition_time Number config entity — see
-        read_transition_tenths() (c4_helpers.py), "Attempt 22".
-        """
+        """Off-ramp time (ZCL tenths) from the off_transition_time entity."""
         tenths = read_transition_tenths(self.endpoint.level, "down")
         _LOGGER.debug("C4 OnOff: off_transition_time = %d tenths", tenths)
         return tenths
@@ -511,29 +505,12 @@ class C4DimmerLevelControl(CustomCluster, LevelControl):
             LevelControl.ServerCommandDefs.move_to_level.id,
             LevelControl.ServerCommandDefs.move_to_level_with_on_off.id,
         ):
-            # CONFIRMED gap on real hardware: a plain on()/off() toggle
-            # ramps (C4DimmerOnOff already injects
-            # _get_on_transition()/_get_off_transition() — see this
-            # file's C4DimmerOnOff.command()), but dragging the
-            # brightness slider did not, because move_to_level(_with_
-            # on_off) reaches this cluster directly and gets forwarded
-            # to the real device as genuine ZCL passthrough with
-            # whatever transition_time HA computed — which, for a plain
-            # slider drag with no explicit `transition:`, is zha's own
-            # ~0.1s filler default (see EXPLICIT_TRANSITION_THRESHOLD_
-            # TENTHS's own comment, c4_ramp_cluster.py), not a
-            # meaningful transition. Injects the SAME
-            # on_transition_time/off_transition_time standard Number
-            # config entities C4DimmerOnOff already reads (see
-            # "Attempt 22" in the module docstring: this used to read a
-            # separate custom "Ramp Rate Up/Down" pair from a dedicated
-            # EP4 cluster — dropped in favor of ZHA's own standard
-            # entities once it became clear the c4.dm.tv-backed custom
-            # mechanism never actually influenced real dimming behavior,
-            # which is controlled entirely by this ZCL command's own
-            # transition_time argument). An automation's own explicit
-            # transition_time still reaches the device unmodified, since
-            # this only overrides values at/below the threshold.
+            # A slider drag with no explicit `transition:` arrives with
+            # zha's ~0.1s filler transition_time (see
+            # EXPLICIT_TRANSITION_THRESHOLD_TENTHS, c4_helpers.py), so
+            # substitute the configured on/off_transition_time instead.
+            # An explicit transition above the threshold passes through
+            # unmodified.
             if args:
                 _inject_level_zcl = args[0]
             elif "level" in kwargs:
@@ -570,18 +547,6 @@ class C4DimmerLevelControl(CustomCluster, LevelControl):
                     kwargs = dict(kwargs)
                     kwargs["transition_time"] = _inject_new_transition
 
-            # Diagnostic only (no behavior change): this is the ONLY place
-            # that logs what gets sent when HA/ZHA calls LevelControl
-            # directly (e.g. dragging the brightness slider, or "set to
-            # X%"), bypassing C4DimmerOnOff.command() entirely — that
-            # class only logs the level/transition IT computes for a
-            # plain on()/off(). Added to investigate two user reports:
-            # setting 100% settling at ~98%, and transition times seeming
-            # not to be honored — need to see the real args/kwargs this
-            # cluster actually forwards as a genuine ZCL frame to tell
-            # whether the level/transition requested is already wrong
-            # before it reaches the device, or whether the device itself
-            # is receiving the right numbers and doing something else.
             _LOGGER.debug(
                 "C4 Level: command=0x%02x args=%s kwargs=%s (forwarding "
                 "as real ZCL move_to_level%s)",
@@ -601,46 +566,17 @@ class C4DimmerLevelControl(CustomCluster, LevelControl):
         ):
             level_zcl = args[0] if args else kwargs.get("level")
             if level_zcl is not None:
-                # History: this block used to also optimistically jump
-                # current_level straight to level_zcl, plus (briefly)
-                # suppress live c4.dm.t0c readings for a few seconds so
-                # that jump wouldn't immediately get overwritten by the
-                # device's own intermediate ramp reports (see git history
-                # for the full back-and-forth — both added and later
-                # removed within this same file).
-                #
-                # "Attempt 21": the user settled on preferring the
-                # gradual, in-progress current_level updates outlet 2
-                # (LOZ-5D1-W) already shows while ramping over a jump to
-                # the final value, and asked for both the optimistic
-                # jump and the suppression window to be dropped entirely
-                # — current_level is now driven purely by
-                # _sync_ep1_level's live c4.dm.t0c/EP2-EP196 reports
-                # (c4_helpers.py), with no jump of its own here.
-                # on_off's own optimistic update was ALSO dropped for
-                # the same reason: the command completing doesn't mean
-                # the light has actually finished ramping to that state
-                # yet, so showing "on"/"off" instantly misrepresents
-                # reality the same way an instant brightness jump did —
-                # _sync_ep1_level already flips on_off from the exact
-                # same live reports that drive current_level (see its
-                # own body, c4_helpers.py), so it stays in sync without
-                # a separate optimistic write here.
+                # No optimistic current_level/on_off write: both follow
+                # the device's live ramp reports via _sync_ep1_level
+                # (c4_helpers.py), so HA shows the ramp as it happens.
                 _LOGGER.debug(
                     "C4 Level: move_to_level target=%d — current_level "
                     "and on_off both left to live c4.dm.t0c reports",
                     level_zcl,
                 )
-                # Cache the requested target level as on_level too, but
-                # only from the command actually SENT — not from the
-                # device's own c4.dm.t0c announcements
-                # (c4_helpers.py's _sync_ep1_level), which fire repeatedly
-                # while ramping and previously corrupted on_level with a
-                # transient mid-ramp value on every off(), making the
-                # light settle dimmer on each cycle (reverted; see
-                # _sync_ep1_level's docstring). The command-time target is
-                # what the user/HA actually asked for and is immune to
-                # ramp timing.
+                # Cache on_level from the command-time target, not from
+                # live reports (mid-ramp values would corrupt it — see
+                # _sync_ep1_level's docstring).
                 if level_zcl > 0:
                     self._update_attribute(
                         LevelControl.AttributeDefs.on_level.id, level_zcl
@@ -682,27 +618,13 @@ _c4_apd120_entry = (
     .adds(Scenes, endpoint_id=1)
     .adds(C4DimmerOnOff, endpoint_id=1)
     .adds(C4DimmerLevelControl, endpoint_id=1)
-    # ZHA auto-creates "On Level" and "Off/On/Off-On Transition Time"
-    # Number config entities for any LevelControl cluster — on_level is
-    # a purely local cache here (see C4DimmerLevelControl), never meant
-    # to be user-facing. "Attempt 22" left the transition-time entities
-    # visible as the sole ramp-rate config surface (see
-    # read_transition_tenths(), c4_helpers.py), but "Attempt 23"
-    # suppresses ZHA's own default ones here too and re-declares them
-    # below instead, purely for a clear name: both use an OFFICIAL
-    # baked-in translation_key ("on_transition_time"/
-    # "off_transition_time"), and HA's translation lookup for an
-    # official key wins over change_entity_metadata()'s own
-    # new_fallback_name (same limitation already confirmed this session
-    # for BinaryInput/Light/Switch-class entities) — so on the
-    # LOZ-5D1-W outlet dimmer, outlet 1 and outlet 2's entities show the
-    # SAME generic translated name and are indistinguishable in the UI.
-    # A custom .number() declaration has no such conflict (a made-up
-    # translation_key with no official translation correctly falls back
-    # to fallback_name). Still reads/writes the SAME real
-    # on_transition_time/off_transition_time attribute (no multiplier —
-    # the user confirmed ZCL 1/10-second units are fine as-is), so
-    # read_transition_tenths() keeps working unchanged.
+    # ZHA auto-creates "On Level" and "On/Off Transition Time" Number
+    # entities for any LevelControl cluster. on_level is a local-only
+    # cache, so it's hidden. The transition-time ones are hidden and
+    # re-declared via .number() with a custom translation_key: ZHA's
+    # official keys override fallback_name, which left the LOZ-5D1-W's
+    # two outlets with identical, indistinguishable names. Same underlying
+    # attributes, in ZCL tenths (read by read_transition_tenths()).
     .prevent_default_entity_creation(
         endpoint_id=1, cluster_id=LevelControl.cluster_id,
         unique_id_suffix="on_level",

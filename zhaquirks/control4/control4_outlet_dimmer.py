@@ -622,32 +622,25 @@ Implementation:
     for on/off, paired with C4DimmerLevelControlWithOptimisticSync (this
     file, see attempts 12 and 16) instead of the bare C4DimmerLevelControl
     for LevelControl — no text-command translation, real ZCL passthrough
-    plus an optimistic current_level/on_off sync that also caches the ZCL
-    on_level attribute (local-only, never sent to the device) so a plain
-    on() restores the last dimmed level instead of falling back to
-    C4DimmerOnOff's hardcoded 75% default. EP2/EP196 reuse the base
-    C4ConfigCluster (not C4OutletConfigCluster), matching the APD120's raw
-    0-255 dim-level report path (_sync_ep1_level) instead of the outlet's
-    on/off-flag interpretation.
+    that injects the configured on/off_transition_time when no explicit
+    transition is given, and caches the ZCL on_level attribute
+    (local-only, never sent to the device) so a plain on() restores the
+    last dimmed level instead of falling back to C4DimmerOnOff's
+    hardcoded 75% default. EP2/EP196 reuse the base C4ConfigCluster (not
+    C4OutletConfigCluster), matching the APD120's raw 0-255 dim-level
+    report path (_sync_ep1_level) instead of the outlet's on/off-flag
+    interpretation.
   • Outlet 2 (synthetic EP11) uses C4Outlet2OnOff for on/off — a subclass
-    of C4Outlet1OnOff (control4_outlet.py's confirmed direct c4.dm.tv
-    boolean transport — no LevelControl redirect, unlike outlet 1: that
-    redirect exists because the real APD120 ignores standard On/Off, and
-    there's no evidence this text-protocol outlet does) that syncs
-    current_level so it doesn't lag behind on_off (attempt 11), and
-    restores the last dimmed level on a plain on() instead of forcing
-    100% (attempt 17) — paired with C4Outlet2DimmerLevelControl (this
-    file) for brightness, which sends the confirmed
-    `c4.dm.tv <01> 00 <level>` command (same shape as on/off, just with a
-    graduated value) and caches on_level alongside current_level so
-    C4Outlet2OnOff has a level to restore.
-  • EP197's button/state cluster syncs current_level/on_off from
-    c4.dm.tc announcements for outlet 2 only (its only level-sync path,
-    since it has no real Zigbee endpoint). Outlet 1's announcements are
-    left to the base class's on/off-only handling — see attempt 14: the
-    real circuit emits multiple graduated announcements while ramping,
-    which raced against and corrupted outlet 1's more reliable real-ZCL
-    optimistic update when both fed the same current_level.
+    of C4Outlet1OnOff (control4_outlet.py) that restores the last dimmed
+    level on a plain on() instead of forcing 100% (attempt 17) and ramps
+    on()/off() via c4.dm.rtl — paired with C4Outlet2DimmerLevelControl
+    (this file) for brightness, which sends
+    `c4.dm.rtl 01 <level> <time_ms>` (RAMP_TO_LEVEL) and caches on_level
+    so C4Outlet2OnOff has a level to restore.
+  • EP197's button/state cluster syncs current_level/on_off for BOTH
+    outlets from the device's c4.dm.tc announcements, so HA shows each
+    ramp as it progresses. Neither outlet writes current_level/on_off
+    optimistically on command.
 """
 
 import logging
@@ -726,31 +719,17 @@ def _c4_pct_to_zcl_level(level_pct: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Outlet 1 LevelControl — real ZCL passthrough plus an optimistic
-# current_level/on_off sync C4DimmerLevelControl doesn't do on its own.
+# Outlet 1 LevelControl — real ZCL passthrough (C4DimmerLevelControl) plus
+# outlet-1-specific level/transition handling.
 # ---------------------------------------------------------------------------
 
 class C4DimmerLevelControlWithOptimisticSync(C4DimmerLevelControl):
     """C4DimmerLevelControl, plus outlet-1-specific fixes bundled below.
 
-    HISTORY (the "OptimisticSync" this class is named for): originally
-    added because, after dimming outlet 1 then turning it off and back
-    on, the UI kept showing the *stale pre-off level* even though the
-    physical light correctly went to 100% — C4DimmerOnOff's on()/off()
-    handlers (control4_dimmer.py) redirect into a real ZCL
-    move_to_level_with_on_off frame via C4DimmerLevelControl, which just
-    forwards it to a real wire send with no optimistic update of its
-    own, relying entirely on the device reporting current_level back
-    (EP2/EP196's C4ConfigCluster -> _sync_ep1_level). Fixed at the time
-    by jumping current_level straight to the target immediately.
-    "Attempt 21" REMOVED that jump: the user asked for outlet 1 to show
-    current_level updating gradually while ramping (like outlet 2, via
-    C4DualOutletDimmerButtonCluster._sync_level_for_outlet below, now
-    also enabled for outlet 0) rather than snapping straight to the
-    final value — current_level is left entirely to live confirmations.
-    Kept as a subclass scoped to this file (rather than changing
-    control4_dimmer.py itself) for the other fixes below, which remain
-    outlet-1-specific.
+    The name is historical: it used to optimistically jump current_level
+    to the commanded target. That was removed ("Attempt 21") — current_level
+    and on_off now follow live reports (EP2/EP196 via _sync_ep1_level, and
+    c4.dm.tc via C4DualOutletDimmerButtonCluster._sync_level_for_outlet).
 
     This also fixes the same args-vs-kwargs gap found in outlet 2's
     C4Outlet2DimmerLevelControl (see module docstring, attempt 10):
@@ -759,7 +738,7 @@ class C4DimmerLevelControlWithOptimisticSync(C4DimmerLevelControl):
     though C4DimmerOnOff itself always calls with a positional level.
 
     Also caches the ZCL `on_level` attribute (attempt 16, CONFIRMED
-    correct on real hardware) alongside current_level, but only when the
+    correct on real hardware), but only when the
     level is non-zero: C4DimmerOnOff's _get_on_level() (control4_dimmer.py)
     already checks on_level first, before falling back to current_level
     and then to a hardcoded 75% default — and the base class's
@@ -775,11 +754,9 @@ class C4DimmerLevelControlWithOptimisticSync(C4DimmerLevelControl):
     C4Outlet2OnOff (below) does the analogous thing for the same reason —
     see attempt 17.
 
-    "Attempt 21": also injects the cached Ramp Rate Up/Down as this
-    command's transition_time when the caller didn't provide a
-    meaningful explicit one, so a dimmer-slider drag ramps the same way
-    a plain on()/off() toggle already does (via C4DimmerOnOff's own
-    _get_on_transition()/_get_off_transition()) — see module docstring.
+    Injects the configured on/off_transition_time (read_transition_tenths(),
+    c4_helpers.py) when the caller didn't provide a meaningful explicit
+    transition, so a slider drag ramps like a plain on()/off() does.
     """
 
     async def command(
@@ -809,25 +786,10 @@ class C4DimmerLevelControlWithOptimisticSync(C4DimmerLevelControl):
             else:
                 transition_tenths = None
 
-            # "Attempt 21": inject a transition_time when the caller
-            # (typically a plain dimmer-slider drag) didn't give a
-            # meaningful explicit one — mirrors outlet 2's
-            # EXPLICIT_TRANSITION_THRESHOLD_TENTHS logic
-            # (c4_helpers.py). Without this, a slider drag reached the
-            # real device with zha's own ~0.1s filler transition instead
-            # of a real one — ramping only applied to on()/off()
-            # (C4DimmerOnOff already injects _get_on/off_transition()
-            # for those), not to a graduated dim, the opposite gap from
-            # outlet 2 before this fix. Real ZCL passthrough
-            # (super().command() below) means an automation's own
-            # explicit transition_time still reaches the device
-            # unmodified, same as before.
-            #
-            # "Attempt 22": reads the SAME standard on_transition_time/
-            # off_transition_time this cluster already caches locally
-            # (read_transition_tenths(), c4_helpers.py) instead of a
-            # separate custom "Ramp Rate" cluster on another endpoint —
-            # see module docstring.
+            # Replace zha's ~0.1s filler transition (see
+            # EXPLICIT_TRANSITION_THRESHOLD_TENTHS, c4_helpers.py) with
+            # the configured on/off_transition_time; an explicit
+            # transition above the threshold passes through unmodified.
             if level_zcl is not None and (
                 transition_tenths is None
                 or transition_tenths <= EXPLICIT_TRANSITION_THRESHOLD_TENTHS
@@ -865,24 +827,8 @@ class C4DimmerLevelControlWithOptimisticSync(C4DimmerLevelControl):
             else:
                 level_zcl = None
             if level_zcl is not None:
-                # "Attempt 21": no longer jumps current_level straight to
-                # level_zcl here — the user asked to drop the optimistic
-                # jump entirely (both for this class and the plain
-                # LDZ-101's own C4DimmerLevelControl, control4_dimmer.py)
-                # in favor of letting current_level update gradually from
-                # real confirmations: EP2/EP196's C4ConfigCluster reports
-                # (_sync_ep1_level, unchanged) plus, now that "Attempt
-                # 21" also re-enabled outlet 0 in
-                # C4DualOutletDimmerButtonCluster._sync_level_for_outlet
-                # below, the device's own c4.dm.tc announcements while
-                # ramping. on_off's own optimistic update was ALSO
-                # dropped, on the same reasoning as control4_dimmer.py's
-                # equivalent: the command completing doesn't mean the
-                # light has actually finished ramping to that state, so
-                # showing "on"/"off" instantly misrepresents reality —
-                # _sync_level_for_outlet already flips on_off from the
-                # exact same c4.dm.tc reports that drive current_level,
-                # so it stays in sync without a separate write here.
+                # No optimistic current_level/on_off write — both follow
+                # live reports (see class docstring).
                 _LOGGER.debug(
                     "C4 DimmerLevel outlet1: move_to_level target=%d — "
                     "current_level and on_off both left to live reports",
@@ -904,8 +850,7 @@ class C4DimmerLevelControlWithOptimisticSync(C4DimmerLevelControl):
 
 # ---------------------------------------------------------------------------
 # Outlet 2 OnOff — a plain on() restores the last dimmed level instead of
-# forcing 100%, plus a current_level sync the switch-only base class has
-# no reason to know about.
+# forcing 100%, and on()/off() ramp via c4.dm.rtl.
 # ---------------------------------------------------------------------------
 
 class C4Outlet2OnOff(C4Outlet1OnOff):
@@ -930,18 +875,13 @@ class C4Outlet2OnOff(C4Outlet1OnOff):
     pairing). off() is also overridden the same way, ramping to 0
     instead of an instant cut. Both reuse C4Outlet2DimmerLevelControl's
     own _send_c4_outlet_ramp_to_level()/_get_outlet2_ramp_ms() to build/
-    send the c4.dm.rtl RAMP_TO_LEVEL frame ("Attempt 21" in the module
-    docstring: real-hardware evidence across two debug-log captures
-    showed RAMP_TO_LEVEL working correctly at both 100% and 0%, so the
-    "Attempt 20" instant-SET_LEVEL-for-toggle-only design was reverted —
-    the original failure is now understood to be an ApplicationController
-    boot-timing race, fixed separately in c4_ramp_cluster.py).
+    send the c4.dm.rtl RAMP_TO_LEVEL frame, confirmed working at both 100%
+    and 0% on real hardware ("Attempt 21" in the module docstring).
 
-    No longer optimistically updates current_level/on_off itself (see
-    "Attempt 21" in the module docstring) — both are left to
+    Doesn't update current_level/on_off itself — both are left to
     C4DualOutletDimmerButtonCluster._sync_level_for_outlet, which
-    already flips them together from the device's own c4.dm.tc reports
-    as the ramp actually progresses.
+    flips them from the device's own c4.dm.tc reports as the ramp
+    progresses.
     """
 
     async def command(
@@ -976,24 +916,6 @@ class C4Outlet2OnOff(C4Outlet1OnOff):
                 "C4 Outlet2OnOff: on() restoring level_pct=%d "
                 "(cached on_level_zcl=%s)", level_pct, on_level_zcl,
             )
-            # "Attempt 21": RAMP_TO_LEVEL restored for plain on()/off() too
-            # — see module docstring. Real-hardware evidence across two
-            # separate debug-log captures showed c4.dm.rtl working
-            # correctly at both 100% and 0% (smooth, fully-confirmed
-            # ramps via repeated c4.dm.tc announcements), contradicting
-            # "Attempt 20"'s boundary-value theory; the earlier failure
-            # is now understood to be the same ApplicationController
-            # boot-timing race fixed in c4_ramp_cluster.py, not a
-            # RAMP_TO_LEVEL/level-value issue.
-            #
-            # No optimistic current_level/on_off update here either: the
-            # command completing doesn't mean the light has actually
-            # finished ramping to that state — _sync_level_for_outlet
-            # (C4DualOutletDimmerButtonCluster, below) already flips
-            # both from the same c4.dm.tc reports that already drive
-            # current_level while ramping, so a separate optimistic
-            # write here would just misrepresent progress before the
-            # first real report arrives.
             if level_cluster is not None:
                 ramp_ms = level_cluster._get_outlet2_ramp_ms("up")
                 await level_cluster._send_c4_outlet_ramp_to_level(level_pct, ramp_ms)
@@ -1007,10 +929,8 @@ class C4Outlet2OnOff(C4Outlet1OnOff):
             return self._SUCCESS
 
         if command_id == OnOff.ServerCommandDefs.off.id:
-            # "Attempt 21": ramps to 0 via c4.dm.rtl (using "2 Ramp Rate
-            # Down") instead of the instant c4.dm.tv 01 00 00 — see
-            # module docstring. No optimistic update here either, same
-            # reasoning as on() above.
+            # Ramps to 0 via c4.dm.rtl (off_transition_time) instead of
+            # the instant c4.dm.tv 01 00 00.
             if level_cluster is not None:
                 ramp_ms = level_cluster._get_outlet2_ramp_ms("down")
                 _LOGGER.debug(
@@ -1067,44 +987,11 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
     "Attempt 19" (see module docstring History) switched this class from
     SET_LEVEL to RAMP_TO_LEVEL: `0i<seq> c4.dm.rtl <outlet> <level_hex2>
     <time_ms_hex8>` (an "interrupt" frame, 8 hex digits of milliseconds —
-    confirmed from the same real controller log). The <time_ms> argument
-    comes from C4RampClusterOutlet2's locally-cached "2 Ramp Rate
-    Up"/"2 Ramp Rate Down" values (c4_ramp_cluster.py, EP14) — this
-    replicates how Control4's own Composer "Hold Ramp Rate" fields work
-    (confirmed via disassembling outlet_ip_control4.c4l's own SetRampRate:
-    purely a local pacing value, never itself sent to the device — see
-    C4RampClusterOutlet2's docstring). Outlet index 01 for RAMP_TO_LEVEL
-    specifically is inferred by analogy (same compiled function as
-    SET_LEVEL, same OutletID selector), not independently captured —
-    needs real-hardware confirmation.
-
-    "Attempt 20" briefly reverted on()/off() (C4Outlet2OnOff above) to
-    instant c4.dm.tv SET_LEVEL, suspecting RAMP_TO_LEVEL was unreliable
-    specifically at the 0%/100% endpoints after a plain toggle stopped
-    working post-restart. "Attempt 21" reverted that: two further
-    real-hardware debug-log captures showed RAMP_TO_LEVEL working
-    correctly at both 100% and 0% (full, clean ramps confirmed via
-    repeated c4.dm.tc announcements) — the original failure is now
-    understood to be the same ApplicationController boot-timing race
-    the ramp-defaults push already had (fixed in c4_ramp_cluster.py),
-    not a RAMP_TO_LEVEL/boundary-value problem. on()/off() now call
-    _send_c4_outlet_ramp_to_level() again, same as graduated dimming
-    below.
-
-    "Attempt 22": the <time_ms> argument's source changed again — no
-    longer C4RampClusterOutlet2's own EP14 cache, but this SAME
-    cluster's standard on_transition_time/off_transition_time
-    attributes (_get_outlet2_ramp_ms() now calls
-    read_transition_tenths(self, direction), c4_helpers.py). Motivation
-    was unrelated to outlet 2 specifically: reading zha's own light
-    platform and outlet 1's real-hardware logs confirmed a real
-    move_to_level_with_on_off ZCL command's own transition_time
-    argument is what actually controls ramping — the custom
-    c4.dm.tv-backed C4RampCluster mechanism this class's <time_ms> used
-    to come from never influenced real dimming behavior at all, on
-    either outlet. Collapsing both outlets onto the same ZHA-standard
-    config surface removed that mechanism (and its EP4/EP14 endpoints)
-    entirely — see module docstring.
+    confirmed from the same real controller log, and on real hardware for
+    outlet index 01 at every level including 0% and 100%). <time_ms> is
+    either the caller's explicit transition_time or, for a plain
+    on()/off()/slider drag, this cluster's own on_transition_time/
+    off_transition_time (_get_outlet2_ramp_ms()).
 
     Inherits C4DimmerLevelControl's local caching of on_level/transition-time
     attributes but overrides write_attributes (never forward to the device —
@@ -1148,14 +1035,9 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
             _LOGGER.warning("C4 Outlet2DimmerLevel: poll failed: %s", exc)
 
     def _get_outlet2_ramp_ms(self, direction: str) -> int:
-        """Look up the ramp time (ms) for outlet 2's next c4.dm.rtl
-        RAMP_TO_LEVEL send, from this SAME cluster's own standard
-        on_transition_time/off_transition_time attributes — see
-        read_transition_tenths() (c4_helpers.py) and this module's
-        "Attempt 22" History entry (replaces the old separate
-        C4RampClusterOutlet2/EP14 mechanism this method used to look up
-        cross-endpoint). direction is "up" (turning on / raising the
-        level) or "down" (turning off / lowering the level).
+        """Ramp time (ms) for the next c4.dm.rtl send, from this cluster's
+        on_transition_time/off_transition_time (read_transition_tenths()).
+        direction is "up" (on / raising) or "down" (off / lowering).
         """
         return read_transition_tenths(self, direction) * 100
 
@@ -1165,17 +1047,8 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
         CONFIRMED wire format from a real HC-300 controller log (outlet 1):
         an "interrupt" frame (0i, not 0s/0g) with an 8-hex-digit
         millisecond time — `0if088 c4.dm.rtl 00 32 000003e8`. Outlet index
-        01 for outlet 2 is inferred by direct analogy, not independently
-        captured for this command specifically: RampOutletLevel(OutletID,
-        level, time) is a single compiled function in the real driver
-        (outlet_ip_control4.c4l) shared by both outlets, and index 01 is
-        already independently confirmed for the sibling c4.dm.tv
-        SET_LEVEL command on this same device (module docstring, attempt
-        9: "identical pattern on outlet index 01"). Needs real-hardware
-        confirmation for c4.dm.rtl specifically — see "Attempt 19".
-
-        Replaces the old instant c4.dm.tv SET_LEVEL send for outlet 2's
-        level changes (see "Attempt 19").
+        01 (outlet 2) was inferred by analogy and later confirmed on real
+        hardware (smooth ramps reported back via c4.dm.tc).
         """
         device = self.endpoint.device
         seq = next_c4_seq(device)
@@ -1228,11 +1101,10 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
             else:
                 level_zcl = 0
 
-            # "Attempt 20": honor an explicit transition_time from the
-            # caller (e.g. an automation's `transition:`) over our own
-            # cached Ramp Rate — see EXPLICIT_TRANSITION_THRESHOLD_TENTHS'
-            # comment (c4_ramp_cluster.py) for why a threshold is needed
-            # rather than trusting transition_time unconditionally.
+            # Honor an explicit transition_time (e.g. an automation's
+            # `transition:`) over the configured on/off_transition_time —
+            # see EXPLICIT_TRANSITION_THRESHOLD_TENTHS (c4_helpers.py) for
+            # why a threshold is needed.
             if len(args) > 1:
                 transition_tenths = args[1]
             elif "transition_time" in kwargs:
@@ -1250,8 +1122,8 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
                 ramp_ms = int(transition_tenths) * 100
                 _LOGGER.debug(
                     "C4 Outlet2DimmerLevel: using caller-provided "
-                    "transition_time=%d tenths (%d ms) instead of cached "
-                    "Ramp Rate", transition_tenths, ramp_ms,
+                    "transition_time=%d tenths (%d ms) instead of "
+                    "on/off_transition_time", transition_tenths, ramp_ms,
                 )
             else:
                 ramp_ms = self._get_outlet2_ramp_ms(direction)
@@ -1262,28 +1134,18 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
             )
             await self._send_c4_outlet_ramp_to_level(level_pct, ramp_ms)
 
-            # "Attempt 21": no optimistic current_level/on_off update
-            # here anymore — the device confirms via a stream of
-            # c4.dm.tc announcements while the ramp actually progresses
-            # (C4DualOutletDimmerButtonCluster._sync_level_for_outlet),
-            # and the user asked for those live values to drive the UI
-            # instead of an immediate jump that doesn't reflect reality
-            # yet (the light hasn't actually reached this level the
-            # moment the command is sent — it's only just starting to
-            # ramp toward it).
+            # No optimistic current_level/on_off write — both follow the
+            # device's c4.dm.tc reports (_sync_level_for_outlet).
             if level_zcl > 0:
-                # Remember the last non-zero level so C4Outlet2OnOff's
-                # plain on() can restore it instead of forcing 100% — see
-                # module docstring, attempt 17. Same on_level-as-local-
-                # cache mechanism outlet 1 uses. Kept as command-time
-                # state (not from live c4.dm.tc reports), same reasoning
-                # as control4_dimmer.py's own on_level caching.
+                # Remember the last non-zero level (command-time, not from
+                # live reports) so C4Outlet2OnOff's plain on() restores it
+                # instead of forcing 100% — attempt 17.
                 self._update_attribute(
                     LevelControl.AttributeDefs.on_level.id, level_zcl
                 )
             return self._SUCCESS
 
-        # No c4.dm.tv equivalent for move/step/stop — acknowledge and drop
+        # No C4 equivalent for move/step/stop — acknowledge and drop
         # rather than forwarding to super().command(), which would send a
         # real ZCL frame this synthetic endpoint has nowhere to deliver.
         _LOGGER.debug(
@@ -1303,10 +1165,9 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
 
 
 # ---------------------------------------------------------------------------
-# State announcements — outlet-index-1 announcements carry outlet 2's
-# graduated level; everything else (including outlet index 0) defers to the
-# base switch-only on/off sync, since outlet 1's current_level is owned by
-# the real-ZCL / EP2-EP196 path instead.
+# State announcements — c4.dm.tc carries each outlet's graduated level
+# (outlet index 0 and 1); everything else defers to the base switch-only
+# on/off sync.
 # ---------------------------------------------------------------------------
 
 class C4DualOutletDimmerButtonCluster(C4DualOutletButtonCluster):
@@ -1347,27 +1208,11 @@ class C4DualOutletDimmerButtonCluster(C4DualOutletButtonCluster):
     def _sync_level_for_outlet(self, outlet_idx, level_pct):
         """Sync current_level/on_off for one outlet from a c4.dm.tc announce.
 
-        "Attempt 21" RE-ENABLED outlet 0 (EP1) here, reverting attempt 14.
-        History: attempt 13 first wired up both outlets; attempt 14
-        reverted outlet 0 specifically after real-hardware testing showed
-        it settling on a transient mid-ramp value (e.g. 73%) instead of
-        the correct target (100%) — theorized as a race between this
-        announcement-driven sync and the real-ZCL optimistic update in
-        C4DimmerLevelControlWithOptimisticSync, whenever the announcement
-        stream didn't end exactly on the target or arrived out of order.
-
-        The user explicitly asked for outlet 1's gradual, in-progress
-        current_level updates (this exact mechanism, already relied on
-        for outlet_idx==1/EP11 with no reported issues) on outlet 0 too,
-        preferring that over the abrupt "jump to final value only" look
-        outlet 0 had without it. Re-enabled on that basis: outlet 0 now
-        uses the IDENTICAL dual-path design (an immediate optimistic
-        jump in C4DimmerLevelControlWithOptimisticSync.command(), plus
-        this method's own repeated updates as announcements stream in)
-        that already works reliably for outlet 1 — not new/riskier code,
-        the same mechanism extended to the other outlet. If attempt 14's
-        wrong-final-value symptom reappears specifically for outlet 0,
-        that's the first thing to check.
+        Handles both outlets ("Attempt 21" re-enabled outlet 0/EP1, which
+        attempt 14 had excluded). Attempt 14's symptom was outlet 0
+        settling on a transient mid-ramp value (e.g. 73%) instead of the
+        target, blamed on a race with the optimistic jump that has since
+        been removed — if it reappears on outlet 0, check here first.
         """
         ep_id = OUTLET_EP_MAP.get(outlet_idx)
         if ep_id is None:
@@ -1422,9 +1267,8 @@ class C4DualOutletDimmerButtonCluster(C4DualOutletButtonCluster):
 # ---------------------------------------------------------------------------
 # Device quirk (QuirkBuilder v2)
 #
-# Outlet 1 (EP1) uses real ZCL Level Control (confirmed working). Outlet 2
-# (synthetic EP11) uses a graduated c4.dm.tv level (unverified — see module
-# docstring for the reasoning and what to check when testing).
+# Outlet 1 (EP1) uses real ZCL Level Control; outlet 2 (synthetic EP11)
+# uses c4.dm.rtl RAMP_TO_LEVEL. Both confirmed working on real hardware.
 #
 # EP1, EP2, EP196, EP197, EP198 are all real, normally-interviewed endpoints
 # (EP2/196/197 populated by c4_hooks.py's Endpoint.initialize patch, since
@@ -1459,22 +1303,11 @@ _c4_loz5d1w_entry = (
         endpoint_id=1, cluster_id=LevelControl.cluster_id,
         unique_id_suffix="on_level",
     )
-    # "Attempt 22" left ZHA's standard "Off/On/Off-On Transition Time"
-    # entities visible as the ramp-rate config surface, replacing the
-    # old custom "1/2 Ramp Rate Up/Down" pairs. "Attempt 23": those
-    # standard entities use an OFFICIAL baked-in translation_key
-    # ("on_transition_time"/"off_transition_time") shared by BOTH
-    # outlets, and HA's translation lookup for an official key wins
-    # over change_entity_metadata()'s new_fallback_name (same
-    # limitation already confirmed this session for BinaryInput/Light/
-    # Switch-class entities) — so outlet 1 and outlet 2's entities
-    # showed the exact same generic name, indistinguishable in the UI.
-    # Suppressed here and re-declared below via .number() with a
-    # made-up translation_key (no official conflict, so fallback_name
-    # actually applies) and a "1"/"2" prefix, matching the naming
-    # pattern already used for the LED/button entities. Still reads/
-    # writes the SAME real on_transition_time/off_transition_time
-    # attribute — see read_transition_tenths() in c4_helpers.py.
+    # ZHA's default on/off transition-time entities use an official
+    # translation_key that overrides fallback_name, so both outlets got
+    # the same indistinguishable name. Hidden and re-declared below with a
+    # custom translation_key and a "1"/"2" prefix; same underlying
+    # attributes (read_transition_tenths(), c4_helpers.py).
     .prevent_default_entity_creation(
         endpoint_id=1, cluster_id=LevelControl.cluster_id,
         unique_id_suffix="on_transition_time",

@@ -60,9 +60,8 @@ alongside move_to_color for the same light.turn_on(rgb_color=...) call;
 C4LedOnOff's own "resend the current color" side effect (needed so a
 plain on/off toggle with no explicit color still does something) read
 current_x/current_y before this cluster's own move_to_color handler had
-updated them, racing it. Fixed with the same timestamp-suppression
-technique already proven elsewhere in this device
-(c4_helpers.c4_suppress_level_sync): C4LedColorCluster tracks when a
+updated them, racing it. Fixed with a timestamp-suppression window:
+C4LedColorCluster tracks when a
 real move_to_color last landed, and C4LedOnOff's on() skips its resend
 if one landed within the last second, since it already sent the right
 value.

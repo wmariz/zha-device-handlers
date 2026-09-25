@@ -35,6 +35,7 @@ from c4_helpers import (
     _c4_persist_device,
     _sync_ep1_model,
     get_model_from_ieee,
+    parse_c4_model,
     set_model_for_ieee,
 )
 
@@ -196,8 +197,7 @@ class C4BasicCluster(CustomCluster, Basic):
                 continue
             raw = cfg.get(C4_ATTR_MODEL)
             if raw and isinstance(raw, str):
-                parts = raw.split(":")
-                m = parts[2] if len(parts) >= 3 else raw
+                m = parse_c4_model(raw)
                 _LOGGER.debug(
                     "C4 Basic: resolved model=%r from ZCL cache ep%d for %s",
                     m, ep_id, device.ieee,
@@ -231,8 +231,7 @@ class C4BasicCluster(CustomCluster, Basic):
                 )
                 raw = result.get(C4_ATTR_MODEL)
                 if raw and isinstance(raw, str):
-                    parts = raw.split(':', 2)
-                    model = parts[2] if len(parts) >= 3 else raw
+                    model = parse_c4_model(raw)
                     device.model = model
                     device.manufacturer = "Control4"
                     _sync_ep1_model(device, model, "c4_basic_fetch")

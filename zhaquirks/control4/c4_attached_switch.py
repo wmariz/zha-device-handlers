@@ -1,8 +1,8 @@
 """Virtual OnOff-cluster switches for Control4 dimmer hardware-config toggles.
 
 button_attached/led_attached (confirmed wire protocol: `c4.dm.ba <0|1>` /
-`c4.dm.lm <0|1>` — see c4_ramp_cluster.py's module docstring for the full
-capture) were first implemented as custom Bool attributes on C4RampCluster.
+`c4.dm.lm <0|1>`, from a real HC300 controller log) were first implemented
+as custom Bool attributes on a custom manufacturer-specific cluster.
 CONFIRMED BROKEN on real hardware: ZHA does not auto-generate any entity
 for an arbitrary attribute on a fully custom, manufacturer-specific
 cluster — only a handful of core-recognized ZCL attributes (e.g.
@@ -13,7 +13,7 @@ a plain text box for them, not a boolean toggle either.
 
 Instead, each toggle gets its own virtual endpoint carrying nothing but a
 plain OnOff cluster — the same virtual-endpoint trick already used for
-this device's two button Event entities (see c4_button_cluster.py /
+this device's two button binary_sensor entities (see c4_button_cluster.py /
 DIMMER_BUTTON_EVENT_EP_MAP). ZHA's switch-platform discovery creates a
 Switch entity for any endpoint exposing a plain OnOff cluster generically
 (unrelated to any custom-attribute mechanism), which is exactly the
