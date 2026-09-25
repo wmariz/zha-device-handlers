@@ -17,6 +17,7 @@ import os
 import struct
 import sys
 import threading
+import time
 
 # Make this directory importable by sibling modules regardless of load order.
 _QUIRK_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -475,10 +476,10 @@ async def _c4_send_controller_identity(
         _LOGGER.error("C4 identity (%s): failed — %s", source, e)
 
 
-async def _send_many_to_one_route_request(app) -> None:
+async def _send_many_to_one_route_request(app) -> bool:
     """Broadcast a ZigBee NWK Many-to-One Route Request from the coordinator.
 
-    Tries bellows (EZSP) then zigpy-znp (TI ZNP).
+    Tries bellows (EZSP) then zigpy-znp (TI ZNP). Returns True if sent.
     """
     if hasattr(app, '_ezsp'):
         try:
@@ -486,7 +487,7 @@ async def _send_many_to_one_route_request(app) -> None:
                 concentratorType=0xFFF9, radius=5,
             )
             _LOGGER.debug("Many-to-One Route Request sent via EZSP")
-            return
+            return True
         except Exception as exc:
             _LOGGER.warning("EZSP sendManyToOneRouteRequest failed — %s", exc)
 
@@ -498,14 +499,48 @@ async def _send_many_to_one_route_request(app) -> None:
                 RspSchema=znp_c.ZDO.ExtRouteDisc.Rsp,
             )
             _LOGGER.debug("Many-to-One Route Request sent via ZNP")
-            return
+            return True
         except Exception as exc:
             _LOGGER.warning("ZNP ExtRouteDisc failed — %s", exc)
 
-    _LOGGER.warning(
-        "_send_many_to_one_route_request: no supported radio backend found "
-        "(tried EZSP, ZNP)"
-    )
+    if not hasattr(app, '_ezsp') and not hasattr(app, '_znp'):
+        _LOGGER.warning(
+            "_send_many_to_one_route_request: no supported radio backend "
+            "found (tried EZSP, ZNP)"
+        )
+    return False
+
+
+# Minimum time between MTORRs sent in response to C4 model announcements.
+# Those arrive on every join/rejoin AND on periodic keep-alives from every
+# C4 device, and each MTORR is a broadcast to the whole network.
+C4_MTORR_MIN_INTERVAL = 600  # seconds
+# Stored on the (shared) application object, not in this module, which may
+# be imported more than once.
+_MTORR_LAST_ATTR = "_c4_last_mtorr"
+
+
+async def _c4_rate_limited_mtorr(device) -> None:
+    """Send an MTORR for `device`'s announcement, at most once per
+    C4_MTORR_MIN_INTERVAL network-wide."""
+    app = device.application
+    now = time.monotonic()
+    last = getattr(app, _MTORR_LAST_ATTR, None)
+    if last is not None and now - last < C4_MTORR_MIN_INTERVAL:
+        _LOGGER.debug(
+            "C4 sniffer: MTORR skipped for %s (last one %.0fs ago, min %ds)",
+            device.ieee, now - last, C4_MTORR_MIN_INTERVAL,
+        )
+        return
+    # Claim the slot before awaiting, so announcements from several devices
+    # arriving together don't each send one.
+    object.__setattr__(app, _MTORR_LAST_ATTR, now)
+    if await _send_many_to_one_route_request(app):
+        _LOGGER.debug("C4 sniffer: MTORR sent for %s", device.ieee)
+    else:
+        # Let the next announcement retry instead of waiting out the interval.
+        object.__setattr__(app, _MTORR_LAST_ATTR, last)
+        _LOGGER.warning("C4 sniffer: MTORR failed for %s", device.ieee)
 
 
 # ---------------------------------------------------------------------------
@@ -665,6 +700,8 @@ def _c4_sniff_model(device, inner: bytes) -> None:
         This replaces the per-cluster bind() handshake: the handshake is now
         triggered reactively each time the device announces its model number,
         which happens on join, rejoin, and periodic keep-alive broadcasts.
+        The identity goes out every time; the MTORR (a network-wide
+        broadcast) is rate-limited — see _c4_rate_limited_mtorr().
     """
     try:
         hdr, remaining = foundation.ZCLHeader.deserialize(inner)
@@ -700,16 +737,7 @@ def _c4_sniff_model(device, inner: bytes) -> None:
                                 "C4 sniffer: identity send failed for %s — %s",
                                 dev.ieee, e,
                             )
-                        try:
-                            await _send_many_to_one_route_request(dev.application)
-                            _LOGGER.debug(
-                                "C4 sniffer: MTORR sent for %s", dev.ieee
-                            )
-                        except Exception as e:
-                            _LOGGER.warning(
-                                "C4 sniffer: MTORR failed for %s — %s",
-                                dev.ieee, e,
-                            )
+                        await _c4_rate_limited_mtorr(dev)
                     c4_spawn(_send_handshake())
 
                 if not device.model or device.model in _INVALID_MODELS:
