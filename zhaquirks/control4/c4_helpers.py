@@ -16,6 +16,7 @@ import logging
 import os
 import struct
 import sys
+import threading
 
 # Make this directory importable by sibling modules regardless of load order.
 _QUIRK_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -286,21 +287,86 @@ def set_model_for_ieee(key: str, value: str) -> None:
 # Frame / command helpers
 # ---------------------------------------------------------------------------
 
+# Last C4-transport sequence number sent to each device (IEEE → int), so
+# the counter resumes across HA restarts instead of starting over.
+_C4_SEQ_STORE_PATH = "/config/.storage/c4_seq_state.json"
+# Resume this far past the last saved number, in case the final save(s)
+# before a shutdown never reached the disk.
+_C4_SEQ_RESUME_MARGIN = 0x10
+# Seed for a device with no saved number. Before sequence numbers were
+# persisted, every HA session restarted at 0x0040 and rarely got far past
+# it, so a device paired before this change has only ever seen low numbers
+# — start well clear of them.
+_C4_SEQ_SEED = 0x1000
+
+
+def _load_seq_store() -> dict:
+    try:
+        with open(_C4_SEQ_STORE_PATH) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+# Loaded at import so the first next_c4_seq() call per device doesn't do
+# blocking file I/O on the event loop.
+_C4_SAVED_SEQ: dict[str, int] = _load_seq_store()
+
+
+_C4_SEQ_SAVE_LOCK = threading.Lock()
+
+
+def _save_seq() -> None:
+    # Runs in executor threads, so serialize; each save writes the CURRENT
+    # in-memory values, so a save that runs late never writes back an older
+    # number. Merged over the file because this module may be imported more
+    # than once, each copy only knowing the devices it has sent to.
+    with _C4_SEQ_SAVE_LOCK:
+        data = _load_seq_store()
+        data.update(_C4_SAVED_SEQ)
+        os.makedirs(os.path.dirname(_C4_SEQ_STORE_PATH), exist_ok=True)
+        tmp = f"{_C4_SEQ_STORE_PATH}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, _C4_SEQ_STORE_PATH)
+
+
 def next_c4_seq(device) -> int:
     """Return the next 16-bit C4-transport sequence number for `device`.
 
     The C4 ASCII protocol embeds a 4-hex-digit sequence number after the
-    `0s`/`0g`/`0r`/`0t` frame-type prefix and uses it as a de-duplication
-    key.  All cluster modules sharing the same physical device must draw
-    sequences from the same counter — colliding sequences are silently
-    dropped by the device.
+    `0s`/`0g`/`0i` frame-type prefix (the device ACKs with `0r<seq> 000`).
+    All cluster modules sharing the same physical device must draw
+    sequences from the same counter.
+
+    CONFIRMED on real hardware (two LOZ-5D1-W): the device silently drops
+    — no ACK, no action — a frame whose sequence number it has already
+    seen. The counter used to restart at 0x0040 on every HA restart, so
+    the first few commands after a restart reused the previous session's
+    numbers and were ignored (e.g. 0041/0042 dropped, 0043 accepted).
+    The last number sent is now persisted per device and the counter
+    resumes past it (_C4_SEQ_SEED for a device with no saved number).
 
     Counter is lazily attached as `device._c4_seq` so it lives for the
-    device's lifetime and is shared across every cluster on it.  The seed
-    of 0x0040 matches what the original Control4 controller used.
+    device's lifetime and is shared across every cluster on it.
     """
-    seq = getattr(device, '_c4_seq', 0x0040)
+    ieee = str(device.ieee)
+    seq = getattr(device, '_c4_seq', None)
+    if seq is None:
+        last = _C4_SAVED_SEQ.get(ieee)
+        seq = (
+            (last + _C4_SEQ_RESUME_MARGIN) & 0xFFFF
+            if isinstance(last, int) else _C4_SEQ_SEED
+        )
     device._c4_seq = (seq + 1) & 0xFFFF
+    _C4_SAVED_SEQ[ieee] = seq
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _save_seq()
+    else:
+        loop.run_in_executor(None, _save_seq)
     return seq
 
 
