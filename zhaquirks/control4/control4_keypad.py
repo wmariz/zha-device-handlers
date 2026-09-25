@@ -122,9 +122,6 @@ from zigpy.zcl.clusters.lighting import Color
 from zhaquirks.const import (
     CLUSTER_ID,
     COMMAND,
-    DOUBLE_PRESS,
-    TRIPLE_PRESS,
-    QUADRUPLE_PRESS,
     ENDPOINT_ID,
     LONG_PRESS,
     LONG_RELEASE,
@@ -247,7 +244,9 @@ _c4_kpz6b1_entry = (
                 ENDPOINT_ID: KPZ6B1_BUTTON_EP_MAP[_btn_id],
             }
             for _btn_id, _btn_name in KPZ6B1_BUTTON_MAP.items()
-            for _action in ("press", SHORT_PRESS, DOUBLE_PRESS, TRIPLE_PRESS, QUADRUPLE_PRESS, LONG_PRESS, LONG_RELEASE)
+            # No DOUBLE/TRIPLE/QUADRUPLE_PRESS: c4.kp.cc is ignored (see
+            # C4ButtonCluster.CLICK_AT_RELEASE), so they never fire.
+            for _action in ("press", SHORT_PRESS, LONG_PRESS, LONG_RELEASE)
         }
     )
     .add_to_registry()

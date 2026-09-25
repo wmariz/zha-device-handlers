@@ -285,9 +285,6 @@ from zigpy.zcl.clusters.lighting import Color
 from zhaquirks.const import (
     CLUSTER_ID,
     COMMAND,
-    DOUBLE_PRESS,
-    TRIPLE_PRESS,
-    QUADRUPLE_PRESS,
     ENDPOINT_ID,
     LONG_PRESS,
     LONG_RELEASE,
@@ -797,11 +794,9 @@ _c4_apd120_entry = (
                 ENDPOINT_ID: DIMMER_BUTTON_EVENT_EP_MAP[_btn_name],
             }
             for _btn_id, _btn_name in APD120_BUTTON_MAP.items()
-            for _action in (
-                "press",
-                SHORT_PRESS, DOUBLE_PRESS, TRIPLE_PRESS, QUADRUPLE_PRESS,
-                LONG_PRESS, LONG_RELEASE,
-            )
+            # No DOUBLE/TRIPLE/QUADRUPLE_PRESS: c4.dm.cc is ignored (see
+            # C4ButtonCluster.CLICK_AT_RELEASE), so they never fire.
+            for _action in ("press", SHORT_PRESS, LONG_PRESS, LONG_RELEASE)
         }
     )
     .add_to_registry()

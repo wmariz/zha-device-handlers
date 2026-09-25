@@ -46,6 +46,7 @@ from zhaquirks.const import (
     MODELS_INFO,
     OUTPUT_CLUSTERS,
     PROFILE_ID,
+    SHORT_PRESS,
     TRIPLE_PRESS,
     TURN_OFF,
     TURN_ON,
@@ -217,16 +218,18 @@ KPZ6B1_LED_EP_MAP: dict[int, int] = {
 # CONFIRMED from a real HC300 controller log: the KPZ-6B1 uses its own
 # c4.kp.* namespace family for button presses — bb=press-begin (fires the
 # instant a button goes down, before the device knows if it'll resolve to
-# a click or a hold), cc=click-count confirmation (same shape as
-# c4.dmx.cc/c4.dm.cc), bh=hold (fires while held), be=hold-end (release
-# after a hold). Deliberately a SEPARATE map from DIMMER_EVENT_MAP: "bb"
+# a click or a hold), bc=click (sent on release of a quick press),
+# cc=click count (sent later, once the multi-click window closes —
+# ignored, see C4ButtonCluster.CLICK_AT_RELEASE), bh=hold (fires while
+# held), be=hold-end (release after a hold). Deliberately a SEPARATE map
+# from DIMMER_EVENT_MAP: "bb"
 # means something different here (press-begin) than it does for the
 # SR260 (a complete short press) — sharing one map across every
 # C4ButtonCluster subclass would silently misfire once a second device
 # reused a letter code with different semantics.
 KEYPAD_EVENT_MAP = {
     "bb": "press",
-    "cc": "click_count",
+    "bc": SHORT_PRESS,
     "bh": LONG_PRESS,
     "be": LONG_RELEASE,
 }

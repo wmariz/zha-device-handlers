@@ -186,13 +186,14 @@ class C4ButtonCluster(EventableCluster):
             # CONFIRMED from a real HA debug log capture on an LDZ-101
             # dimmer: this device's actual click-count announcements use
             # the single-channel `c4.dm.*` family (like c4.dm.t0c for
-            # level), not `c4.dmx.cc` — every real button press was
-            # silently falling through to "unknown namespace" below.
-            # Identical shape/semantics to c4.dmx.cc otherwise (button,
-            # click count), so _handle_button_event's event_code
-            # resolution (namespace.split(".")[-1] == "cc") works
-            # unchanged.
-            if len(data) >= 2:
+            # level), not `c4.dmx.cc`. Identical shape/semantics to
+            # c4.dmx.cc otherwise (button, click count).
+            if self.CLICK_AT_RELEASE:
+                # Arrives ~1.7 s after the click (the device waits out its
+                # multi-click window); the click was already handled at
+                # c4.dm.b<btn>c.
+                _LOGGER.debug("C4 state: ignoring click count %s", data)
+            elif len(data) >= 2:
                 _LOGGER.debug(
                     "C4 state: click count, button = %s, clicks = %s",
                     data[0], data[1],
@@ -237,15 +238,17 @@ class C4ButtonCluster(EventableCluster):
             if data:
                 self._handle_button_event(namespace, data[0])
         elif namespace == "c4.kp.bc":
-            # KPZ-6B1 — click complete (quick release, before the count is
-            # known). No separate action needed: the always-following
-            # c4.kp.cc carries the resolved click count.
-            _LOGGER.debug("C4 state: keypad click, button = %s", data[0] if data else "?")
+            # KPZ-6B1 — click complete, sent the moment a quick press is
+            # released (before the click count is known). KEYPAD_EVENT_MAP
+            # maps it to SHORT_PRESS, which turns the button's
+            # binary_sensor off right away.
+            if data:
+                self._handle_button_event(namespace, data[0])
         elif namespace == "c4.kp.cc":
-            # KPZ-6B1 — click count confirmation, same shape as c4.dmx.cc/
-            # c4.dm.cc (button, click count).
-            if len(data) >= 2:
-                self._handle_button_event(namespace, data[0], data[1])
+            # KPZ-6B1 — click count (button, count), sent only after the
+            # multi-click window closes. Ignored: the click was already
+            # handled at c4.kp.bc.
+            _LOGGER.debug("C4 state: ignoring keypad click count %s", data)
         elif namespace == "c4.zr.bb":
             # SR260 remote — button begin (key down). data[0] = button id (hex).
             if data:
@@ -287,21 +290,21 @@ class C4ButtonCluster(EventableCluster):
         can't reuse _handle_button_event's normal "code after the last
         dot, button/extra as data fields" shape.
 
-        Two codes confirmed:
-          c — click-begin: fires the instant the button goes down,
-              followed ~1.5-2s later by the usual c4.dm.cc click-count
-              confirmation (see _handle_state_announcement) once the
-              device's click-debounce window closes.
-          b / e — hold-begin / hold-end: 'b' fires immediately on press
-              (same instant as 'c' would for a plain click — the device
-              can't yet know which one it'll become), 'e' fires only
-              once the button is actually released, however long it was
-              held.
-        Since 'c' and 'b' both mark "the button just went down" before
-        the outcome is known, both map to the same "press" action; 'e'
-        maps to LONG_RELEASE, which _fire_button_zha_event already
-        treats as a release (turns the binary_sensor back off), same as
-        the click-count confirmation does for a plain click.
+        Three codes confirmed:
+          c — click: a quick press, sent once it's released. A hold never
+              sends 'c' (only b/e), so the device can't be sending it at
+              press-down — there is no press-down message for a click at
+              all. ~1.7 s later the device also sends c4.dm.cc (click
+              count) once its multi-click window closes.
+          b / e — hold-begin / hold-end: 'b' once the press is long
+              enough to count as a hold (button still down), 'e' when
+              it's released.
+
+        'b' maps to "press" (binary_sensor on) and 'e' to LONG_RELEASE
+        (off). With CLICK_AT_RELEASE, 'c' fires "press" then SHORT_PRESS
+        back to back — the binary_sensor pulses on/off at the release and
+        c4.dm.cc is ignored. Otherwise 'c' maps to "press" and the later
+        c4.dm.cc turns the sensor off.
         """
         button_hex, code = namespace[7], namespace[8]
         try:
@@ -311,6 +314,14 @@ class C4ButtonCluster(EventableCluster):
             return
         button_name = self.BUTTON_MAP.get(button_id, f"button_{button_id:#04x}")
 
+        if code == "c" and self.CLICK_AT_RELEASE:
+            _LOGGER.debug(
+                "C4 button event: button=%s click (namespace=%s)",
+                button_name, namespace,
+            )
+            self._fire_button_zha_event("press", button_id, button_name)
+            self._fire_button_zha_event(SHORT_PRESS, button_id, button_name)
+            return
         if code in ("c", "b"):
             action = "press"
         elif code == "e":
@@ -352,6 +363,12 @@ class C4ButtonCluster(EventableCluster):
     # across every C4ButtonCluster subclass isn't safe once a new device
     # reuses a letter code with different semantics.
     EVENT_MAP = DIMMER_EVENT_MAP
+
+    # True for devices with per-button binary_sensors: a click is handled
+    # the moment it's released (c4.dm.b<btn>c / c4.kp.bc) and the delayed
+    # click-count messages (c4.dm.cc / c4.kp.cc) are ignored, so double/
+    # triple clicks aren't reported. The outlets keep the old behavior.
+    CLICK_AT_RELEASE = False
 
     def _resolve_action(self, event_code, extra):
         """Map an event_code (+ optional click-count extra) to a zha_event action."""
@@ -637,6 +654,7 @@ class C4DimmerButtonCluster(C4ButtonCluster):
     """
 
     BUTTON_MAP = APD120_BUTTON_MAP
+    CLICK_AT_RELEASE = True
 
     def _fire_button_zha_event(self, action, button_id, button_name):
         ep_id = DIMMER_BUTTON_EVENT_EP_MAP.get(button_name)
@@ -732,6 +750,8 @@ class C4SwitchButtonClusterWithBinarySensor(C4SwitchButtonCluster):
     c4.dmx.* protocol), unlike C4DimmerButtonCluster, which overrides it to
     APD120_BUTTON_MAP for the dimmer's different c4.dm.* protocol.
     """
+
+    CLICK_AT_RELEASE = True
 
     def _fire_button_zha_event(self, action, button_id, button_name):
         ep_id = DIMMER_BUTTON_EVENT_EP_MAP.get(button_name)
@@ -880,12 +900,12 @@ class C4KeypadButtonCluster(C4ButtonCluster):
     and _fire_button_zha_event() overridden to route to the matching
     virtual per-button endpoint instead of firing on this cluster's own
     endpoint — present_value goes True on "press" (c4.kp.bb) and False
-    once the press resolves (a simple click via c4.kp.cc, or a hold
-    ending via c4.kp.be).
+    on release (a click via c4.kp.bc, or a hold ending via c4.kp.be).
     """
 
     BUTTON_MAP = KPZ6B1_BUTTON_MAP
     EVENT_MAP  = KEYPAD_EVENT_MAP
+    CLICK_AT_RELEASE = True
 
     def handle_message(self, hdr, args):
         device = self.endpoint.device
@@ -977,10 +997,7 @@ class C4KeypadButtonCluster(C4ButtonCluster):
         btn_cluster.listener_event("zha_send_event", action, {ENDPOINT_ID: ep_id})
         if action == "press":
             btn_cluster.set_pressed(True)
-        elif action in (
-            SHORT_PRESS, DOUBLE_PRESS, TRIPLE_PRESS, QUADRUPLE_PRESS,
-            LONG_RELEASE,
-        ):
+        elif action in (SHORT_PRESS, LONG_RELEASE):
             btn_cluster.set_pressed(False)
         _LOGGER.debug(
             "C4 keypad button: fired %r for %s on EP %d",

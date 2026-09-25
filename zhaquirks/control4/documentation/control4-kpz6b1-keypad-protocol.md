@@ -32,8 +32,8 @@ SR260's `c4.zr.*`. Button id is a single hex digit (`0`–`5`), always a
 | Command | Direction | Description |
 |---|---|---|
 | `c4.kp.bb <btn>` | Device → Coordinator | Press-begin — fires immediately on press-down |
-| `c4.kp.bc <btn>` | Device → Coordinator | Click complete (quick release, no count yet — informational, `cc` always follows) |
-| `c4.kp.cc <btn> <count>` | Device → Coordinator | Click-count confirmation (same shape as `c4.dmx.cc`/`c4.dm.cc` elsewhere in this family) |
+| `c4.kp.bc <btn>` | Device → Coordinator | Click complete — sent the moment a quick press is released, before the count is known (`cc` always follows) |
+| `c4.kp.cc <btn> <count>` | Device → Coordinator | Click-count confirmation, sent only after the multi-click window closes (same shape as `c4.dmx.cc`/`c4.dm.cc` elsewhere in this family). Ignored by the quirk. |
 | `c4.kp.bh <btn>` | Device → Coordinator | Hold (repeats while held) |
 | `c4.kp.be <btn>` | Device → Coordinator | Hold-end (release after a hold) |
 | `c4.kp.bhp` | Coordinator → Device (Get) | Hold-period threshold, e.g. `01f4` = 500ms |
@@ -156,8 +156,10 @@ not needed for driving colors:
 
 - **6 binary_sensor entities** (press/release) — `BinaryInput` clusters on
   virtual endpoints 200–205, one per button. Present-value goes `True` on
-  `press` (`c4.kp.bb`) and `False` once the press resolves (a simple click
-  via `c4.kp.cc`, or a hold ending via `c4.kp.be`).
+  `press` (`c4.kp.bb`) and `False` on release: a click via `c4.kp.bc`
+  (which also fires `remote_button_short_press`), or a hold ending via
+  `c4.kp.be`. `c4.kp.cc` is ignored, so double/triple clicks aren't
+  reported — each click is its own `short_press`.
 - **6 RGB light entities** (current color) — `OnOff` + `LevelControl` +
   `Color` (XY mode) on virtual endpoints 210–215, one per button. See
   `c4_led_rgb.py`'s module docstring for the general RGB-light-entity

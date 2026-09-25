@@ -245,13 +245,16 @@ Default transition time: 750 ms for both on and off (configurable via the
 standard Off/On/Off-On Transition Time Number entities), default on-level
 of ~75%.
 
-**Button events:** the top and bottom paddle buttons each get their own HA
-Event entity (visible in Developer Tools -> States, with history) — not just
-an automation trigger. Available actions: `press` (immediate, on physical
-press-down, before a click/hold resolves), `remote_button_short_press` /
-`_double_press` / `_triple_press` / `_quadruple_press` (resolved once
+**Button events:** the top and bottom paddle buttons each get their own
+`binary_sensor` entity (visible in Developer Tools -> States, with
+history) — not just an automation trigger. Available actions: `press`,
+`remote_button_short_press` (a click, reported the moment it's
 released), and `remote_button_long_press` / `_long_release` (holding the
-button down).
+button down). The device only reports a click on release (`c4.dm.b<n>c`),
+so for a click the binary_sensor turns on and off at the same moment; for
+a hold it stays on until release. Multi-clicks aren't reported: each
+click of a double click is its own `short_press`. Same for the LSZ-101
+switch.
 
 > **Note:** commanding the light to 100% (the ZCL maximum, 254) settles at
 > ~99% — the device's own firmware appears to compute its displayed
@@ -316,9 +319,11 @@ physical controller's recovery partition, are in
 [`documentation/control4-kpz6b1-keypad-protocol.md`](documentation/control4-kpz6b1-keypad-protocol.md).
 
 **Button events:** each button fires `press` immediately on press-down,
-then one of `remote_button_short_press` / `_double_press` /
-`_triple_press` / `_quadruple_press` (a resolved click) or
-`remote_button_long_press` / `_long_release` (holding the button down) —
+then `remote_button_short_press` the moment a click is released
+(`c4.kp.bc`, which also turns the binary_sensor off), or
+`remote_button_long_press` / `_long_release` (holding the button down).
+Multi-clicks aren't reported (the delayed `c4.kp.cc` click count is
+ignored) —
 the same action set as the LDZ-101 dimmer's own button events.
 
 **LED colors:** each button's light entity sets its own current color via
