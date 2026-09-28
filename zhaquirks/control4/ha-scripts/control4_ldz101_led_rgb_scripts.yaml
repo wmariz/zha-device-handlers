@@ -1,37 +1,27 @@
-# Control4 LDZ-101 dimmer / KPZ-6B1 keypad — "Set All LEDs" RGB script
+# Control4 LDZ-101 dimmer / LSZ-101 switch / KPZ-6B1 keypad — "Set All LEDs"
 #
 # Add this to your scripts.yaml or paste into the HA Script editor (YAML mode).
 #
-# Unlike control4_led_scripts.yaml (which targets C4LEDCluster/c4.dmx.led on
-# endpoint 3 — the KC120277 scene-controller's protocol, very likely
-# non-functional on the LDZ-101/KPZ-6B1's own LEDs), this script targets each
-# device's own confirmed protocol:
-#   - LDZ-101 (Control4 APD120/LDZ-101 dimmer): the four per-button RGB
-#     "light" entities this quirk exposes (c4_led_rgb.py, endpoints 202-205),
-#     which speak the LDZ-101's own confirmed c4.dm.l0o/l0f/l1o/l1f protocol.
-#     CONFIRMED from two real HC300 controller logs: Control4's own
-#     SET_ALL_LED command sets all four wire commands — c4.dm.l0o/l0f
-#     (top on/off-color) and c4.dm.l1o/l1f (bottom on/off-color) — to the
-#     exact same RGB in one action.
-#   - KPZ-6B1 (Control4 6-button keypad): C4KeypadAllLedCluster's
-#     set_all_colors command (c4_keypad_led_rgb.py, endpoint 197, cluster
-#     0xFC48/64584), which sends `c4.kp.lv ff ff <c>x6` in a single wire
-#     frame — CONFIRMED from a real Composer "SET_ALL_LED_COLOR" script
-#     capture, where every button was set to the same color at once.
+# Both device families expose the same "set all LEDs" command (endpoint 197,
+# cluster 0xFC48/64584, command 0: red, green, blue, leds), which sends the
+# requested RGB bytes to the LEDs unchanged:
+#   - LDZ-101 / LSZ-101: C4DimmerAllLedCluster (c4_led_rgb.py) — sends
+#     c4.dm.l0o/l1o/l0f/l1f (top/bottom on-/off-color), CONFIRMED from real
+#     HC300 controller logs of Control4's own SET_ALL_LED.
+#   - KPZ-6B1: C4KeypadAllLedCluster (c4_keypad_led_rgb.py) — one
+#     `c4.kp.lv ff ff <c>x6` frame (CONFIRMED from a Composer
+#     "SET_ALL_LED_COLOR" capture), always with all 6 colors.
 #
-# The device picker only allows these two models (filtered by manufacturer
-# "Control4" + model "LDZ-101"/"KPZ-6B1" — the model string this quirks
-# package sets on the zigpy device, see c4_basic_cluster.py), so there is no
-# need to pick a device type separately: the script detects which one was
-# selected and issues the right command automatically.
+# This used to call light.turn_on(rgb_color=...) on the dimmer's LED
+# entities instead. Home Assistant converts that RGB to xy, keeping only
+# hue/saturation, so every dark color reached the LED at full brightness
+# (e.g. (40,0,0) -> ff0000) — the direct command avoids that.
 #
-# Prerequisites:
-#   - ZHA integration with the control4 quirks branch loaded
-#   - LDZ-101: the four RGB light entities from c4_led_rgb.py present on the
-#     target device (endpoints 202 "top on", 203 "bottom on", 204 "top off",
-#     205 "bottom off")
-#   - KPZ-6B1: C4KeypadAllLedCluster present on endpoint 197 of the target
-#     device (control4_keypad.py)
+# Dimmer/switch: each LED is a separate wire command, so only LEDs whose
+# light entity is ENABLED are set (`leds` bitmask), to send as few
+# commands as possible. LED entities are matched by the entity_id suffix
+# the quirk's default names produce; if one was renamed, the script stops
+# with a notification instead of guessing.
 
 
 # ==========================================================================
@@ -41,19 +31,15 @@
 control4_ldz101_set_all_leds:
   alias: "Control4: Set All LEDs"
   description: >-
-    Set every LED-color entity on a Control4 APD120/LDZ-101 dimmer or
-    KPZ-6B1 keypad to the same RGB in one call. For the dimmer this
-    replicates Control4's own SET_ALL_LED command exactly (top/bottom,
-    on-color and off-color); for the keypad it uses the confirmed
-    set_all_colors command to set all 6 buttons' current color in a single
-    wire frame. Just pick the device — only LDZ-101/KPZ-6B1 devices are
-    selectable, and the right method is used automatically.
+    Set the LEDs of a Control4 LDZ-101 dimmer, LSZ-101 switch or KPZ-6B1
+    keypad to the same exact RGB. Keypad: all 6 in one frame. Dimmer/
+    switch: only the LEDs whose entity is enabled. Just pick the device.
   icon: mdi:led-strip-variant
   mode: single
   fields:
     target_device:
-      name: Control4 LDZ-101 dimmer or KPZ-6B1 keypad
-      description: "Select the ZHA device — LDZ-101 dimmer or KPZ-6B1 keypad only"
+      name: Control4 LDZ-101 dimmer, LSZ-101 switch or KPZ-6B1 keypad
+      description: "Select the ZHA device — LDZ-101, LSZ-101 or KPZ-6B1 only"
       required: true
       selector:
         device:
@@ -63,10 +49,13 @@ control4_ldz101_set_all_leds:
               model: LDZ-101
             - integration: zha
               manufacturer: Control4
+              model: LSZ-101
+            - integration: zha
+              manufacturer: Control4
               model: KPZ-6B1
     color:
       name: Color
-      description: "LED color for every LED entity/button"
+      description: "LED color"
       required: true
       default: [255, 0, 0]
       selector:
@@ -75,6 +64,8 @@ control4_ldz101_set_all_leds:
     is_keypad: "{{ device_attr(target_device, 'model') == 'KPZ-6B1' }}"
     ieee: >-
       {{ (device_attr(target_device, 'identifiers') | list)[0][1] }}
+    # Enabled LED light entities (device_entities() only lists ENABLED
+    # entities): the xy-color lights. Used for the UI refresh below.
     led_entities: >-
       {{ device_entities(target_device)
          | select('match', '^light\\.')
@@ -83,11 +74,32 @@ control4_ldz101_set_all_leds:
              | selectattr('attributes.supported_color_modes', 'contains', 'xy')
              | map(attribute='entity_id') | list)
          | list }}
+    # Dimmer/switch only: each LED is its own wire command, so send only to
+    # enabled ones. They're identified by the entity_id suffix the quirk's
+    # default names produce ("LED Top On" -> ..._led_top_on, etc.).
+    # Bit order: 0 top on, 1 bottom on, 2 top off, 3 bottom off.
+    led_mask: >-
+      {%- set bits = {'top_on': 1, 'bottom_on': 2, 'top_off': 4, 'bottom_off': 8} -%}
+      {%- set ns = namespace(mask=0) -%}
+      {%- for e in led_entities
+            if e is match('^light\\..*_led_(top|bottom)_(on|off)$') -%}
+        {%- set key = e | regex_findall_index('_led_((?:top|bottom)_(?:on|off))$') -%}
+        {%- set ns.mask = ns.mask + bits[key] -%}
+      {%- endfor -%}
+      {{ ns.mask }}
+    # Dimmer/switch LED entities whose entity_id doesn't match (renamed):
+    # refuse rather than silently skip them.
+    renamed_leds: >-
+      {{ led_entities
+         | reject('match', '^light\\..*_led_(top|bottom)_(on|off)$')
+         | list }}
   sequence:
     - choose:
+        # KPZ-6B1: one wire frame always carries all 6 colors, so it's
+        # sent regardless of which LED entities are enabled.
         - conditions: "{{ is_keypad }}"
           sequence:
-            - service: zha.issue_zigbee_cluster_command
+            - action: zha.issue_zigbee_cluster_command
               data:
                 ieee: "{{ ieee }}"
                 endpoint_id: 197
@@ -96,20 +108,45 @@ control4_ldz101_set_all_leds:
                 command: 0
                 command_type: server
                 params:
-                  red: "{{ color[0] | int(255) }}"
+                  red: "{{ color[0] | int(0) }}"
                   green: "{{ color[1] | int(0) }}"
                   blue: "{{ color[2] | int(0) }}"
-            # ZHA's light platform only re-reads a Color cluster's
-            # current_x/current_y on a 45-75 MINUTE periodic poll — it
-            # never reacts to the raw wire command above. Force that
-            # poll to run right now instead of waiting up to an hour
-            # for the light cards to catch up to the color just sent.
-            - service: homeassistant.update_entity
-              target:
-                entity_id: "{{ led_entities }}"
       default:
-        - service: light.turn_on
+        # LDZ-101 / LSZ-101: one wire command per LED — only enabled ones.
+        - if: "{{ renamed_leds | count > 0 }}"
+          then:
+            - action: persistent_notification.create
+              data:
+                title: "Control4: Set All LEDs"
+                message: >-
+                  Não sei a qual LED correspondem estas entidades
+                  (entity_id renomeado?): {{ renamed_leds | join(', ') }}.
+                  Volte o sufixo para _led_top_on, _led_bottom_on,
+                  _led_top_off ou _led_bottom_off.
+            - stop: "LED entity_id not recognized"
+              error: true
+        - if: "{{ led_mask | int == 0 }}"
+          then:
+            - stop: "No enabled LED entities on this device"
+        - action: zha.issue_zigbee_cluster_command
+          data:
+            ieee: "{{ ieee }}"
+            endpoint_id: 197
+            cluster_id: 64584
+            cluster_type: in
+            command: 0
+            command_type: server
+            params:
+              red: "{{ color[0] | int(0) }}"
+              green: "{{ color[1] | int(0) }}"
+              blue: "{{ color[2] | int(0) }}"
+              leds: "{{ led_mask | int }}"
+    # ZHA's light platform only re-reads a Color cluster's current_x/
+    # current_y on a 45-75 MINUTE periodic poll — it never reacts to the
+    # raw wire command above. Force that poll now so the light cards
+    # catch up to the color just sent.
+    - if: "{{ led_entities | count > 0 }}"
+      then:
+        - action: homeassistant.update_entity
           target:
             entity_id: "{{ led_entities }}"
-          data:
-            rgb_color: "{{ color }}"

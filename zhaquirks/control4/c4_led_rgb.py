@@ -103,6 +103,8 @@ Exported:
   C4BottomLedOffColorCluster — bottom LED off-color cluster (c4.dm.l1f, CONFIRMED)
   LED_COLOR_EP_MAP           — {"top": ep_id, "bottom": ep_id} (on-color)
   LED_OFF_COLOR_EP_MAP       — {"top": ep_id, "bottom": ep_id} (off-color)
+  C4DimmerAllLedCluster      — exact-RGB "set all LEDs" command (EP197, 0xFC48)
+  rgb_to_xy_level / sync_led_entity — shared with c4_keypad_led_rgb.py
 """
 
 import logging
@@ -114,10 +116,12 @@ _QUIRK_DIR = os.path.dirname(os.path.abspath(__file__))
 if _QUIRK_DIR not in sys.path:
     sys.path.insert(0, _QUIRK_DIR)
 
+import zigpy.types as t
 from zigpy.quirks import CustomCluster
 from zigpy.zcl import foundation
 from zigpy.zcl.clusters.general import LevelControl, OnOff
 from zigpy.zcl.clusters.lighting import Color
+from zigpy.zcl.foundation import BaseCommandDefs, ZCLCommandDef
 from zigpy.zcl.foundation import Status as ZCLStatus
 
 from c4_helpers import C4_CLUSTER_ID, C4_PROFILE_BUTTON, _build_c4_frame, next_c4_seq
@@ -130,43 +134,115 @@ LED_COLOR_EP_MAP = {"top": 202, "bottom": 203}
 # top/bottom LED off-color light — one virtual endpoint each
 LED_OFF_COLOR_EP_MAP = {"top": 204, "bottom": 205}
 
+# "Set all LEDs" cluster (same ID on the dimmer/switch and the KPZ-6B1).
+C4_ALL_LED_CLUSTER_ID = 0xFC48
 
-def _gamma_correct(c: float) -> int:
-    """Linear sRGB component (0-1) -> gamma-corrected 0-255 byte."""
-    c = max(0.0, min(1.0, c))
-    if c <= 0.0031308:
-        c = 12.92 * c
+# Bit order of C4DimmerAllLedCluster.set_all_colors' `leds` mask.
+DIMMER_ALL_LED_MASK_EPS = (
+    LED_COLOR_EP_MAP["top"],         # bit 0 — top on-color
+    LED_COLOR_EP_MAP["bottom"],      # bit 1 — bottom on-color
+    LED_OFF_COLOR_EP_MAP["top"],     # bit 2 — top off-color
+    LED_OFF_COLOR_EP_MAP["bottom"],  # bit 3 — bottom off-color
+)
+
+
+# Both conversions below mirror Home Assistant's own (homeassistant/util/
+# color.py: color_RGB_to_xy_brightness / color_xy_brightness_to_RGB), which
+# use the "Wide RGB D65" matrices from the Philips Hue SDK. HA converts a
+# light.turn_on(rgb_color=...) to xy with the forward matrix before this
+# quirk ever sees it, and renders current_x/current_y back to RGB for its UI
+# with the inverse — using anything else here shifts hues (e.g. ff8000 came
+# out as ff9400 with the plain sRGB matrix this used before).
+
+def rgb_to_xy_level(red: int, green: int, blue: int):
+    """sRGB (0-255 each) -> (CIE x, CIE y, level), all in ZCL raw units.
+
+    level is the color's own luminance (Y) on the 0-254 LevelControl scale,
+    so a dark color gets a low level. Used to keep a LED light entity's
+    cache in sync after a raw-RGB set_all_colors write.
+    """
+    def _gamma_expand(c: int) -> float:
+        c = c / 255.0
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+    r, g, b = _gamma_expand(red), _gamma_expand(green), _gamma_expand(blue)
+
+    x_lin = r * 0.664511 + g * 0.154324 + b * 0.162028
+    y_lin = r * 0.283881 + g * 0.668433 + b * 0.047685
+    z_lin = r * 0.000088 + g * 0.072310 + b * 0.986039
+
+    total = x_lin + y_lin + z_lin
+    if total <= 0:
+        x, y = 0.3127, 0.3290  # D65 white point fallback (black input)
     else:
-        c = 1.055 * (c ** (1.0 / 2.4)) - 0.055
-    return max(0, min(255, round(c * 255)))
+        x, y = x_lin / total, y_lin / total
+
+    level = round(max(0.0, min(1.0, y_lin)) * 254)
+    return round(x * 65535), round(y * 65535), level
 
 
 def _xy_to_rgb_hex(x_raw: int, y_raw: int, level_raw: int) -> str:
     """Convert ZCL CIE xy (0-65535 each) + level (0-254) to an rrggbb hex.
 
-    Standard xyY -> linear sRGB -> gamma-corrected sRGB pipeline (the
-    same formula published by Philips for their Hue bulbs). level_raw=0
-    yields pure black — Control4's own "off" convention for these LEDs —
-    so this one conversion covers both color and on/off, with no
-    separate wire command needed for either.
+    Inverse of rgb_to_xy_level(): xyY -> linear RGB -> gamma-corrected
+    sRGB, then (like HA) negatives clamped to 0 and, if any channel
+    exceeds 1, all three scaled down by it so the hue is preserved rather
+    than clipped. level_raw=0 yields pure black — Control4's own "off"
+    convention for these LEDs — so this one conversion covers both color
+    and on/off, with no separate wire command needed for either.
     """
     x = x_raw / 65535.0
     y = y_raw / 65535.0
-    brightness = min(max(level_raw / 254.0, 0.0), 1.0)
+    big_y = min(max(level_raw / 254.0, 0.0), 1.0)
 
-    if y <= 0 or brightness <= 0:
+    if y <= 0 or big_y <= 0:
         return "000000"
 
-    z = 1.0 - x - y
-    big_y = brightness
     big_x = (big_y / y) * x
-    big_z = (big_y / y) * z
+    big_z = (big_y / y) * (1.0 - x - y)
 
-    r = big_x * 3.2406 + big_y * -1.5372 + big_z * -0.4986
-    g = big_x * -0.9689 + big_y * 1.8758 + big_z * 0.0415
-    b = big_x * 0.0557 + big_y * -0.2040 + big_z * 1.0570
+    r = big_x * 1.656492 - big_y * 0.354851 - big_z * 0.255038
+    g = -big_x * 0.707196 + big_y * 1.655397 + big_z * 0.036152
+    b = big_x * 0.051713 - big_y * 0.121364 + big_z * 1.011530
 
-    return f"{_gamma_correct(r):02x}{_gamma_correct(g):02x}{_gamma_correct(b):02x}"
+    def _gamma_compress(c: float) -> float:
+        return 12.92 * c if c <= 0.0031308 else 1.055 * (c ** (1.0 / 2.4)) - 0.055
+
+    r, g, b = (max(0.0, _gamma_compress(c)) for c in (r, g, b))
+    peak = max(r, g, b)
+    if peak > 1.0:
+        r, g, b = r / peak, g / peak, b / peak
+
+    return "".join(f"{min(255, round(c * 255)):02x}" for c in (r, g, b))
+
+
+def sync_led_entity(ep, red: int, green: int, blue: int) -> None:
+    """Update a LED light endpoint's cached color/brightness/on-off to match
+    a raw RGB just written to the wire by a set_all_colors-style command.
+
+    Those commands bypass the light entity's own clusters, so without this
+    the entity keeps showing (and, on its next on()/brightness change,
+    resends) whatever color was last set through the entity itself. HA's
+    light platform only re-reads current_x/current_y on its periodic poll,
+    so callers (the HA scripts) follow up with homeassistant.update_entity.
+    """
+    x_raw, y_raw, level = rgb_to_xy_level(red, green, blue)
+
+    color = ep.in_clusters.get(Color.cluster_id)
+    if color is not None:
+        color._update_attribute(Color.AttributeDefs.current_x.id, x_raw)
+        color._update_attribute(Color.AttributeDefs.current_y.id, y_raw)
+        color._last_move_to_color_time = time.monotonic()
+
+    level_cluster = ep.in_clusters.get(LevelControl.cluster_id)
+    if level_cluster is not None:
+        level_cluster._update_attribute(
+            LevelControl.AttributeDefs.current_level.id, level,
+        )
+
+    onoff = ep.in_clusters.get(OnOff.cluster_id)
+    if onoff is not None:
+        onoff._update_attribute(OnOff.AttributeDefs.on_off.id, level > 0)
 
 
 class _C4LocalOnlyReadMixin:
@@ -309,8 +385,11 @@ class C4LedColorCluster(_C4LocalOnlyReadMixin, CustomCluster, Color):
         color_y = self.get(self.AttributeDefs.current_y.id, 21845)
         await self._send_color(_xy_to_rgb_hex(color_x, color_y, self._level()))
 
-    async def _send_color(self, rgb_hex: str):
-        """Send a `0s<seq> <namespace> <rrggbb>` LED color command."""
+    async def _send_color(self, rgb_hex: str) -> bool:
+        """Send a `0s<seq> <namespace> <rrggbb>` LED color command.
+
+        Returns True if the frame was handed to the radio.
+        """
         device = self.endpoint.device
         seq = next_c4_seq(device)
         cmd = f"0s{seq:04x} {self._C4_NAMESPACE} {rgb_hex}"
@@ -335,6 +414,8 @@ class C4LedColorCluster(_C4LocalOnlyReadMixin, CustomCluster, Color):
                 "C4 %s (endpoint %d): failed to set color=%s — %s",
                 self._C4_LABEL, self.endpoint.endpoint_id, rgb_hex, e,
             )
+            return False
+        return True
 
 
 class C4TopLedColorCluster(C4LedColorCluster):
@@ -481,3 +562,63 @@ class C4LedOnOff(_C4LocalOnlyReadMixin, CustomCluster, OnOff):
 
         self._update_attribute(self.AttributeDefs.on_off.id, new_state)
         return self._SUCCESS
+
+
+class C4DimmerAllLedCluster(CustomCluster):
+    """Set the LDZ-101/LSZ-101 button LEDs to an exact RGB, bypassing xy.
+
+    A light.turn_on(rgb_color=...) on the LED light entities goes through
+    Home Assistant's RGB -> xy conversion, which keeps only hue/saturation
+    and drops how dark the color is — the quirk then rebuilds RGB from xy
+    plus the entity's current brightness (usually 254), so every dark color
+    reached the LED at full brightness (e.g. (40,0,0) -> ff0000). This
+    sends the requested bytes as-is instead, the same way the KPZ-6B1's
+    C4KeypadAllLedCluster always has, and syncs each LED entity's cache.
+
+    `leds` selects which LEDs to set (bit order: DIMMER_ALL_LED_MASK_EPS,
+    default all four) — the HA script passes only the enabled ones. Lives
+    on EP197 of the dimmer and the switch; call via
+    zha.issue_zigbee_cluster_command (endpoint 197, cluster 0xFC48,
+    command 0).
+    """
+
+    cluster_id = C4_ALL_LED_CLUSTER_ID
+    name = "Control4 Dimmer All-LED Control"
+    ep_attribute = "c4_dimmer_all_led"
+    _c4_custom_handler = False  # no inbound packets for this cluster
+
+    class ServerCommandDefs(BaseCommandDefs):
+        set_all_colors = ZCLCommandDef(
+            id=0x00,
+            schema={
+                "red": t.uint8_t,
+                "green": t.uint8_t,
+                "blue": t.uint8_t,
+                "leds": t.uint8_t,
+            },
+            is_manufacturer_specific=True,
+        )
+
+    async def set_all_colors(self, red, green, blue, leds=0x0F):
+        rgb = (int(red), int(green), int(blue))
+        rgb_hex = "%02x%02x%02x" % rgb
+        mask = int(leds)
+        for bit, ep_id in enumerate(DIMMER_ALL_LED_MASK_EPS):
+            if not mask & (1 << bit):
+                continue
+            ep = self.endpoint.device.endpoints.get(ep_id)
+            color = ep.in_clusters.get(Color.cluster_id) if ep is not None else None
+            if color is None:
+                _LOGGER.warning(
+                    "C4 dimmer_all_led: no LED color cluster on endpoint %d",
+                    ep_id,
+                )
+                continue
+            if await color._send_color(rgb_hex):
+                sync_led_entity(ep, *rgb)
+
+    def handle_cluster_request(self, hdr, args, *, dst_addressing=None):
+        _LOGGER.debug(
+            "C4 dimmer_all_led: unexpected inbound request hdr=%s args=%s",
+            hdr, args,
+        )

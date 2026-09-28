@@ -46,6 +46,7 @@ from c4_attached_switch import (
 from c4_led_rgb import (
     LED_COLOR_EP_MAP,
     LED_OFF_COLOR_EP_MAP,
+    C4DimmerAllLedCluster,
     C4LedOnOff,
     C4LedLevelControl,
     C4TopLedColorCluster,
@@ -149,8 +150,10 @@ _c4_sw120_entry = (
 _c4_sw120_entry = strip_c4_endpoint(_c4_sw120_entry, 196).adds(
     C4ConfigCluster, endpoint_id=196
 )
-_c4_sw120_entry = strip_c4_endpoint(_c4_sw120_entry, 197).adds(
-    C4SwitchButtonClusterWithBinarySensor, endpoint_id=197
+_c4_sw120_entry = (
+    strip_c4_endpoint(_c4_sw120_entry, 197)
+    .adds(C4SwitchButtonClusterWithBinarySensor, endpoint_id=197)
+    .adds(C4DimmerAllLedCluster, endpoint_id=197)
 )
 
 # Virtual per-button endpoints — one binary_sensor entity each in ZHA

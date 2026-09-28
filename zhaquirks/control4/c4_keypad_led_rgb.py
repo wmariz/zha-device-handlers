@@ -39,8 +39,9 @@ Both commands bypass each button's own light entity clusters entirely —
 they write straight to the wire. A real-hardware report showed why that
 matters: after using either command, an affected light entity's HA card
 still showed its old color (or, briefly, the correct brightness/on-state
-but the wrong color — see _rgb_to_xy_level()'s own docstring for a first,
-insufficient fix attempt around the xy<->rgb matrix). _sync_button_entity()
+but the wrong color — the first fix attempt used a different xy<->rgb
+matrix than Home Assistant's own; see c4_led_rgb.rgb_to_xy_level()).
+_sync_button_entity()
 pushes the newly-sent color into the per-button C4KeypadLedColorCluster/
 C4LedOnOff/C4LedLevelControl caches (current_x/current_y/on_off/
 current_level) right after each successful send — necessary but NOT
@@ -93,7 +94,6 @@ Exported:
 import logging
 import os
 import sys
-import time
 
 _QUIRK_DIR = os.path.dirname(os.path.abspath(__file__))
 if _QUIRK_DIR not in sys.path:
@@ -101,59 +101,17 @@ if _QUIRK_DIR not in sys.path:
 
 import zigpy.types as t
 from zigpy.quirks import CustomCluster
-from zigpy.zcl.clusters.general import LevelControl, OnOff
-from zigpy.zcl.clusters.lighting import Color
 from zigpy.zcl.foundation import BaseCommandDefs, ZCLCommandDef
 
 from c4_helpers import (
     C4_CLUSTER_ID, C4_PROFILE_BUTTON, KPZ6B1_BUTTON_MAP, KPZ6B1_LED_EP_MAP,
     _build_c4_frame, next_c4_seq,
 )
-from c4_led_rgb import C4LedColorCluster
+from c4_led_rgb import C4_ALL_LED_CLUSTER_ID, C4LedColorCluster, sync_led_entity
 
 _LOGGER = logging.getLogger(__name__)
 
-C4_KEYPAD_ALL_LED_CLUSTER_ID = 0xFC48
-
-
-def _rgb_to_xy_level(red: int, green: int, blue: int):
-    """sRGB (0-255 each) -> (CIE x, CIE y, level), all in ZCL raw units.
-
-    CONFIRMED WRONG once: an earlier version of this function used the
-    standard/narrow sRGB D65 XYZ matrix — the exact inverse of
-    c4_led_rgb._xy_to_rgb_hex's own matrix, which is what actually goes
-    out on the wire (so the physical LED was never affected). But Home
-    Assistant's own light platform renders an xy-mode entity's displayed
-    color using ITS OWN xy<->rgb conversion (homeassistant.util.color),
-    which uses a DIFFERENT matrix — the "Wide RGB D65" formula also used
-    by the Philips Hue SDK — not the narrow sRGB one. Feeding that
-    function's inverse's output back through HA's own (different)
-    forward formula produced a visibly wrong color in the HA UI (the
-    physical device was always correct, only the on-screen card was
-    off). Fixed by matching HA's own matrix exactly here, so the value
-    written to current_x/current_y round-trips correctly through HA's
-    own renderer.
-    """
-    def _gamma_expand(c: int) -> float:
-        c = c / 255.0
-        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
-
-    r, g, b = _gamma_expand(red), _gamma_expand(green), _gamma_expand(blue)
-
-    # Wide RGB D65 conversion formula — matches Home Assistant's
-    # color_RGB_to_xy_brightness() (homeassistant/util/color.py) exactly.
-    x_lin = r * 0.664511 + g * 0.154324 + b * 0.162028
-    y_lin = r * 0.283881 + g * 0.668433 + b * 0.047685
-    z_lin = r * 0.000088 + g * 0.072310 + b * 0.986039
-
-    total = x_lin + y_lin + z_lin
-    if total <= 0:
-        x, y = 0.3127, 0.3290  # D65 white point fallback (black input)
-    else:
-        x, y = x_lin / total, y_lin / total
-
-    level = round(max(0.0, min(1.0, y_lin)) * 254)
-    return round(x * 65535), round(y * 65535), level
+C4_KEYPAD_ALL_LED_CLUSTER_ID = C4_ALL_LED_CLUSTER_ID
 
 
 class C4KeypadLedColorCluster(C4LedColorCluster):
@@ -164,8 +122,11 @@ class C4KeypadLedColorCluster(C4LedColorCluster):
 
     _BUTTON_IDX: int = 0
 
-    async def _send_color(self, rgb_hex: str):
-        """Send a `0s<seq> c4.kp.lv <btn> <rrggbb>` LED color command."""
+    async def _send_color(self, rgb_hex: str) -> bool:
+        """Send a `0s<seq> c4.kp.lv <btn> <rrggbb>` LED color command.
+
+        Returns True if the frame was handed to the radio.
+        """
         device = self.endpoint.device
         seq = next_c4_seq(device)
         cmd = f"0s{seq:04x} c4.kp.lv {self._BUTTON_IDX:02x} {rgb_hex}"
@@ -192,6 +153,8 @@ class C4KeypadLedColorCluster(C4LedColorCluster):
                 "set color=%s — %s",
                 self._BUTTON_IDX, self.endpoint.endpoint_id, rgb_hex, e,
             )
+            return False
+        return True
 
 
 def _make_keypad_led_color_cluster(btn_id: int) -> type:
@@ -232,10 +195,14 @@ class C4KeypadAllLedCluster(CustomCluster):
         cluster_type: in
         command: 0          # set_all_colors
         command_type: server
-        args:
-          - 255   # red
-          - 0     # green
-          - 0     # blue
+        params:
+          red: 255
+          green: 0
+          blue: 0
+
+    Always one frame carrying all 6 colors — even for buttons whose LED
+    light entity is disabled in HA, since one frame is faster than any
+    per-button subset.
     """
 
     cluster_id = C4_KEYPAD_ALL_LED_CLUSTER_ID
@@ -270,42 +237,14 @@ class C4KeypadAllLedCluster(CustomCluster):
         )
 
     def _sync_button_entity(self, btn_id: int, red: int, green: int, blue: int):
-        """Update button `btn_id`'s light entity cache to match `red/green/blue`.
+        """Keep button `btn_id`'s LED light entity cache matching what was sent.
 
-        set_all_colors/set_individual_colors send the raw c4.kp.lv wire
-        command directly, bypassing each button's own C4KeypadLedColorCluster/
-        C4LedOnOff/C4LedLevelControl (endpoints 210-215 — see
-        c4_led_rgb.py). Left alone, those clusters' cached current_x/
-        current_y/on_off/current_level stay whatever they were last set
-        to through the individual per-button light entity, which is both
-        visibly wrong in the HA UI (light card shows the old color) and
-        the likely source of a CONFIRMED bug: a stale cached color
-        reappeared on the physical button's LED right after a press,
-        overwriting the color this cluster had just set — closing this
-        gap keeps every cache consistent with the last color actually
-        sent to the device.
+        Without this, a stale cached color also reappeared on the physical
+        LED right after a press (CONFIRMED) — see sync_led_entity().
         """
         ep = self.endpoint.device.endpoints.get(KPZ6B1_LED_EP_MAP.get(btn_id))
-        if ep is None:
-            return
-
-        x_raw, y_raw, level = _rgb_to_xy_level(red, green, blue)
-
-        color = ep.in_clusters.get(Color.cluster_id)
-        if color is not None:
-            color._update_attribute(Color.AttributeDefs.current_x.id, x_raw)
-            color._update_attribute(Color.AttributeDefs.current_y.id, y_raw)
-            color._last_move_to_color_time = time.monotonic()
-
-        level_cluster = ep.in_clusters.get(LevelControl.cluster_id)
-        if level_cluster is not None:
-            level_cluster._update_attribute(
-                LevelControl.AttributeDefs.current_level.id, level,
-            )
-
-        onoff = ep.in_clusters.get(OnOff.cluster_id)
-        if onoff is not None:
-            onoff._update_attribute(OnOff.AttributeDefs.on_off.id, level > 0)
+        if ep is not None:
+            sync_led_entity(ep, red, green, blue)
 
     async def _send_all(self, rgb_values: list):
         """Send `0s<seq> c4.kp.lv ff ff <c1>..<c6>` in one wire frame.

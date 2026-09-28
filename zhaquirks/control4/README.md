@@ -348,16 +348,26 @@ The LDZ-101 dimmer and the KPZ-6B1 keypad have per-button RGB LED
 indicators, each speaking its own protocol — a script written for one
 device does not work on the other.
 
-### `control4_ldz101_led_rgb_scripts.yaml` — LDZ-101 dimmer *or* KPZ-6B1 keypad
+### `control4_ldz101_led_rgb_scripts.yaml` — LDZ-101 dimmer, LSZ-101 switch *or* KPZ-6B1 keypad
 
-**`control4_ldz101_set_all_leds`** — a single script that targets either
-the LDZ-101 dimmer's 4 LED light entities (top/bottom, on/off-color) or
-the KPZ-6B1 keypad's 6 buttons, picking the right method automatically
-based on which device you select (the device picker only allows these
-two models). One RGB color field, applied to every LED entity/button on
-the chosen device. For the dimmer this replicates Control4's own
-SET_ALL_LED command exactly; for the keypad it calls
-`C4KeypadAllLedCluster.set_all_colors`.
+**`control4_ldz101_set_all_leds`** — one RGB color field, applied to the
+chosen device's LEDs through its "set all LEDs" command (endpoint 197,
+cluster `0xFC48`), which sends the exact RGB bytes to the device:
+- **KPZ-6B1:** one wire frame with all 6 colors
+  (`C4KeypadAllLedCluster.set_all_colors`), whether or not each LED's
+  light entity is enabled.
+- **LDZ-101 / LSZ-101:** one wire command per LED
+  (`C4DimmerAllLedCluster.set_all_colors`), sent only to LEDs whose light
+  entity is **enabled**, to keep the number of commands down. LED entities
+  are recognized by their default entity_id suffix (`_led_top_on`,
+  `_led_bottom_on`, `_led_top_off`, `_led_bottom_off`); if one was
+  renamed, the script stops with a notification.
+
+Setting a LED color through its light entity (the card's color picker, or
+`light.turn_on` with `rgb_color`) goes through Home Assistant's RGB → xy
+conversion, which keeps only the hue and saturation: the brightness comes
+from the entity's brightness slider, not from how dark the chosen color is.
+To set an exact (e.g. dark) color, use the scripts.
 
 ### `control4_kpz6b1_individual_leds_script.yaml` — KPZ-6B1 keypad only
 
