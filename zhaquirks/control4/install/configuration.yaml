@@ -1,0 +1,5 @@
+zha:
+  enable_quirks: true
+  custom_quirks_path: /config/custom_zha_quirks
+
+script control4: !include_dir_merge_named custom_zha_quirks/control4/ha-scripts
