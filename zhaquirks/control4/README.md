@@ -375,10 +375,9 @@ cluster `0xFC48`), which sends the exact RGB bytes to the device:
   light entity is enabled.
 - **LDZ-101 / LSZ-101:** one wire command per LED
   (`C4DimmerAllLedCluster.set_all_colors`), sent only to LEDs whose light
-  entity is **enabled**, to keep the number of commands down. LED entities
-  are recognized by their default entity_id suffix (`_led_top_on`,
-  `_led_bottom_on`, `_led_top_off`, `_led_bottom_off`); if one was
-  renamed, the script stops with a notification.
+  entity is **enabled**, to keep the number of commands down. The quirk
+  checks this itself (Home Assistant mirrors each entity's disabled state
+  into the zha library), so entity names don't matter.
 
 Setting a LED color through its light entity (the card's color picker, or
 `light.turn_on` with `rgb_color`) goes through Home Assistant's RGB → xy

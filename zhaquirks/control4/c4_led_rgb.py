@@ -564,6 +564,42 @@ class C4LedOnOff(_C4LocalOnlyReadMixin, CustomCluster, OnOff):
         return self._SUCCESS
 
 
+def _zha_device_of(cluster):
+    """The zha library Device wrapping `cluster`'s device, or None.
+
+    zha attaches an event forwarder as a listener to every cluster on a
+    ZHA-profile endpoint; it holds the zha Endpoint, whose .device lists
+    the device's platform entities. Private structure, so any mismatch
+    just returns None.
+    """
+    for listener, _ in list(getattr(cluster, "_listeners", {}).values()):
+        device = getattr(getattr(listener, "_endpoint", None), "device", None)
+        if device is not None and hasattr(device, "platform_entities"):
+            return device
+    return None
+
+
+def led_entity_enabled(cluster, ep_id: int) -> bool:
+    """False if Home Assistant has the light entity on `ep_id` disabled.
+
+    Home Assistant's ZHA integration mirrors each entity registry entry's
+    disabled state onto the zha library entity (entity.disable()/enable()).
+    True when that can't be determined, so a lookup failure never silently
+    drops a LED.
+    """
+    device = _zha_device_of(cluster)
+    if device is None:
+        return True
+    for entity in list(device.platform_entities.values()):
+        endpoint = getattr(entity, "endpoint", None)
+        if (
+            str(getattr(entity, "PLATFORM", "")) == "light"
+            and getattr(endpoint, "id", None) == ep_id
+        ):
+            return bool(entity.enabled)
+    return True
+
+
 class C4DimmerAllLedCluster(CustomCluster):
     """Set the LDZ-101/LSZ-101 button LEDs to an exact RGB, bypassing xy.
 
@@ -575,11 +611,12 @@ class C4DimmerAllLedCluster(CustomCluster):
     sends the requested bytes as-is instead, the same way the KPZ-6B1's
     C4KeypadAllLedCluster always has, and syncs each LED entity's cache.
 
-    `leds` selects which LEDs to set (bit order: DIMMER_ALL_LED_MASK_EPS,
-    default all four) — the HA script passes only the enabled ones. Lives
-    on EP197 of the dimmer and the switch; call via
-    zha.issue_zigbee_cluster_command (endpoint 197, cluster 0xFC48,
-    command 0).
+    Each LED is its own wire command, so LEDs whose light entity is
+    disabled in Home Assistant are skipped (fewest commands, fastest
+    response). `leds` optionally narrows the set further (bit order:
+    DIMMER_ALL_LED_MASK_EPS, default all four). Lives on EP197 of the
+    dimmer and the switch; call via zha.issue_zigbee_cluster_command
+    (endpoint 197, cluster 0xFC48, command 0).
     """
 
     cluster_id = C4_ALL_LED_CLUSTER_ID
@@ -605,6 +642,12 @@ class C4DimmerAllLedCluster(CustomCluster):
         mask = int(leds)
         for bit, ep_id in enumerate(DIMMER_ALL_LED_MASK_EPS):
             if not mask & (1 << bit):
+                continue
+            if not led_entity_enabled(self, ep_id):
+                _LOGGER.debug(
+                    "C4 dimmer_all_led: skipping endpoint %d (entity disabled)",
+                    ep_id,
+                )
                 continue
             ep = self.endpoint.device.endpoints.get(ep_id)
             color = ep.in_clusters.get(Color.cluster_id) if ep is not None else None
