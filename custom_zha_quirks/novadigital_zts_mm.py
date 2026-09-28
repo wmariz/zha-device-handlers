@@ -22,7 +22,15 @@ Note: zha-quirks' ZY_HPS01 quirk maps 111 to the breath MINIMUM and 112 to
 the MAXIMUM, the reverse of zigbee-herdsman-converters; this follows the
 latter. If the two breath-range numbers turn out swapped on the real
 device, swap dp_id 111/112 below.
+
+DEFAULT_SETTINGS (below) are written to each device once, on the first
+message received from it; see NovaDigitalMCUCluster.
 """
+
+import asyncio
+import json
+import logging
+import os
 
 import zigpy.types as t
 from zigpy.zcl.clusters.measurement import OccupancySensing
@@ -30,10 +38,75 @@ from zigpy.zcl.clusters.measurement import OccupancySensing
 from zhaquirks.builder import UnitOfLength, UnitOfTime
 from zhaquirks.tuya import TuyaLocalCluster
 from zhaquirks.tuya.builder import TuyaQuirkBuilder
+from zhaquirks.tuya.mcu import TuyaMCUCluster
+
+_LOGGER = logging.getLogger(__name__)
+
+# Settings written to the device ONCE per device (the first message received
+# from it after this quirk version loads), then never again, so later
+# changes made in Home Assistant stick. Minimum ranges are 0: with min = max
+# the detection window would be empty.
+DEFAULT_SETTINGS = {
+    "presence_timeout": 3,  # s
+    "move_sensitivity": 10,
+    "breath_sensitivity": 10,
+    "move_minimum_range": 0,  # cm
+    "move_maximum_range": 600,
+    "breath_minimum_range": 0,
+    "breath_maximum_range": 600,
+}
+# Devices (IEEE) that already got DEFAULT_SETTINGS. Delete the device's entry
+# (or the whole file) and restart Home Assistant to apply them again.
+_DEFAULTS_STORE = "/config/.storage/novadigital_zts_mm_defaults.json"
+
+
+def _load_applied() -> set[str]:
+    try:
+        with open(_DEFAULTS_STORE) as f:
+            return set(json.load(f))
+    except (FileNotFoundError, json.JSONDecodeError, TypeError):
+        return set()
+
+
+def _save_applied(applied: set[str]) -> None:
+    os.makedirs(os.path.dirname(_DEFAULTS_STORE), exist_ok=True)
+    with open(_DEFAULTS_STORE, "w") as f:
+        json.dump(sorted(applied), f)
+
+
+_APPLIED = _load_applied()
 
 
 class NovaDigitalOccupancySensing(OccupancySensing, TuyaLocalCluster):
     """Occupancy fed by Tuya DP 101."""
+
+
+class NovaDigitalMCUCluster(TuyaMCUCluster):
+    """Tuya MCU cluster that writes DEFAULT_SETTINGS once per device."""
+
+    def handle_cluster_request(self, hdr, args, *, dst_addressing=None):
+        super().handle_cluster_request(hdr, args, dst_addressing=dst_addressing)
+        device = self.endpoint.device
+        ieee = str(device.ieee)
+        if ieee in _APPLIED or getattr(device, "_zts_mm_defaults_pending", False):
+            return
+        device._zts_mm_defaults_pending = True
+        asyncio.get_running_loop().create_task(self._apply_defaults(ieee))
+
+    async def _apply_defaults(self, ieee: str) -> None:
+        device = self.endpoint.device
+        try:
+            _LOGGER.info("ZTS-MM %s: writing default settings %s", ieee, DEFAULT_SETTINGS)
+            await self.write_attributes(dict(DEFAULT_SETTINGS))
+            _APPLIED.add(ieee)
+            await asyncio.get_running_loop().run_in_executor(
+                None, _save_applied, set(_APPLIED)
+            )
+        except Exception:
+            # Leave it unmarked so the next message from the device retries.
+            _LOGGER.warning("ZTS-MM %s: writing default settings failed", ieee, exc_info=True)
+        finally:
+            device._zts_mm_defaults_pending = False
 
 
 (
@@ -123,5 +196,5 @@ class NovaDigitalOccupancySensing(OccupancySensing, TuyaLocalCluster):
         fallback_name="Breath maximum range",
     )
     .skip_configuration()
-    .add_to_registry()
+    .add_to_registry(replacement_cluster=NovaDigitalMCUCluster)
 )
