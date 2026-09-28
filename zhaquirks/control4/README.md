@@ -99,13 +99,16 @@ translate between that protocol and the ZCL interfaces that ZHA expects.
 These quirks live inside the `zha-device-handlers` package. To install:
 
 1. Copy the entire `zhaquirks/control4/` directory into your Home Assistant
-   custom quirks folder. The default location is:
+   custom quirks folder, and copy `install/control4_loader.py` one level
+   up, next to it:
 
    ```
-   <config>/custom_zha_quirks/control4/
+   <config>/custom_zha_quirks/
+   ├── control4_loader.py
+   └── control4/
    ```
 
-2. Make sure custom quirks are enabled in your ZHA configuration. In
+2. Point ZHA at the custom quirks folder itself (not at `control4/`). In
    `configuration.yaml`:
 
    ```yaml
@@ -113,7 +116,21 @@ These quirks live inside the `zha-device-handlers` package. To install:
      custom_quirks_path: /config/custom_zha_quirks
    ```
 
-3. Restart Home Assistant.
+   ZHA only loads `.py` files directly in that folder, plus subfolders that
+   are Python packages. `control4/` isn't one (its modules import each other
+   by plain name), so `control4_loader.py` loads it. Other custom quirks can
+   live in the same folder. Pointing `custom_quirks_path` straight at
+   `/config/custom_zha_quirks/control4` also works, without the loader.
+
+3. To load the included HA scripts automatically, add this next to the
+   usual `script: !include scripts.yaml` line (a script ID must not be
+   defined in both places):
+
+   ```yaml
+   script control4: !include_dir_merge_named custom_zha_quirks/control4/ha-scripts
+   ```
+
+4. Restart Home Assistant.
 
 ZHA will auto-discover the quirks on startup — no additional configuration is
 needed.
