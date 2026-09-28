@@ -19,9 +19,9 @@ Datapoints from zigbee-herdsman-converters (src/devices/tuya.ts, ZY_HPS01):
     111 breath_maximum_range   cm, 0-600
     112 breath_minimum_range   cm, 0-600
 Note: zha-quirks' ZY_HPS01 quirk maps 111 to the breath MINIMUM and 112 to
-the MAXIMUM, the reverse of zigbee-herdsman-converters; this follows the
-latter. If the two breath-range numbers turn out swapped on the real
-device, swap dp_id 111/112 below.
+the MAXIMUM, the reverse of zigbee-herdsman-converters. CONFIRMED on real
+hardware that z2m is right: a data query returned 600 on DP 111 and 100
+on DP 112, matching the device's configured max/min.
 
 DEFAULT_SETTINGS (below) are written to each device once, on the first
 message received from it; see NovaDigitalMCUCluster.
@@ -36,7 +36,7 @@ import zigpy.types as t
 from zigpy.zcl.clusters.measurement import OccupancySensing
 
 from zhaquirks.builder import UnitOfLength, UnitOfTime
-from zhaquirks.tuya import TuyaLocalCluster
+from zhaquirks.tuya import TUYA_QUERY_DATA, TuyaLocalCluster
 from zhaquirks.tuya.builder import TuyaQuirkBuilder
 from zhaquirks.tuya.mcu import TuyaMCUCluster
 
@@ -44,15 +44,14 @@ _LOGGER = logging.getLogger(__name__)
 
 # Settings written to the device ONCE per device (the first message received
 # from it after this quirk version loads), then never again, so later
-# changes made in Home Assistant stick. Minimum ranges are 0: with min = max
-# the detection window would be empty.
+# changes made in Home Assistant stick.
 DEFAULT_SETTINGS = {
-    "presence_timeout": 3,  # s
-    "move_sensitivity": 10,
-    "breath_sensitivity": 10,
-    "move_minimum_range": 0,  # cm
+    "presence_timeout": 10,  # s
+    "move_sensitivity": 5,
+    "breath_sensitivity": 5,
+    "move_minimum_range": 100,  # cm
     "move_maximum_range": 600,
-    "breath_minimum_range": 0,
+    "breath_minimum_range": 100,
     "breath_maximum_range": 600,
 }
 # Devices (IEEE) that already got DEFAULT_SETTINGS. Delete the device's entry
@@ -82,16 +81,31 @@ class NovaDigitalOccupancySensing(OccupancySensing, TuyaLocalCluster):
 
 
 class NovaDigitalMCUCluster(TuyaMCUCluster):
-    """Tuya MCU cluster that writes DEFAULT_SETTINGS once per device."""
+    """Tuya MCU cluster that queries all datapoints once per HA session and
+    writes DEFAULT_SETTINGS once per device."""
 
     def handle_cluster_request(self, hdr, args, *, dst_addressing=None):
         super().handle_cluster_request(hdr, args, dst_addressing=dst_addressing)
         device = self.endpoint.device
+        loop = asyncio.get_running_loop()
+        # The device reports only presence and illuminance on its own, so the
+        # settings numbers stay "unknown" (e.g. after re-pairing) until asked.
+        if not getattr(device, "_zts_mm_queried", False):
+            device._zts_mm_queried = True
+            loop.create_task(self._query_all_datapoints())
         ieee = str(device.ieee)
         if ieee in _APPLIED or getattr(device, "_zts_mm_defaults_pending", False):
             return
         device._zts_mm_defaults_pending = True
-        asyncio.get_running_loop().create_task(self._apply_defaults(ieee))
+        loop.create_task(self._apply_defaults(ieee))
+
+    async def _query_all_datapoints(self) -> None:
+        """Tuya data query: the device answers with every datapoint's value."""
+        try:
+            await self.command(TUYA_QUERY_DATA, expect_reply=False)
+        except Exception:
+            self.endpoint.device._zts_mm_queried = False  # retry on next message
+            _LOGGER.warning("ZTS-MM %s: data query failed", self.endpoint.device.ieee, exc_info=True)
 
     async def _apply_defaults(self, ieee: str) -> None:
         device = self.endpoint.device
