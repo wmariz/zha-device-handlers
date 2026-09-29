@@ -642,6 +642,35 @@ except Exception as e:
 
 
 # ---------------------------------------------------------------------------
+# Patch 6: zha Light.icon — LED-color lights get their own icon
+#
+# Quirk entity metadata has no icon field, but Home Assistant's ZHA
+# integration copies the zha library entity's `icon` when it creates the HA
+# entity. Light entities whose Color cluster sets `_c4_led_icon` (the
+# per-button LED lights, c4_led_rgb.C4LedColorCluster) report that icon;
+# every other light is unchanged.
+# ---------------------------------------------------------------------------
+try:
+    from zha.application.platforms.light import Light as _ZhaLight
+
+    if not getattr(_ZhaLight, '_c4_led_icon_patch', False):
+        _original_light_icon = _ZhaLight.icon
+
+        def _c4_light_icon(self):
+            icon = getattr(getattr(self, '_color_cluster', None), '_c4_led_icon', None)
+            return icon if icon else _original_light_icon.fget(self)
+
+        _ZhaLight.icon               = property(_c4_light_icon)
+        _ZhaLight._c4_led_icon_patch = True
+        _LOGGER.info("C4: Installed LED light icon patch")
+    else:
+        _LOGGER.debug("C4: LED light icon patch already installed")
+
+except Exception as e:
+    _LOGGER.error("C4: Failed to install LED light icon patch: %s", e)
+
+
+# ---------------------------------------------------------------------------
 # Device module imports — must come AFTER all patches are installed above.
 #
 # ZHA auto-imports every .py file in the custom_zha_quirks directory, but

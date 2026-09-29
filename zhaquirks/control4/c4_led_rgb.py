@@ -306,6 +306,9 @@ class C4LedColorCluster(_C4LocalOnlyReadMixin, CustomCluster, Color):
 
     _C4_NAMESPACE: str = ""
     _C4_LABEL: str = ""
+    # Icon for the light entity built on this cluster — applied by c4_hooks'
+    # Patch 6, since quirk entity metadata has no icon field.
+    _c4_led_icon: str = "mdi:led-outline"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

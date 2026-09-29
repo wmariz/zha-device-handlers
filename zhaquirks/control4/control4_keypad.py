@@ -115,7 +115,7 @@ if _QUIRK_DIR not in sys.path:
     sys.path.insert(0, _QUIRK_DIR)
 
 from zigpy.profiles import zha
-from zigpy.quirks.v2 import QuirkBuilder
+from zigpy.quirks.v2 import EntityType, QuirkBuilder
 from zigpy.zcl.clusters.general import BinaryInput
 from zigpy.zcl.clusters.lighting import Color
 
@@ -225,6 +225,7 @@ for _btn_id, _ep_id in KPZ6B1_LED_EP_MAP.items():
         .change_entity_metadata(
             endpoint_id=_ep_id,
             cluster_id=Color.cluster_id,
+            new_entity_category=EntityType.CONFIG,
             new_fallback_name=f"LED {_btn_id + 1}",
             new_entity_registry_enabled_default=False,
         )

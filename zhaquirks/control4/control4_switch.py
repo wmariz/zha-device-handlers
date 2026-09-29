@@ -212,6 +212,7 @@ for _ep_id, _color_cls, _led_label in (
         .change_entity_metadata(
             endpoint_id=_ep_id,
             cluster_id=Color.cluster_id,
+            new_entity_category=EntityType.CONFIG,
             new_fallback_name=_led_label,
             new_entity_registry_enabled_default=False,
         )
