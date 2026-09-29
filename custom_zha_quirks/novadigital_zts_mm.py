@@ -19,9 +19,10 @@ Datapoints from zigbee-herdsman-converters (src/devices/tuya.ts, ZY_HPS01):
     111 breath_maximum_range   cm, 0-600
     112 breath_minimum_range   cm, 0-600
 Note: zha-quirks' ZY_HPS01 quirk maps 111 to the breath MINIMUM and 112 to
-the MAXIMUM, the reverse of zigbee-herdsman-converters. CONFIRMED on real
-hardware that z2m is right: a data query returned 600 on DP 111 and 100
-on DP 112, matching the device's configured max/min.
+the MAXIMUM, the reverse of zigbee-herdsman-converters. Verified on real
+hardware (2026-09-29) that z2m is right: with DP 112=0 / DP 111=600 a still
+person kept presence on; with DP 112=600 / DP 111=0 (empty breath window)
+presence dropped after the fade time while the person stayed still.
 
 DEFAULT_SETTINGS (below) are written to each device once, on the first
 message received from it; see NovaDigitalMCUCluster.
