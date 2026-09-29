@@ -163,7 +163,9 @@ class NovaDigitalMCUCluster(TuyaMCUCluster):
         min_value=0,
         max_value=10,
         step=1,
-        translation_key="breath_sensitivity",
+        # Not "breath_sensitivity": HA translates that key (pt-BR
+        # "Sensibilidade respiratória"); an unknown key uses fallback_name.
+        translation_key="zts_mm_breath_sensitivity",
         fallback_name="Breath sensitivity",
     )
     .tuya_number(
