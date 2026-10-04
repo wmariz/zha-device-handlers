@@ -66,7 +66,6 @@ import c4_hooks
 
 import c4_helpers as C4
 from c4_helpers import (
-    C4_ATTR_DIM_LEVEL,
     C4_ATTR_FIRMWARE,
     C4_ATTR_MODEL,
     C4_BUTTON_CLUSTER_ID,
@@ -94,23 +93,11 @@ _LOGGER = logging.getLogger(__name__)
 class C4OutletConfigCluster(C4ConfigCluster):
     """C4 config cluster for outlet devices (EP 2 / EP 196).
 
-    On a dimmer, attr 0x0000 on cluster 0x0001 is the dim level (0–255).
-    On the LOZ-5S1-W the same attribute is an on/off flag (2=on, 0=off).
-    Everything else is identical to C4ConfigCluster.
+    Attr 0x0000 on this cluster is a constant status field (always 2 in the
+    periodic status/announce reports, on or off), not an on/off flag, so it
+    is no longer synced into EP1 — see C4ConfigCluster._update_attribute.
+    Kept as a subclass so the outlet quirks can keep referencing it.
     """
-
-    def _update_attribute(self, attrid, value):
-        if attrid == C4_ATTR_DIM_LEVEL:
-            is_on = isinstance(value, int) and value > 0
-            _LOGGER.debug(
-                "C4 outlet config (ep %s): on/off state = %s (raw=%r)",
-                self.endpoint.endpoint_id, "on" if is_on else "off", value,
-            )
-            _sync_ep1_onoff(
-                self.endpoint.device, is_on, "outlet_ep2_report"
-            )
-        else:
-            super()._update_attribute(attrid, value)
 
 
 # ---------------------------------------------------------------------------

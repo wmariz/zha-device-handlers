@@ -831,12 +831,16 @@ class C4ConfigCluster(CustomCluster):
             _LOGGER.info("C4 firmware: %s", value)
 
         elif attrid == C4_ATTR_DIM_LEVEL:
-            level_raw = value if isinstance(value, int) else 0
+            # NOT the dim level. Every C4 device sends 0x0000 = 2 in these
+            # periodic status/announce reports, whether its load is on or
+            # off (checked across all devices, 2026-09-19..10-03). Syncing it
+            # into EP1 made lights flip to "on" in HA without turning on.
+            # The real load state arrives through the c4.dm/c4.dmx text
+            # reports handled in c4_button_cluster.py.
             _LOGGER.debug(
-                "C4 config: dim level report = %d (ep %s)",
-                level_raw, self.endpoint.endpoint_id,
+                "C4 config: attr 0x0000 = %r (ep %s) — status field, ignored",
+                value, self.endpoint.endpoint_id,
             )
-            _sync_ep1_level(self.endpoint.device, level_raw, "ep2_report")
 
         else:
             _LOGGER.debug("C4 config: 0x%04X = %s", attrid, value)
