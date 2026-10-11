@@ -25,8 +25,10 @@ import zigpy.types as t
 from zigpy.zcl.foundation import ZCLAttributeDef
 
 from zhaquirks.builder import QuirkBuilder
+from zhaquirks.tuya import TuyaCommand, TuyaDatapointData
 from zhaquirks.tuya.mcu import (
     DPToAttributeMapping,
+    TuyaClusterData,
     TuyaLevelControlManufCluster,
     TuyaOnOffNM,
 )
@@ -77,11 +79,23 @@ class NovaDigitalDimmerLevelControl(TuyaInWallLevelControlNM):
 
 
 class NovaDigitalDimmerManufCluster(TuyaLevelControlManufCluster):
-    """Tuya MCU cluster with the Nova Digital dimmer settings datapoints."""
+    """Tuya MCU cluster with the Nova Digital dimmer settings datapoints.
+
+    The firmware stores DP 3/DP 5 (min/max brightness) but does NOT apply them
+    to DP 2 set over Zigbee: with max = 30 % a DP 2 of 988 was accepted and
+    reported back as 988 (2026-10-11). So the quirk enforces them itself: the
+    HA level range 1-254 is scaled into [min, max] when sending DP 2, and a
+    reported DP 2 is scaled back (clamped) into 1-254.
+    """
 
     dp_to_attribute = dict(TuyaLevelControlManufCluster.dp_to_attribute)
     dp_to_attribute.update(
         {
+            # raw DP 2 value; scaling is done in from_cluster_data/_dp_2_level_update
+            2: DPToAttributeMapping(
+                NovaDigitalDimmerLevelControl.ep_attribute,
+                "current_level",
+            ),
             3: DPToAttributeMapping(
                 NovaDigitalDimmerLevelControl.ep_attribute,
                 "minimum_level",
@@ -107,7 +121,42 @@ class NovaDigitalDimmerManufCluster(TuyaLevelControlManufCluster):
         }
     )
     data_point_handlers = dict(TuyaLevelControlManufCluster.data_point_handlers)
-    data_point_handlers.update({5: "_dp_2_attr_update", 14: "_dp_2_attr_update"})
+    data_point_handlers.update(
+        {2: "_dp_2_level_update", 5: "_dp_2_attr_update", 14: "_dp_2_attr_update"}
+    )
+
+    def _dp_range(self) -> tuple[int, int]:
+        """Current [min, max] brightness in device units (10-1000)."""
+        level = self.endpoint.level
+        lo = _pct_to_dp(level.get("minimum_level") or 1)
+        hi = _pct_to_dp(level.get("maximum_level") or 100)
+        return lo, max(lo, hi)
+
+    def _level_to_dp(self, value: int) -> int:
+        """HA level 1-254 -> device brightness within [min, max]."""
+        lo, hi = self._dp_range()
+        value = max(1, min(254, int(value)))
+        return lo + round((value - 1) * (hi - lo) / 253)
+
+    def _dp_to_level(self, value: int) -> int:
+        """Device brightness -> HA level 1-254 (clamped to [min, max])."""
+        lo, hi = self._dp_range()
+        if hi == lo:
+            return 254
+        value = max(lo, min(hi, int(value)))
+        return 1 + round((value - lo) * 253 / (hi - lo))
+
+    def from_cluster_data(self, data: TuyaClusterData) -> list[TuyaCommand]:
+        """Scale outgoing level into the configured brightness range."""
+        if data.cluster_attr == "current_level":
+            data = data.replace(attr_value=self._level_to_dp(data.attr_value))
+        return super().from_cluster_data(data)
+
+    def _dp_2_level_update(self, datapoint: TuyaDatapointData) -> None:
+        """Scale a reported DP 2 back into the HA level range."""
+        level = self._dp_to_level(datapoint.data.payload)
+        self.debug("DP 2 = %s -> current_level %s", datapoint.data.payload, level)
+        self.endpoint.level.update_attribute("current_level", level)
 
 
 (
