@@ -127,6 +127,8 @@ class TS0052LevelControl(CustomCluster, LevelControl):
         mode="box",
         translation_key="minimum_brightness",
         fallback_name="Minimum brightness",
+        # virtual: read min/max_level at startup instead of trusting the cache
+        attribute_initialized_from_cache=False,
     )
     .number(
         "max_brightness",
@@ -138,6 +140,8 @@ class TS0052LevelControl(CustomCluster, LevelControl):
         mode="box",
         translation_key="maximum_brightness",
         fallback_name="Maximum brightness",
+        # virtual: read min/max_level at startup instead of trusting the cache
+        attribute_initialized_from_cache=False,
     )
     .enum(
         "power_on_behavior",
