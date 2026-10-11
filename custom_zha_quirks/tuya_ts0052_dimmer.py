@@ -3,18 +3,16 @@
 Plain ZCL device (OnOff/LevelControl, not a Tuya MCU TS0601). Without a quirk
 ZHA only exposes the light. zigbee2mqtt ("TS0052" generic definition,
 tuyaLight with powerOnBehavior / switchType / minBrightness: "attribute")
-also exposes:
-    power_on_behavior   0xE001 / 0xD010 enum8 (0 off, 1 on, 2 previous)
-    switch_type         0xE001 / 0xD030 enum8 (0 toggle, 1 state, 2 momentary)
-    min_brightness      0x0008 / 0xFC00 uint16: high byte = min, low byte = max
-                        (z2m always writes max = 0xFF)
-This quirk exposes those, plus the max brightness byte of 0xFC00. 0xFC00 is
-split into two virtual attributes in % (min_brightness / max_brightness);
-writing either one writes the combined 0xFC00 value.
+also exposes power-on behavior, switch type and min brightness.
 
-Also defined (no entities) only so they can be probed: OnOff 0x8002
-(power_on_state on other Tuya switches), 0xE001/0xD020 switch_mode and
-LevelControl 0xFC02-0xFC04 (TS110E bulb type / min / max).
+Probed on this device (2026-10-11):
+    0xE001 / 0xD010 power_on_behavior  enum8 (0 off, 1 on, 2 previous)  OK
+    0xE001 / 0xD030 switch_type        enum8 (0 toggle, 1 state, 2 momentary)  OK
+    0x0008 / 0xFC00 (z2m min brightness) read AND write -> UNSUPPORTED_ATTRIBUTE
+    0x0008 / 0x0002 min_level, 0x0003 max_level (standard, normally read-only)
+        -> writable and persistent, so they are used for min/max brightness
+    (OnOff 0x8002 mirrors D010; FC02-FC04 unsupported; neither is exposed)
+min_level/max_level are exposed as virtual attributes in % (1-100).
 """
 
 from typing import Final
@@ -22,7 +20,7 @@ from typing import Final
 from zigpy import types as t
 from zigpy.quirks import CustomCluster
 from zigpy.zcl import foundation
-from zigpy.zcl.clusters.general import LevelControl, OnOff
+from zigpy.zcl.clusters.general import LevelControl
 from zigpy.zcl.foundation import BaseAttributeDefs, ZCLAttributeDef
 
 from zhaquirks.builder import QuirkBuilder
@@ -37,15 +35,6 @@ class SwitchType(t.enum8):
     Momentary = 0x02
 
 
-class TS0052OnOff(CustomCluster, OnOff):
-    """OnOff with the Tuya power-on attribute (probe only)."""
-
-    class AttributeDefs(OnOff.AttributeDefs):
-        """Attribute definitions."""
-
-        power_on_state: Final = ZCLAttributeDef(id=0x8002, type=PowerOnState)
-
-
 class TS0052E001(CustomCluster):
     """Tuya 0xE001 cluster: power-on behavior and switch type."""
 
@@ -57,68 +46,61 @@ class TS0052E001(CustomCluster):
         """Attribute definitions."""
 
         power_on_behavior: Final = ZCLAttributeDef(id=0xD010, type=PowerOnState)
-        switch_mode: Final = ZCLAttributeDef(id=0xD020, type=t.enum8)
         switch_type: Final = ZCLAttributeDef(id=0xD030, type=SwitchType)
 
 
-_MIN_MAX = 0xFC00
+_MIN_LEVEL = 0x0002
+_MAX_LEVEL = 0x0003
 _VIRT_MIN = 0xEF10
 _VIRT_MAX = 0xEF11
+# virtual (%) attribute -> real (1-254) attribute
+_VIRTUAL = {_VIRT_MIN: _MIN_LEVEL, _VIRT_MAX: _MAX_LEVEL}
+_REAL = {v: k for k, v in _VIRTUAL.items()}
 
 
-def _raw_to_pct(raw: int) -> int:
-    return max(1, min(100, round(raw * 100 / 255)))
+def _level_to_pct(level: int) -> int:
+    return max(1, min(100, round(level * 100 / 254)))
 
 
-def _pct_to_raw(pct: int) -> int:
-    return max(1, min(255, round(int(pct) * 255 / 100)))
+def _pct_to_level(pct: int) -> int:
+    return max(1, min(254, round(int(pct) * 254 / 100)))
 
 
 class TS0052LevelControl(CustomCluster, LevelControl):
-    """LevelControl with the Tuya min/max brightness attribute 0xFC00."""
+    """LevelControl exposing the writable min/max level in %."""
 
     class AttributeDefs(LevelControl.AttributeDefs):
         """Attribute definitions."""
 
-        tuya_min_max: Final = ZCLAttributeDef(id=_MIN_MAX, type=t.uint16_t)
-        bulb_type: Final = ZCLAttributeDef(id=0xFC02, type=t.enum8)
-        tuya_min_level: Final = ZCLAttributeDef(id=0xFC03, type=t.uint16_t)
-        tuya_max_level: Final = ZCLAttributeDef(id=0xFC04, type=t.uint16_t)
-        # virtual, in %, derived from 0xFC00
         min_brightness: Final = ZCLAttributeDef(id=_VIRT_MIN, type=t.uint8_t)
         max_brightness: Final = ZCLAttributeDef(id=_VIRT_MAX, type=t.uint8_t)
 
     def _update_attribute(self, attrid, value):
         super()._update_attribute(attrid, value)
-        if attrid == _MIN_MAX and value is not None:
-            super()._update_attribute(_VIRT_MIN, _raw_to_pct(value >> 8))
-            super()._update_attribute(_VIRT_MAX, _raw_to_pct(value & 0xFF))
+        if attrid in _REAL and value is not None:
+            super()._update_attribute(_REAL[attrid], _level_to_pct(value))
 
     async def write_attributes(self, attributes, manufacturer=None, **kwargs):
-        """Fold writes of the virtual min/max into one 0xFC00 write."""
-        real, virt = {}, {}
+        """Write the virtual % attributes to min_level/max_level."""
+        real = {}
         for key, value in attributes.items():
             attr_id = self.find_attribute(key).id
-            if attr_id in (_VIRT_MIN, _VIRT_MAX):
-                virt[attr_id] = int(value)
+            if attr_id in _VIRTUAL:
+                real[_VIRTUAL[attr_id]] = _pct_to_level(value)
             else:
                 real[key] = value
-        if virt:
-            lo = virt.get(_VIRT_MIN, self.get(_VIRT_MIN) or 1)
-            hi = virt.get(_VIRT_MAX, self.get(_VIRT_MAX) or 100)
-            real[_MIN_MAX] = (_pct_to_raw(lo) << 8) | _pct_to_raw(max(lo, hi))
         return await super().write_attributes(real, manufacturer, **kwargs)
 
     async def read_attributes(self, attributes, *args, **kwargs):
-        """Serve the virtual min/max by reading 0xFC00 from the device."""
+        """Serve the virtual % attributes by reading min_level/max_level."""
         real, virt = [], []
         for attr in attributes:
-            if self.find_attribute(attr).id in (_VIRT_MIN, _VIRT_MAX):
-                virt.append(attr)
-            else:
-                real.append(attr)
-        if virt and not any(self.find_attribute(a).id == _MIN_MAX for a in real):
-            real.append(_MIN_MAX)
+            attr_id = self.find_attribute(attr).id
+            (virt if attr_id in _VIRTUAL else real).append(attr)
+        for attr in virt:
+            target = _VIRTUAL[self.find_attribute(attr).id]
+            if not any(self.find_attribute(a).id == target for a in real):
+                real.append(target)
         success, failure = (
             await super().read_attributes(real, *args, **kwargs) if real else ({}, {})
         )
@@ -133,7 +115,6 @@ class TS0052LevelControl(CustomCluster, LevelControl):
 
 (
     QuirkBuilder("_TZ3000_mr2qqt8j", "TS0052")
-    .replaces(TS0052OnOff)
     .replaces(TS0052LevelControl)
     .replaces(TS0052E001)
     .number(
