@@ -234,5 +234,7 @@ for _zone in range(1, _ZONES + 1):
         SonoffSNZB06P24Cluster.cluster_id,
         translation_key=f"occupancy_zone_{_zone}",
         fallback_name=f"Zone {_zone} ({_ZONE_RANGES[_zone - 1]})",
+        # virtual: read 0x2016 at startup instead of trusting the cache
+        attribute_initialized_from_cache=False,
     )
 builder.add_to_registry()
