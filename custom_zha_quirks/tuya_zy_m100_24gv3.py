@@ -145,6 +145,7 @@ class PresenceState(t.enum8):
         dp_id=104,
         attribute_name="dp104_state",
         type=t.uint8_t,
+        converter=int,  # arrives as a Tuya enum8
         entity_type=EntityType.DIAGNOSTIC,
         translation_key="dp104_state",
         fallback_name="DP 104 (unknown)",
