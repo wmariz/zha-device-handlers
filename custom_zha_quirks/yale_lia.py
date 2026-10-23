@@ -51,11 +51,43 @@ class LiaEventSource(t.enum8):
 
 
 class LiaSoundVolume(t.enum8):
-    """Sound volume (ZCL DoorLock 0x0024)."""
+    """Sound volume (ZCL DoorLock 0x0024: 0 silent, 1 low, 2 high)."""
 
-    Silent = 0x00
-    Low = 0x01
-    High = 0x02
+    Silencioso = 0x00
+    Baixo = 0x01
+    Alto = 0x02
+
+
+class LiaActionSource(t.enum8):
+    """Readable operation event source, shown by the last-source sensor."""
+
+    Teclado = 0x00
+    locals()["Remoto (Zigbee)"] = 0x01
+    Manual = 0x02
+    locals()["Cartão"] = 0x03
+    Digital = 0x04
+    Indeterminado = 0xFF
+
+
+class LiaAction(t.enum8):
+    """Readable ZCL operation event code, shown by the last-action sensor."""
+
+    Desconhecido = 0x00
+    Trancou = 0x01
+    Destrancou = 0x02
+    locals()["Falha ao trancar (código inválido)"] = 0x03
+    locals()["Falha ao trancar (fora do horário)"] = 0x04
+    locals()["Falha ao destrancar (código inválido)"] = 0x05
+    locals()["Falha ao destrancar (fora do horário)"] = 0x06
+    locals()["Trancou pelo painel"] = 0x07
+    locals()["Trancou com a chave"] = 0x08
+    locals()["Destrancou com a chave"] = 0x09
+    locals()["Trancamento automático"] = 0x0A
+    locals()["Trancou por agenda"] = 0x0B
+    locals()["Destrancou por agenda"] = 0x0C
+    locals()["Trancou manualmente"] = 0x0D
+    locals()["Destrancou manualmente"] = 0x0E
+    locals()["Usuário sem acesso"] = 0x0F
 
 
 class LiaAutoRelock(_EnumMixin, t.uint32_t, enum.Enum, metaclass=_IntEnumMeta):
@@ -65,7 +97,7 @@ class LiaAutoRelock(_EnumMixin, t.uint32_t, enum.Enum, metaclass=_IntEnumMeta):
     15/30/45 s.
     """
 
-    Off = 0
+    Desativado = 0
     # member names are what the HA select shows
     locals()["5 s"] = 5
     locals()["10 s"] = 10
@@ -88,11 +120,9 @@ class YaleLiaDoorLock(CustomCluster, DoorLock):
         sound_volume: Final = ZCLAttributeDef(
             id=0x0024, type=LiaSoundVolume, zcl_type=DataTypeId.uint8, access="r*wp"
         )
-        last_action: Final = ZCLAttributeDef(
-            id=_LAST_ACTION, type=DoorLock.OperationEvent
-        )
+        last_action: Final = ZCLAttributeDef(id=_LAST_ACTION, type=LiaAction)
         last_action_source: Final = ZCLAttributeDef(
-            id=_LAST_SOURCE, type=LiaEventSource
+            id=_LAST_SOURCE, type=LiaActionSource
         )
         last_action_user: Final = ZCLAttributeDef(id=_LAST_USER, type=t.uint16_t)
 
@@ -114,8 +144,11 @@ class YaleLiaDoorLock(CustomCluster, DoorLock):
     def handle_cluster_request(self, hdr, args, *, dst_addressing=None):
         """Keep the last operation event as local attributes."""
         if hdr.command_id == 0x20 and not hdr.frame_control.is_general:
-            self._update_attribute(_LAST_ACTION, args.operation_event_code)
-            self._update_attribute(_LAST_SOURCE, args.operation_event_source)
+            # readable names for the sensors; zha_event keeps the ZCL names
+            self._update_attribute(_LAST_ACTION, LiaAction(int(args.operation_event_code)))
+            self._update_attribute(
+                _LAST_SOURCE, LiaActionSource(int(args.operation_event_source))
+            )
             self._update_attribute(_LAST_USER, args.user_id)
         super().handle_cluster_request(hdr, args, dst_addressing=dst_addressing)
 
@@ -141,7 +174,7 @@ class YaleLiaDoorLock(CustomCluster, DoorLock):
     .replaces(YaleLiaDoorLock)
     .enum(
         "last_action",
-        DoorLock.OperationEvent,
+        LiaAction,
         DoorLock.cluster_id,
         entity_platform=EntityPlatform.SENSOR,
         entity_type=EntityType.STANDARD,
@@ -150,7 +183,7 @@ class YaleLiaDoorLock(CustomCluster, DoorLock):
     )
     .enum(
         "last_action_source",
-        LiaEventSource,
+        LiaActionSource,
         DoorLock.cluster_id,
         entity_platform=EntityPlatform.SENSOR,
         entity_type=EntityType.STANDARD,
