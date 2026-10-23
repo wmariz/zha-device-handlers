@@ -4,7 +4,13 @@ Plain ZCL DoorLock (0x0101). PowerConfiguration (0x0001) is NOT in the simple
 descriptor, but the lock answers reads of battery_percentage_remaining (0x0021,
 0.5 % units; tested 2026-10-23: 198 = 99 %). It rejects Configure Reporting for
 it (malformed UNSUPPORTED_ATTRIBUTE reply), so the cluster below re-reads the
-battery every 12 h. battery_voltage (0x0020) is unsupported.
+battery every 12 h. battery_voltage (0x0020) is unsupported. After a ZHA
+"reconfigure" the lock did start sending battery reports after operations
+(2026-10-23), so the poll is just a safety net.
+Events verified on hardware (2026-10-23): keypad user_id 0 = master code;
+physical key = Manual_Unlock (same as the inner thumbturn); privacy mode and
+refused PINs produce no event and no attribute change; cards, PIN and
+fingerprint all report the lock's user number (fingerprint = source 4).
 Following z2m ("LIA": lockExtend + lia_action), this adds what ZHA lacks:
   - operation_event_notification (0x20) tolerant of the Lia's short frames
     (z2m parses them raw because pin/local_time/data may be missing) and with
