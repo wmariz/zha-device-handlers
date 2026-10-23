@@ -13,6 +13,11 @@ Following z2m ("LIA": lockExtend + lia_action), this adds what ZHA lacks:
     (0x0030) and user_code_temporary_disable_time (0x0031, s).
 Read on 2026-10-22: door_state (0x0003) unsupported, auto relock 30 s,
 volume 0, wrong code limit 5, disable time 60 s, firmware 02.03.04.
+auto_relock_time (verified 2026-10-22): 0 disables the timed auto lock and
+N > 0 relocks N s after an unlock (AutoLock event, source Manual) -- but only
+while the lock's own door-sensor mode is OFF in its menu; with the door sensor
+on, the lock ignores the timer. Setting the time in the lock's menu does not
+update 0x0023, so HA may show a stale value until it is written from HA.
 """
 
 from typing import Final
