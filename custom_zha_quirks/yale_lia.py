@@ -11,9 +11,9 @@ Following z2m ("LIA": lockExtend + lia_action), this adds what ZHA lacks:
     source 4 = fingerprint (z2m: verified on a real device; ZCL says
     "indeterminate"). Besides ZHA's own zha_event, the last action, its
     source and user id are kept as sensors.
-  - config entities for standard DoorLock attributes the device answers:
-    auto_relock_time (0x0023, s), sound_volume (0x0024), wrong_code_entry_limit
-    (0x0030) and user_code_temporary_disable_time (0x0031, s).
+  - config entities for auto_relock_time (0x0023) and sound_volume (0x0024).
+    wrong_code_entry_limit (0x0030 = 5) and user_code_temporary_disable_time
+    (0x0031 = 60 s) are readable but fixed per the Lia manual: not exposed.
 Read on 2026-10-22: door_state (0x0003) unsupported, auto relock 30 s,
 volume 0, wrong code limit 5, disable time 60 s, firmware 02.03.04.
 auto_relock_time (verified 2026-10-22): 0 disables the timed auto lock and
@@ -255,27 +255,6 @@ class YaleLiaDoorLock(CustomCluster, DoorLock):
         DoorLock.cluster_id,
         translation_key="sound_volume",
         fallback_name="Sound volume",
-    )
-    .number(
-        "wrong_code_entry_limit",
-        DoorLock.cluster_id,
-        min_value=1,
-        max_value=255,
-        step=1,
-        mode="box",
-        translation_key="wrong_code_entry_limit",
-        fallback_name="Wrong code entry limit",
-    )
-    .number(
-        "user_code_temporary_disable_time",
-        DoorLock.cluster_id,
-        min_value=1,
-        max_value=255,
-        step=1,
-        unit=UnitOfTime.SECONDS,
-        mode="box",
-        translation_key="user_code_temporary_disable_time",
-        fallback_name="Wrong code lockout time",
     )
     .add_to_registry()
 )
