@@ -42,7 +42,7 @@ from zigpy import types as t
 from zigpy.types.basic import _EnumMixin, _IntEnumMeta
 from zigpy.zcl import ClusterType, foundation
 from zigpy.zcl.clusters.closures import DoorLock
-from zigpy.zcl.clusters.general import PowerConfiguration, Time
+from zigpy.zcl.clusters.general import Alarms, PowerConfiguration, Time
 from zigpy.zcl.foundation import DataTypeId, ZCLAttributeDef, ZCLCommandDef
 
 from zhaquirks.builder import EntityPlatform, EntityType, QuirkBuilder
@@ -52,7 +52,8 @@ from zhaquirks.builder import SensorDeviceClass, UnitOfTime
 _LAST_ACTION = 0xEF00
 _LAST_SOURCE = 0xEF01
 _LAST_USER = 0xEF02
-_VIRTUAL = (_LAST_ACTION, _LAST_SOURCE, _LAST_USER)
+_LAST_ALARM = 0xEF03
+_VIRTUAL = (_LAST_ACTION, _LAST_SOURCE, _LAST_USER, _LAST_ALARM)
 
 
 class LiaEventSource(t.enum8):
@@ -127,6 +128,48 @@ _BATTERY_POLL_S = 12 * 3600
 _POLL_FLAG = "_yale_lia_battery_poll"  # on the device: module may load twice
 
 
+class LiaAlarm(t.enum8):
+    """ZCL DoorLock alarm codes (sent via the Alarms cluster, cluster 0x0101)."""
+
+    locals()["Lingueta emperrada"] = 0x00
+    locals()["Reset de fábrica"] = 0x01
+    locals()["Módulo de rádio reiniciado"] = 0x03
+    locals()["Bloqueio por senhas erradas"] = 0x04
+    locals()["Painel externo violado"] = 0x05
+    locals()["Porta aberta com a lingueta para fora"] = 0x06
+
+
+class YaleLiaAlarms(CustomCluster, Alarms):
+    """Alarms server the lock uses but does not declare.
+
+    Seen 2026-10-22/23: frame 09 xx 00 <code> 01 01 = alarm(code, 0x0101).
+    Code 6 came every time the bolt went out with the door open during tests,
+    code 0 while the bolt was mechanically misaligned. Without this cluster
+    zigpy dropped them ("Ignoring message on unknown cluster: 0x0009").
+    """
+
+    def handle_cluster_request(self, hdr, args, *, dst_addressing=None):
+        """Mirror DoorLock alarms into a sensor and a zha_event."""
+        if hdr.command_id == 0x00 and not hdr.frame_control.is_general:
+            code = int(args.alarm_code)
+            self.debug("alarm code %s cluster 0x%04x", code, args.cluster_id)
+            if args.cluster_id == DoorLock.cluster_id:
+                lock = getattr(self.endpoint, DoorLock.ep_attribute, None)
+                if lock is not None:
+                    lock._update_attribute(_LAST_ALARM, LiaAlarm(code))
+            self.listener_event(
+                "zha_send_event",
+                "alarm",
+                {
+                    "alarm_code": code,
+                    "cluster_id": int(args.cluster_id),
+                    "alarm": LiaAlarm(code).name,
+                },
+            )
+            return
+        super().handle_cluster_request(hdr, args, dst_addressing=dst_addressing)
+
+
 class YaleLiaPowerConfiguration(CustomCluster, PowerConfiguration):
     """Battery cluster the lock answers but does not report: poll it."""
 
@@ -173,6 +216,7 @@ class YaleLiaDoorLock(CustomCluster, DoorLock):
             id=_LAST_SOURCE, type=LiaActionSource
         )
         last_action_user: Final = ZCLAttributeDef(id=_LAST_USER, type=t.uint16_t)
+        last_alarm: Final = ZCLAttributeDef(id=_LAST_ALARM, type=LiaAlarm)
 
     class ClientCommandDefs(DoorLock.ClientCommandDefs):
         """Client command definitions."""
@@ -228,6 +272,8 @@ class YaleLiaDoorLock(CustomCluster, DoorLock):
     .adds(Time, cluster_type=ClusterType.Client)
     # not in the simple descriptor, but battery reads are answered (see top)
     .adds(YaleLiaPowerConfiguration)
+    # not in the simple descriptor either; the lock sends DoorLock alarms on it
+    .adds(YaleLiaAlarms)
     .enum(
         "last_action",
         LiaAction,
@@ -245,6 +291,15 @@ class YaleLiaDoorLock(CustomCluster, DoorLock):
         entity_type=EntityType.STANDARD,
         translation_key="last_action_source",
         fallback_name="Last action source",
+    )
+    .enum(
+        "last_alarm",
+        LiaAlarm,
+        DoorLock.cluster_id,
+        entity_platform=EntityPlatform.SENSOR,
+        entity_type=EntityType.STANDARD,
+        translation_key="last_alarm",
+        fallback_name="Last alarm",
     )
     .sensor(
         "last_action_user",
