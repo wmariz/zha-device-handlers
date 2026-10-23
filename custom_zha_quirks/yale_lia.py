@@ -20,12 +20,14 @@ on, the lock ignores the timer. Setting the time in the lock's menu does not
 update 0x0023, so HA may show a stale value until it is written from HA.
 """
 
+import enum
 from typing import Final
 
 from zigpy import types as t
+from zigpy.types.basic import _EnumMixin, _IntEnumMeta
 from zigpy.zcl import foundation
 from zigpy.zcl.clusters.closures import DoorLock
-from zigpy.zcl.foundation import ZCLAttributeDef, ZCLCommandDef
+from zigpy.zcl.foundation import DataTypeId, ZCLAttributeDef, ZCLCommandDef
 
 from zhaquirks.builder import EntityPlatform, EntityType, QuirkBuilder
 from zhaquirks.clusters import CustomCluster
@@ -56,12 +58,32 @@ class LiaSoundVolume(t.enum8):
     High = 0x02
 
 
+class LiaAutoRelock(_EnumMixin, t.uint32_t, enum.Enum, metaclass=_IntEnumMeta):
+    """Auto relock time choices (0x0023 is uint32 seconds; 0 = off).
+
+    The lock accepts any value from HA (5 s verified), not just the menu's
+    15/30/45 s.
+    """
+
+    Off = 0
+    # member names are what the HA select shows
+    locals()["5 s"] = 5
+    locals()["10 s"] = 10
+    locals()["15 s"] = 15
+    locals()["30 s"] = 30
+    locals()["45 s"] = 45
+    locals()["60 s"] = 60
+
+
 class YaleLiaDoorLock(CustomCluster, DoorLock):
     """DoorLock with tolerant operation events and last-action attributes."""
 
     class AttributeDefs(DoorLock.AttributeDefs):
         """Attribute definitions."""
 
+        auto_relock_time: Final = ZCLAttributeDef(
+            id=0x0023, type=LiaAutoRelock, zcl_type=DataTypeId.uint32, access="r*wp"
+        )
         sound_volume: Final = ZCLAttributeDef(
             id=0x0024, type=LiaSoundVolume, access="r*wp"
         )
@@ -141,14 +163,10 @@ class YaleLiaDoorLock(CustomCluster, DoorLock):
         translation_key="last_action_user",
         fallback_name="Last action user",
     )
-    .number(
+    .enum(
         "auto_relock_time",
+        LiaAutoRelock,
         DoorLock.cluster_id,
-        min_value=0,
-        max_value=3600,
-        step=1,
-        unit=UnitOfTime.SECONDS,
-        mode="box",
         translation_key="auto_relock_time",
         fallback_name="Auto relock time",
     )
