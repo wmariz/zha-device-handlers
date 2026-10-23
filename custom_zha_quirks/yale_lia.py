@@ -4,7 +4,7 @@ Plain ZCL DoorLock (0x0101). PowerConfiguration (0x0001) is NOT in the simple
 descriptor, but the lock answers reads of battery_percentage_remaining (0x0021,
 0.5 % units; tested 2026-10-23: 198 = 99 %). It rejects Configure Reporting for
 it (malformed UNSUPPORTED_ATTRIBUTE reply), so the cluster below re-reads the
-battery every 6 h. battery_voltage (0x0020) is unsupported.
+battery every 12 h. battery_voltage (0x0020) is unsupported.
 Following z2m ("LIA": lockExtend + lia_action), this adds what ZHA lacks:
   - operation_event_notification (0x20) tolerant of the Lia's short frames
     (z2m parses them raw because pin/local_time/data may be missing) and with
@@ -112,7 +112,7 @@ class LiaAutoRelock(_EnumMixin, t.uint32_t, enum.Enum, metaclass=_IntEnumMeta):
     locals()["60 s"] = 60
 
 
-_BATTERY_POLL_S = 6 * 3600
+_BATTERY_POLL_S = 12 * 3600
 _POLL_FLAG = "_yale_lia_battery_poll"  # on the device: module may load twice
 
 
