@@ -84,8 +84,9 @@ class YaleLiaDoorLock(CustomCluster, DoorLock):
         auto_relock_time: Final = ZCLAttributeDef(
             id=0x0023, type=LiaAutoRelock, zcl_type=DataTypeId.uint32, access="r*wp"
         )
+        # the lock rejects enum8 writes (INVALID_DATA_TYPE): send as uint8
         sound_volume: Final = ZCLAttributeDef(
-            id=0x0024, type=LiaSoundVolume, access="r*wp"
+            id=0x0024, type=LiaSoundVolume, zcl_type=DataTypeId.uint8, access="r*wp"
         )
         last_action: Final = ZCLAttributeDef(
             id=_LAST_ACTION, type=DoorLock.OperationEvent
