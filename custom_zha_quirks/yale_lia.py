@@ -11,6 +11,11 @@ Events verified on hardware (2026-10-23): keypad user_id 0 = master code;
 physical key = Manual_Unlock (same as the inner thumbturn); privacy mode and
 refused PINs produce no event and no attribute change; cards, PIN and
 fingerprint all report the lock's user number (fingerprint = source 4).
+PIN management: set_pin_code / clear_pin_code work (a PIN already used by
+another user is refused with FAILURE); set_user_status (ZHA enable/disable
+lock user code) answers SUCCESS but is IGNORED -- a "disabled" PIN still
+opens; clear_rfid_code is unsupported; get_pin_code / get_user_status are
+acknowledged but never answered. ZHA code_slot = lock user number + 1.
 Following z2m ("LIA": lockExtend + lia_action), this adds what ZHA lacks:
   - operation_event_notification (0x20) tolerant of the Lia's short frames
     (z2m parses them raw because pin/local_time/data may be missing) and with
