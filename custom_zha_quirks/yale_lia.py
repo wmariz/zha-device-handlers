@@ -25,8 +25,9 @@ from typing import Final
 
 from zigpy import types as t
 from zigpy.types.basic import _EnumMixin, _IntEnumMeta
-from zigpy.zcl import foundation
+from zigpy.zcl import ClusterType, foundation
 from zigpy.zcl.clusters.closures import DoorLock
+from zigpy.zcl.clusters.general import Time
 from zigpy.zcl.foundation import DataTypeId, ZCLAttributeDef, ZCLCommandDef
 
 from zhaquirks.builder import EntityPlatform, EntityType, QuirkBuilder
@@ -172,6 +173,12 @@ class YaleLiaDoorLock(CustomCluster, DoorLock):
 (
     QuirkBuilder("Yale", "LIA")
     .replaces(YaleLiaDoorLock)
+    # The lock polls the coordinator's Time cluster every few seconds (Read
+    # Attributes time + time_status on cluster 0x000A) but does not declare a
+    # Time client, so zigpy dropped the request ("Ignoring message on unknown
+    # cluster: 0x000a"). With a Time client on EP1, zigpy's Time cluster
+    # answers it (handle_read_attribute_time / _time_status).
+    .adds(Time, cluster_type=ClusterType.Client)
     .enum(
         "last_action",
         LiaAction,
