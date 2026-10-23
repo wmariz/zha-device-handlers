@@ -1,7 +1,10 @@
 """Yale LIA digital lock (Zigbee, model "LIA").
 
-Plain ZCL DoorLock (0x0101), no PowerConfiguration cluster, so there is no
-battery to read (zigbee2mqtt's generic Yale lockExtend lists one anyway).
+Plain ZCL DoorLock (0x0101). PowerConfiguration (0x0001) is NOT in the simple
+descriptor, but the lock answers reads of battery_percentage_remaining (0x0021,
+0.5 % units; tested 2026-10-23: 198 = 99 %). It rejects Configure Reporting for
+it (malformed UNSUPPORTED_ATTRIBUTE reply), so the cluster below re-reads the
+battery every 6 h. battery_voltage (0x0020) is unsupported.
 Following z2m ("LIA": lockExtend + lia_action), this adds what ZHA lacks:
   - operation_event_notification (0x20) tolerant of the Lia's short frames
     (z2m parses them raw because pin/local_time/data may be missing) and with
@@ -20,6 +23,7 @@ on, the lock ignores the timer. Setting the time in the lock's menu does not
 update 0x0023, so HA may show a stale value until it is written from HA.
 """
 
+import asyncio
 import enum
 from typing import Final
 
@@ -27,7 +31,7 @@ from zigpy import types as t
 from zigpy.types.basic import _EnumMixin, _IntEnumMeta
 from zigpy.zcl import ClusterType, foundation
 from zigpy.zcl.clusters.closures import DoorLock
-from zigpy.zcl.clusters.general import Time
+from zigpy.zcl.clusters.general import PowerConfiguration, Time
 from zigpy.zcl.foundation import DataTypeId, ZCLAttributeDef, ZCLCommandDef
 
 from zhaquirks.builder import EntityPlatform, EntityType, QuirkBuilder
@@ -108,6 +112,38 @@ class LiaAutoRelock(_EnumMixin, t.uint32_t, enum.Enum, metaclass=_IntEnumMeta):
     locals()["60 s"] = 60
 
 
+_BATTERY_POLL_S = 6 * 3600
+_POLL_FLAG = "_yale_lia_battery_poll"  # on the device: module may load twice
+
+
+class YaleLiaPowerConfiguration(CustomCluster, PowerConfiguration):
+    """Battery cluster the lock answers but does not report: poll it."""
+
+    def __init__(self, *args, **kwargs):
+        """Start one battery poll loop per device."""
+        super().__init__(*args, **kwargs)
+        device = self.endpoint.device
+        task = getattr(device, _POLL_FLAG, None)
+        if task is None or task.done():
+            try:
+                setattr(device, _POLL_FLAG, asyncio.get_running_loop().create_task(
+                    self._poll_battery()
+                ))
+            except RuntimeError:  # no running loop (e.g. import-time tests)
+                pass
+
+    async def _poll_battery(self) -> None:
+        await asyncio.sleep(120)
+        while True:
+            try:
+                await self.read_attributes(
+                    ["battery_percentage_remaining"], allow_cache=False
+                )
+            except Exception as exc:  # noqa: BLE001 - lock asleep/unreachable
+                self.debug("battery poll failed: %r", exc)
+            await asyncio.sleep(_BATTERY_POLL_S)
+
+
 class YaleLiaDoorLock(CustomCluster, DoorLock):
     """DoorLock with tolerant operation events and last-action attributes."""
 
@@ -179,6 +215,8 @@ class YaleLiaDoorLock(CustomCluster, DoorLock):
     # cluster: 0x000a"). With a Time client on EP1, zigpy's Time cluster
     # answers it (handle_read_attribute_time / _time_status).
     .adds(Time, cluster_type=ClusterType.Client)
+    # not in the simple descriptor, but battery reads are answered (see top)
+    .adds(YaleLiaPowerConfiguration)
     .enum(
         "last_action",
         LiaAction,
