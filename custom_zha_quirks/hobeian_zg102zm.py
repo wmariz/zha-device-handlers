@@ -7,12 +7,13 @@ also has, on the Tuya cluster 0xEF00:
     DP 4   battery %                  -> standard PowerConfiguration is used
     DP 6   sensitivity 1-50 (larger = more sensitive; applied only while the
            sensor is awake, i.e. right after a vibration)
-    DP 101 contact (magnet); z2m maps contact = inverse(raw), so raw 1 = open
+    DP 101 contact (magnet) per z2m -- NOT exposed: this unit never sent
+           DP 101 (only DPs 1, 4, 6), magnet tests produced only vibration
+           (2026-10-28), so it has no reed switch / contact firmware.
 """
 
 import zigpy.types as t
 
-from zhaquirks.builder import BinarySensorDeviceClass, EntityType
 from zhaquirks.tuya.builder import TuyaQuirkBuilder
 
 (
@@ -20,14 +21,6 @@ from zhaquirks.tuya.builder import TuyaQuirkBuilder
     # DP 1 duplicates the IAS zone vibration; map it so it is not logged
     # as an unhandled datapoint
     .tuya_dp_attribute(dp_id=1, attribute_name="vibration_dp", type=t.uint8_t)
-    .tuya_binary_sensor(
-        dp_id=101,
-        attribute_name="contact_open",
-        entity_type=EntityType.STANDARD,
-        device_class=BinarySensorDeviceClass.OPENING,
-        translation_key="opening",
-        fallback_name="Opening",
-    )
     .tuya_number(
         dp_id=6,
         attribute_name="sensitivity",
