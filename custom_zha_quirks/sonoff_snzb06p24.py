@@ -137,7 +137,19 @@ class SonoffSNZB06P24Cluster(CustomCluster):
                 else:
                     bitmap &= ~_zone_mask(zone)
             real[_ZONE_ENABLE] = t.bitmap16(bitmap)
-        return await super().write_attributes(real, manufacturer, **kwargs)
+        result = await super().write_attributes(real, manufacturer, **kwargs)
+        # a successful write does not refresh the virtual zone switches (the
+        # device sends no report back), so ZHA reverted them in the UI
+        if zones:
+            records = result[0] if result else []
+            if not isinstance(records, list):
+                records = getattr(records, "status_records", [records])
+            if all(
+                getattr(rec, "status", rec) == foundation.Status.SUCCESS
+                for rec in records
+            ):
+                self._update_attribute(_ZONE_ENABLE, real[_ZONE_ENABLE])
+        return result
 
     async def read_attributes(self, attributes, *args, **kwargs):
         """Serve virtual attributes locally; zone switches via 0x2016."""
