@@ -242,6 +242,21 @@ class YaleLiaDoorLock(CustomCluster, DoorLock):
                 _LAST_SOURCE, LiaActionSource(int(args.operation_event_source))
             )
             self._update_attribute(_LAST_USER, args.user_id)
+            # explicit event for automations (who entered and how); repeated
+            # identical operations do not change the sensors' state
+            code = int(args.operation_event_code)
+            src = int(args.operation_event_source)
+            self.listener_event(
+                "zha_send_event",
+                "lock_operation",
+                {
+                    "user_id": int(args.user_id),
+                    "action_code": code,
+                    "action": LiaAction(code).name,
+                    "source_code": src,
+                    "source": LiaActionSource(src).name,
+                },
+            )
         super().handle_cluster_request(hdr, args, dst_addressing=dst_addressing)
 
     async def read_attributes(self, attributes, *args, **kwargs):
