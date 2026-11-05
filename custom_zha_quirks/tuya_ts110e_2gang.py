@@ -69,7 +69,16 @@ class TS110ELevelControl(CustomCluster, LevelControl):
             super()._update_attribute(_REAL[attrid], _raw_to_pct(value))
 
     async def write_attributes(self, attributes, manufacturer=None, **kwargs):
-        """Write the virtual % attributes to 0xFC03/0xFC04."""
+        """Write the virtual % attributes to 0xFC03/0xFC04.
+
+        zigpy only updates the attribute cache for records the device
+        accepted, which also refreshes the virtual % value through
+        _update_attribute. The cache must NOT be updated unconditionally: if
+        the device rejected the write, HA would keep showing a value the
+        dimmer never stored (seen 2026-11-04: HA showed min 100 % while the
+        device kept 51.5 %). After the write, the real attribute is read back
+        so HA always shows what the dimmer actually has.
+        """
         real = {}
         for key, value in attributes.items():
             attr_id = self.find_attribute(key).id
@@ -78,26 +87,48 @@ class TS110ELevelControl(CustomCluster, LevelControl):
             else:
                 real[key] = value
         result = await super().write_attributes(real, manufacturer, **kwargs)
-        # the device does not report the new value back on its own
-        for attr_id, raw in real.items():
-            if isinstance(attr_id, int) and attr_id in _REAL:
-                self._update_attribute(attr_id, raw)
+        written = [a for a in real if isinstance(a, int) and a in _REAL]
+        if written:
+            await self._read_live(written)
         return result
 
+    async def _read_live(self, attr_ids):
+        """Read real attributes from the device, ignoring the cache.
+
+        Errors (device asleep or unreachable) are swallowed: the caller then
+        falls back to whatever is in the cache.
+        """
+        try:
+            await super().read_attributes(attr_ids, allow_cache=False, only_cache=False)
+        except Exception as exc:  # noqa: BLE001 - any radio/timeout error
+            self.debug("live read of %s failed: %r", attr_ids, exc)
+
     async def read_attributes(self, attributes, *args, **kwargs):
-        """Serve the virtual % attributes by reading 0xFC03/0xFC04."""
+        """Serve the virtual % attributes by reading 0xFC03/0xFC04.
+
+        The real attributes behind the virtual ones are always read LIVE from
+        the device, even when the caller asked for cached values: the cache
+        held stale pairing-time values (11 / 1000) that overwrote the real
+        ones a few minutes after a restart.
+        """
         real, virt = [], []
         for attr in attributes:
             attr_id = self.find_attribute(attr).id
             (virt if attr_id in _VIRTUAL else real).append(attr)
+        targets = []
         for attr in virt:
             target = _VIRTUAL[self.find_attribute(attr).id]
-            if not any(self.find_attribute(a).id == target for a in real):
-                real.append(target)
+            if target not in targets:
+                targets.append(target)
+        # real attributes that are also read live are served from that read
+        also_live = [a for a in real if self.find_attribute(a).id in targets]
+        real = [a for a in real if a not in also_live]
         success, failure = (
             await super().read_attributes(real, *args, **kwargs) if real else ({}, {})
         )
-        for attr in virt:
+        if targets:
+            await self._read_live(targets)
+        for attr in also_live + virt:
             value = self.get(self.find_attribute(attr).id)
             if value is None:
                 failure[attr] = foundation.Status.UNSUPPORTED_ATTRIBUTE
