@@ -13,6 +13,7 @@ FC03 = 11, FC04 = 1000, 8002 = 2). Min/max are exposed as virtual
 attributes in % (1-100).
 """
 
+import asyncio
 from typing import Final
 
 from zigpy import types as t
@@ -46,6 +47,15 @@ _LEVEL_CMDS = {
     LevelControl.ServerCommandDefs.move_to_level_with_on_off.id,
 }
 _MAX_LEVEL = 253
+# Last values successfully written by the user (raw 0-1000), kept as virtual
+# attributes so zigpy persists them across HA restarts. The firmware does NOT
+# keep FC03/FC04 across a power loss: after the breaker is cycled both
+# channels come back as 515/767 (seen 2026-11-05) and report them on their
+# own; the quirk then writes the wanted values back.
+_WANT_MIN = 0xEF20
+_WANT_MAX = 0xEF21
+_WANT = {_MIN_RAW: _WANT_MIN, _MAX_RAW: _WANT_MAX}
+_RESTORE_COOLDOWN = 30  # s, avoids loops if the device keeps refusing
 
 
 def _raw_to_pct(raw: int) -> int:
@@ -68,6 +78,66 @@ class TS110ELevelControl(CustomCluster, LevelControl):
         max_brightness_raw: Final = ZCLAttributeDef(id=_MAX_RAW, type=t.uint16_t)
         min_brightness: Final = ZCLAttributeDef(id=_VIRT_MIN, type=t.uint8_t)
         max_brightness: Final = ZCLAttributeDef(id=_VIRT_MAX, type=t.uint8_t)
+        wanted_min_raw: Final = ZCLAttributeDef(id=_WANT_MIN, type=t.uint16_t)
+        wanted_max_raw: Final = ZCLAttributeDef(id=_WANT_MAX, type=t.uint16_t)
+
+    _restore_task = None
+    _last_restore = 0.0
+
+    def handle_cluster_general_request(self, hdr, args, *, dst_addressing=None):
+        """Restore the wanted min/max when the device reports other values.
+
+        After a power loss the dimmer reports FC03/FC04 on its own with its
+        default values; that report is the cue to write the wanted ones back.
+        """
+        super().handle_cluster_general_request(hdr, args, dst_addressing=dst_addressing)
+        if hdr.command_id != foundation.GeneralCommand.Report_Attributes:
+            return
+        reported = {
+            a.attrid: a.value.value
+            for a in getattr(args, "attribute_reports", [])
+            if a.attrid in _WANT
+        }
+        if reported:
+            self._schedule_restore(reported)
+
+    def _differs_from_wanted(self, values: dict[int, int]) -> dict[int, int]:
+        """Return {real attr: wanted raw} for values that differ from wanted."""
+        out = {}
+        for attr_id, value in values.items():
+            wanted = self.get(_WANT[attr_id])
+            if wanted is not None and value is not None and int(value) != int(wanted):
+                out[attr_id] = int(wanted)
+        return out
+
+    def _schedule_restore(self, values: dict[int, int]) -> None:
+        """Write the wanted values back if the device reported others."""
+        if not self._differs_from_wanted(values):
+            return
+        now = asyncio.get_running_loop().time()
+        if now - self._last_restore < _RESTORE_COOLDOWN or (
+            self._restore_task is not None and not self._restore_task.done()
+        ):
+            return
+        self._last_restore = now
+        self._restore_task = asyncio.create_task(self._restore())
+
+    async def _restore(self) -> None:
+        """Write every wanted min/max value to the device."""
+        wanted = {
+            attr_id: int(self.get(want_id))
+            for attr_id, want_id in _WANT.items()
+            if self.get(want_id) is not None
+        }
+        if not wanted:
+            return
+        self.debug("restoring min/max after the device lost them: %s", wanted)
+        # max first, so the device never sees min > max
+        ordered = dict(sorted(wanted.items(), key=lambda kv: kv[0] != _MAX_RAW))
+        try:
+            await self.write_attributes(ordered)
+        except Exception as exc:  # noqa: BLE001 - radio/timeout
+            self.debug("restore of %s failed: %r", wanted, exc)
 
     async def command(self, command_id, *args, **kwargs):
         """Cap move-to-level commands at level 253.
@@ -110,6 +180,18 @@ class TS110ELevelControl(CustomCluster, LevelControl):
         result = await super().write_attributes(real, manufacturer, **kwargs)
         written = [a for a in real if isinstance(a, int) and a in _REAL]
         if written:
+            records = result[0] if result and isinstance(result[0], list) else []
+            failed = {
+                r.attrid
+                for r in records
+                if r.status != foundation.Status.SUCCESS and r.attrid is not None
+            }
+            if any(r.status != foundation.Status.SUCCESS and r.attrid is None for r in records):
+                failed = set(written)  # a global failure: nothing was stored
+            for attr_id in written:
+                if attr_id not in failed:
+                    # remember what the user wants, to restore after a power loss
+                    self._update_attribute(_WANT[attr_id], int(real[attr_id]))
             await self._read_live(written)
         return result
 

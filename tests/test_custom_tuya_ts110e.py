@@ -175,3 +175,81 @@ async def test_level_capped_at_253(level, command, sent, expected):
 
     for call in request.await_args_list:
         assert expected in call.args or call.kwargs.get("level") == expected
+
+
+def _report(values: dict[int, int]):
+    """Build a ZCL Report_Attributes header/args pair."""
+    import zigpy.types as t
+
+    hdr = foundation.ZCLHeader.general(
+        tsn=1, command_id=foundation.GeneralCommand.Report_Attributes
+    )
+    args = foundation.GENERAL_COMMANDS[
+        foundation.GeneralCommand.Report_Attributes
+    ].schema(
+        attribute_reports=[
+            foundation.Attribute(a, foundation.TypeValue(t.uint16_t, v))
+            for a, v in values.items()
+        ]
+    )
+    return hdr, args
+
+
+async def test_power_loss_report_restores_wanted(level):
+    """After a power loss the device reports 515/767; the quirk restores."""
+    import asyncio
+
+    store = {MIN_RAW: 515, MAX_RAW: 767}
+    read, write = _device(store)
+    write_mock = mock.AsyncMock(side_effect=write)
+    with (
+        mock.patch.object(level, "_read_attributes", mock.AsyncMock(side_effect=read)),
+        mock.patch.object(level, "_write_attributes", write_mock),
+    ):
+        await level.write_attributes({"max_brightness": 100, "min_brightness": 100})
+        assert store == {MIN_RAW: 1000, MAX_RAW: 1000}
+        assert level.get(0xEF20) == 1000 and level.get(0xEF21) == 1000
+
+        # breaker cycled: the firmware forgets and reports its defaults
+        store.update({MIN_RAW: 515, MAX_RAW: 767})
+        write_mock.reset_mock()
+        level._last_restore = 0.0
+        level.handle_cluster_general_request(*_report({MIN_RAW: 515, MAX_RAW: 767}))
+        await asyncio.sleep(0)
+        await level._restore_task
+
+    assert store == {MIN_RAW: 1000, MAX_RAW: 1000}
+    assert level.get(MIN_PCT) == 100 and level.get(MAX_PCT) == 100
+    # max is written before min
+    first = write_mock.await_args_list[0].args[0]
+    assert [r.attrid for r in first][0] == MAX_RAW
+
+
+async def test_report_equal_to_wanted_does_nothing(level):
+    """A report matching the wanted values does not trigger a write."""
+    store = {MIN_RAW: 100, MAX_RAW: 1000}
+    read, write = _device(store)
+    write_mock = mock.AsyncMock(side_effect=write)
+    with (
+        mock.patch.object(level, "_read_attributes", mock.AsyncMock(side_effect=read)),
+        mock.patch.object(level, "_write_attributes", write_mock),
+    ):
+        await level.write_attributes({"min_brightness": 10, "max_brightness": 100})
+        write_mock.reset_mock()
+        level._last_restore = 0.0
+        level.handle_cluster_general_request(*_report({MIN_RAW: 100, MAX_RAW: 1000}))
+
+    assert level._restore_task is None or level._restore_task.done()
+    write_mock.assert_not_awaited()
+
+
+async def test_rejected_write_is_not_remembered(level):
+    """A rejected write must not become the wanted value."""
+    store = {MIN_RAW: 515, MAX_RAW: 767}
+    read, write = _device(store, accept_writes=False)
+    with (
+        mock.patch.object(level, "_read_attributes", mock.AsyncMock(side_effect=read)),
+        mock.patch.object(level, "_write_attributes", mock.AsyncMock(side_effect=write)),
+    ):
+        await level.write_attributes({"min_brightness": 100})
+    assert level.get(0xEF20) is None
