@@ -56,6 +56,7 @@ _WANT_MIN = 0xEF20
 _WANT_MAX = 0xEF21
 _WANT = {_MIN_RAW: _WANT_MIN, _MAX_RAW: _WANT_MAX}
 _RESTORE_COOLDOWN = 30  # s, avoids loops if the device keeps refusing
+_RESTORE_STEP = 2  # s between the max and the min write
 
 
 def _raw_to_pct(raw: int) -> int:
@@ -132,12 +133,16 @@ class TS110ELevelControl(CustomCluster, LevelControl):
         if not wanted:
             return
         self.debug("restoring min/max after the device lost them: %s", wanted)
-        # max first, so the device never sees min > max
-        ordered = dict(sorted(wanted.items(), key=lambda kv: kv[0] != _MAX_RAW))
-        try:
-            await self.write_attributes(ordered)
-        except Exception as exc:  # noqa: BLE001 - radio/timeout
-            self.debug("restore of %s failed: %r", wanted, exc)
+        # One attribute per frame, max first, with a pause: in a single frame
+        # the freshly powered device applies min before max, clamps min to
+        # the old max and drops the max (seen 2026-11-05: wanted 1000/1000
+        # came back as 767/767).
+        for attr_id in sorted(wanted, key=lambda a: a != _MAX_RAW):
+            try:
+                await self.write_attributes({attr_id: wanted[attr_id]})
+            except Exception as exc:  # noqa: BLE001 - radio/timeout
+                self.debug("restore of 0x%04X failed: %r", attr_id, exc)
+            await asyncio.sleep(_RESTORE_STEP)
 
     async def command(self, command_id, *args, **kwargs):
         """Cap move-to-level commands at level 253.

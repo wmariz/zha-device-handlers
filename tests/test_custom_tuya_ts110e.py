@@ -214,15 +214,16 @@ async def test_power_loss_report_restores_wanted(level):
         store.update({MIN_RAW: 515, MAX_RAW: 767})
         write_mock.reset_mock()
         level._last_restore = 0.0
-        level.handle_cluster_general_request(*_report({MIN_RAW: 515, MAX_RAW: 767}))
-        await asyncio.sleep(0)
-        await level._restore_task
+        with mock.patch.object(ts110e, "_RESTORE_STEP", 0):
+            level.handle_cluster_general_request(*_report({MIN_RAW: 515, MAX_RAW: 767}))
+            await asyncio.sleep(0)
+            await level._restore_task
 
     assert store == {MIN_RAW: 1000, MAX_RAW: 1000}
     assert level.get(MIN_PCT) == 100 and level.get(MAX_PCT) == 100
-    # max is written before min
-    first = write_mock.await_args_list[0].args[0]
-    assert [r.attrid for r in first][0] == MAX_RAW
+    # one attribute per frame, max first (a single frame came back 767/767)
+    frames = [[r.attrid for r in c.args[0]] for c in write_mock.await_args_list]
+    assert frames == [[MAX_RAW], [MIN_RAW]]
 
 
 async def test_report_equal_to_wanted_does_nothing(level):
