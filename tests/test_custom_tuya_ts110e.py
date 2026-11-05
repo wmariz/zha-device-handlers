@@ -254,3 +254,29 @@ async def test_rejected_write_is_not_remembered(level):
     ):
         await level.write_attributes({"min_brightness": 100})
     assert level.get(0xEF20) is None
+
+
+async def test_silent_recalibration_after_power_up_is_undone(level):
+    """The device reports stored values at power-up, then silently drops
+    the channel to 767/767; the delayed re-check restores the wanted ones."""
+    import asyncio
+
+    store = {MIN_RAW: 1000, MAX_RAW: 1000}
+    read, write = _device(store)
+    with (
+        mock.patch.object(level, "_read_attributes", mock.AsyncMock(side_effect=read)),
+        mock.patch.object(level, "_write_attributes", mock.AsyncMock(side_effect=write)),
+        mock.patch.object(ts110e, "_RECHECK_DELAYS", (0, 0)),
+        mock.patch.object(ts110e, "_RESTORE_STEP", 0),
+    ):
+        await level.write_attributes({"max_brightness": 100, "min_brightness": 100})
+
+        # power-up report matches the wanted values: no immediate restore
+        level.handle_cluster_general_request(*_report({MIN_RAW: 1000, MAX_RAW: 1000}))
+        assert level._recheck_task is not None
+        # ...but the firmware then re-calibrates silently
+        store.update({MIN_RAW: 767, MAX_RAW: 767})
+        await level._recheck_task
+
+    assert store == {MIN_RAW: 1000, MAX_RAW: 1000}
+    assert level.get(MIN_PCT) == 100 and level.get(MAX_PCT) == 100

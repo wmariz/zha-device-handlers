@@ -57,6 +57,11 @@ _WANT_MAX = 0xEF21
 _WANT = {_MIN_RAW: _WANT_MIN, _MAX_RAW: _WANT_MAX}
 _RESTORE_COOLDOWN = 30  # s, avoids loops if the device keeps refusing
 _RESTORE_STEP = 2  # s between the max and the min write
+# After power-up the device reports its STORED values, but a few minutes
+# later it silently re-calibrates a channel with a non-dimmable lamp to
+# 767/767 (no report; seen 2026-11-05 on the Box). Re-check live after these
+# delays (s, cumulative 30 s / 2 min / 5 min) and restore if needed.
+_RECHECK_DELAYS = (30, 90, 180)
 
 
 def _raw_to_pct(raw: int) -> int:
@@ -83,6 +88,7 @@ class TS110ELevelControl(CustomCluster, LevelControl):
         wanted_max_raw: Final = ZCLAttributeDef(id=_WANT_MAX, type=t.uint16_t)
 
     _restore_task = None
+    _recheck_task = None
     _last_restore = 0.0
 
     def handle_cluster_general_request(self, hdr, args, *, dst_addressing=None):
@@ -101,6 +107,25 @@ class TS110ELevelControl(CustomCluster, LevelControl):
         }
         if reported:
             self._schedule_restore(reported)
+            self._schedule_recheck()
+
+    def _schedule_recheck(self) -> None:
+        """Re-check min/max a few times after a power-up report."""
+        if not any(self.get(w) is not None for w in _WANT.values()):
+            return
+        if self._recheck_task is not None and not self._recheck_task.done():
+            return
+        self._recheck_task = asyncio.create_task(self._recheck())
+
+    async def _recheck(self) -> None:
+        """Read min/max live after each delay and restore if they drifted."""
+        for delay in _RECHECK_DELAYS:
+            await asyncio.sleep(delay)
+            await self._read_live(list(_WANT))
+            drift = self._differs_from_wanted({a: self.get(a) for a in _WANT})
+            if drift:
+                self.debug("min/max drifted after power-up: %s", drift)
+                await self._restore()
 
     def _differs_from_wanted(self, values: dict[int, int]) -> dict[int, int]:
         """Return {real attr: wanted raw} for values that differ from wanted."""
