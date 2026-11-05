@@ -40,6 +40,12 @@ _VIRT_MAX = 0xEF11
 # virtual (%) attribute -> real (0-1000) attribute
 _VIRTUAL = {_VIRT_MIN: _MIN_RAW, _VIRT_MAX: _MAX_RAW}
 _REAL = {v: k for k, v in _VIRTUAL.items()}
+# move_to_level (0x00) and move_to_level_with_on_off (0x04)
+_LEVEL_CMDS = {
+    LevelControl.ServerCommandDefs.move_to_level.id,
+    LevelControl.ServerCommandDefs.move_to_level_with_on_off.id,
+}
+_MAX_LEVEL = 253
 
 
 def _raw_to_pct(raw: int) -> int:
@@ -62,6 +68,21 @@ class TS110ELevelControl(CustomCluster, LevelControl):
         max_brightness_raw: Final = ZCLAttributeDef(id=_MAX_RAW, type=t.uint16_t)
         min_brightness: Final = ZCLAttributeDef(id=_VIRT_MIN, type=t.uint8_t)
         max_brightness: Final = ZCLAttributeDef(id=_VIRT_MAX, type=t.uint8_t)
+
+    async def command(self, command_id, *args, **kwargs):
+        """Cap move-to-level commands at level 253.
+
+        With level 254 (100 %) this firmware accepts the command but does not
+        switch the output on (seen 2026-11-05 with min 90 %/max 100 %: the
+        Interruptor Banheiro automation at 100 % failed, 99 % and a plain
+        turn_on worked). 253 is 99.6 %, indistinguishable in practice.
+        """
+        if int(command_id) in _LEVEL_CMDS:
+            if args and args[0] is not None and int(args[0]) > _MAX_LEVEL:
+                args = (t.uint8_t(_MAX_LEVEL), *args[1:])
+            elif kwargs.get("level") is not None and int(kwargs["level"]) > _MAX_LEVEL:
+                kwargs["level"] = t.uint8_t(_MAX_LEVEL)
+        return await super().command(command_id, *args, **kwargs)
 
     def _update_attribute(self, attrid, value):
         super()._update_attribute(attrid, value)

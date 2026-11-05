@@ -157,3 +157,21 @@ async def test_virtual_read_falls_back_to_cache_when_offline(level):
 
     assert failure == {}
     assert success == {"min_brightness": 99}
+
+
+@pytest.mark.parametrize(
+    ("command", "sent", "expected"),
+    [
+        ("move_to_level_with_on_off", 254, 253),
+        ("move_to_level", 254, 253),
+        ("move_to_level_with_on_off", 200, 200),
+    ],
+)
+async def test_level_capped_at_253(level, command, sent, expected):
+    """Level 254 is sent as 253 (the firmware does not turn on at 254)."""
+    with mock.patch.object(level, "request", mock.AsyncMock()) as request:
+        await getattr(level, command)(level=sent, transition_time=0)
+        await getattr(level, command)(sent, 0)
+
+    for call in request.await_args_list:
+        assert expected in call.args or call.kwargs.get("level") == expected
