@@ -169,12 +169,52 @@ async def test_virtual_read_falls_back_to_cache_when_offline(level):
 )
 async def test_level_capped_at_253(level, command, sent, expected):
     """Level 254 is sent as 253 (the firmware does not turn on at 254)."""
-    with mock.patch.object(level, "request", mock.AsyncMock()) as request:
+    with (
+        mock.patch.object(level, "request", mock.AsyncMock()) as request,
+        mock.patch.object(level.endpoint.on_off, "request", mock.AsyncMock()),
+    ):
         await getattr(level, command)(level=sent, transition_time=0)
         await getattr(level, command)(sent, 0)
 
     for call in request.await_args_list:
         assert expected in call.args or call.kwargs.get("level") == expected
+
+
+@pytest.mark.parametrize("call_style", ["kwargs", "args"])
+async def test_level_with_on_off_sends_plain_on(level, call_style):
+    """move_to_level_with_on_off -> move_to_level + OnOff.on() (the firmware
+    applies the level of the combined command but leaves the output off)."""
+    order = []
+    lvl_req = mock.AsyncMock(side_effect=lambda *a, **k: order.append(("level", a[1])))
+    on_req = mock.AsyncMock(side_effect=lambda *a, **k: order.append(("onoff", a[1])))
+    with (
+        mock.patch.object(level, "request", lvl_req),
+        mock.patch.object(level.endpoint.on_off, "request", on_req),
+    ):
+        if call_style == "kwargs":
+            await level.move_to_level_with_on_off(level=254, transition_time=0)
+        else:
+            await level.move_to_level_with_on_off(254, 0)
+
+    move_to_level = LevelControl.ServerCommandDefs.move_to_level.id
+    on = OnOff.ServerCommandDefs.on.id
+    assert order == [("level", move_to_level), ("onoff", on)]
+    call = lvl_req.await_args
+    assert 253 in call.args or call.kwargs.get("level") == 253
+
+
+async def test_level_with_on_off_zero_is_unchanged(level):
+    """Level 0 (turn off) keeps the combined command and sends no on()."""
+    lvl_req = mock.AsyncMock()
+    on_req = mock.AsyncMock()
+    with (
+        mock.patch.object(level, "request", lvl_req),
+        mock.patch.object(level.endpoint.on_off, "request", on_req),
+    ):
+        await level.move_to_level_with_on_off(level=0, transition_time=0)
+
+    assert lvl_req.await_args.args[1] == LevelControl.ServerCommandDefs.move_to_level_with_on_off.id
+    on_req.assert_not_awaited()
 
 
 def _report(values: dict[int, int]):

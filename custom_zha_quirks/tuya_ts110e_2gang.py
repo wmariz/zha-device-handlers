@@ -47,6 +47,8 @@ _LEVEL_CMDS = {
     LevelControl.ServerCommandDefs.move_to_level_with_on_off.id,
 }
 _MAX_LEVEL = 253
+_MOVE_TO_LEVEL = LevelControl.ServerCommandDefs.move_to_level.id
+_WITH_ON_OFF = LevelControl.ServerCommandDefs.move_to_level_with_on_off.id
 # Last values successfully written by the user (raw 0-1000), kept as virtual
 # attributes so zigpy persists them across HA restarts. The firmware does NOT
 # keep FC03/FC04 across a power loss: after the breaker is cycled both
@@ -182,6 +184,18 @@ class TS110ELevelControl(CustomCluster, LevelControl):
                 args = (t.uint8_t(_MAX_LEVEL), *args[1:])
             elif kwargs.get("level") is not None and int(kwargs["level"]) > _MAX_LEVEL:
                 kwargs["level"] = t.uint8_t(_MAX_LEVEL)
+        if int(command_id) == _WITH_ON_OFF:
+            level = args[0] if args else kwargs.get("level")
+            if level is not None and int(level) > 0:
+                # The firmware often applies the level of a
+                # move_to_level_with_on_off but leaves the output OFF (it
+                # answers SUCCESS and reports the level, never on_off=true;
+                # seen 2026-11-06 00:02 with level 253 on both channels).
+                # A plain OnOff.on() always works, so send the level without
+                # the on/off part and then switch on.
+                result = await super().command(_MOVE_TO_LEVEL, *args, **kwargs)
+                await self.endpoint.on_off.on()
+                return result
         return await super().command(command_id, *args, **kwargs)
 
     def _update_attribute(self, attrid, value):
