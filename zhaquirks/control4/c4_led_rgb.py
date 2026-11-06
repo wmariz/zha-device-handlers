@@ -107,6 +107,7 @@ Exported:
   rgb_to_xy_level / sync_led_entity — shared with c4_keypad_led_rgb.py
 """
 
+import asyncio
 import logging
 import os
 import sys
@@ -379,8 +380,32 @@ class C4LedColorCluster(_C4LocalOnlyReadMixin, CustomCluster, Color):
         self._update_attribute(self.AttributeDefs.current_x.id, color_x)
         self._update_attribute(self.AttributeDefs.current_y.id, color_y)
         self._last_move_to_color_time = time.monotonic()
-        await self._send_current_color()
+        self.request_send()
         return foundation.GeneralCommand.Default_Response, ZCLStatus.SUCCESS
+
+    # CONFIRMED on real hardware (2026-11-06, Hall/Closet LDZ-101): this
+    # zha version issues the on/level command BEFORE move_to_color for one
+    # light.turn_on(rgb_color=...), so the level handler's resend went out
+    # first with the STALE color and the real one ~150 ms later -- and the
+    # LED kept the stale one (it ignores the second frame for the same
+    # namespace that close together). The 1 s suppression window above only
+    # covered the opposite order. Every path now just requests a send; the
+    # frame goes out once, _SEND_DEBOUNCE s after the last request, with the
+    # final xy + level.
+    _SEND_DEBOUNCE = 0.25
+    _send_task = None
+
+    def request_send(self) -> None:
+        """Coalesce color/level/on-off changes into one wire frame."""
+        if self._send_task is not None and not self._send_task.done():
+            self._send_task.cancel()
+        self._send_task = asyncio.get_running_loop().create_task(
+            self._debounced_send()
+        )
+
+    async def _debounced_send(self) -> None:
+        await asyncio.sleep(self._SEND_DEBOUNCE)
+        await self._send_current_color()
 
     async def _send_current_color(self):
         """Recompute RGB from the cached xy/level and send it."""
@@ -490,7 +515,7 @@ class C4LedLevelControl(_C4LocalOnlyReadMixin, CustomCluster, LevelControl):
 
         color = self._color_cluster()
         if color is not None:
-            await color._send_current_color()
+            color.request_send()
 
         return self._SUCCESS
 
@@ -555,13 +580,8 @@ class C4LedOnOff(_C4LocalOnlyReadMixin, CustomCluster, OnOff):
             # stale pre-pick color ~150ms after the correct one. Skip
             # the resend when a real color command landed moments ago;
             # it already sent the right value.
-            if new_state and color.recently_set_explicitly():
-                _LOGGER.debug(
-                    "C4 %s: skipping on() color resend — a real "
-                    "move_to_color landed moments ago", color._C4_LABEL,
-                )
-            else:
-                await color._send_current_color()
+            # (debounced: one frame with the final color, see request_send)
+            color.request_send()
 
         self._update_attribute(self.AttributeDefs.on_off.id, new_state)
         return self._SUCCESS
