@@ -139,6 +139,7 @@ LED_OFF_COLOR_EP_MAP = {"top": 204, "bottom": 205}
 C4_ALL_LED_CLUSTER_ID = 0xFC48
 
 # Bit order of C4DimmerAllLedCluster.set_all_colors' `leds` mask.
+_LED_ATTACHED_EP = 201  # c4_attached_switch.ATTACHED_SWITCH_EP_MAP['led_attached']
 DIMMER_ALL_LED_MASK_EPS = (
     LED_COLOR_EP_MAP["top"],         # bit 0 — top on-color
     LED_COLOR_EP_MAP["bottom"],      # bit 1 — bottom on-color
@@ -403,9 +404,60 @@ class C4LedColorCluster(_C4LocalOnlyReadMixin, CustomCluster, Color):
             self._debounced_send()
         )
 
+    # LED "lit" state (2026-11-06): the Composer driver light_ip_control4.c4w
+    # carries `c4.dm.l0l 0|1` / `c4.dm.l1l 0|1` next to the l0o/l0f/l1o/l1f
+    # colors and a MATCH_LED_STATE / ON_COLOR / OFF_COLOR property group --
+    # the dimmer's analogue of the keypad's c4.kp.lv. With led_attached OFF
+    # the device no longer picks on/off color from the load, so a color
+    # write alone never shows (the LED answered 0r.. 000 but did not
+    # change). After a color write, while led_attached is off, select which
+    # of the two colors the LED shows: 1 = on-color, 0 = off-color.
+    _C4_STATE_CMD: str = ""
+    _STATE_GAP = 0.15
+
+    def _led_attached(self) -> bool:
+        ep = self.endpoint.device.endpoints.get(_LED_ATTACHED_EP)
+        cluster = ep.in_clusters.get(OnOff.cluster_id) if ep is not None else None
+        if cluster is None:
+            return True
+        return bool(cluster.get(OnOff.AttributeDefs.on_off.id, True))
+
+    async def _send_state_if_unattached(self) -> None:
+        if not self._C4_STATE_CMD or self._led_attached():
+            return
+        await asyncio.sleep(self._STATE_GAP)
+        await self._send_text(self._C4_STATE_CMD, "led state")
+
     async def _debounced_send(self) -> None:
         await asyncio.sleep(self._SEND_DEBOUNCE)
         await self._send_current_color()
+        await self._send_state_if_unattached()
+
+    async def _send_text(self, text: str, what: str) -> bool:
+        """Send a `0s<seq> <text>` command (no color payload)."""
+        device = self.endpoint.device
+        seq = next_c4_seq(device)
+        cmd = f"0s{seq:04x} {text}"
+        _LOGGER.info(
+            "C4 %s (endpoint %d): %s — cmd: %s",
+            self._C4_LABEL, self.endpoint.endpoint_id, what, cmd,
+        )
+        try:
+            await device.request(
+                profile=C4_PROFILE_BUTTON,
+                cluster=C4_CLUSTER_ID,
+                src_ep=1, dst_ep=1,
+                sequence=device.get_sequence(),
+                data=_build_c4_frame(seq, cmd),
+                expect_reply=False,
+            )
+        except Exception as e:
+            _LOGGER.warning(
+                "C4 %s (endpoint %d): failed to send %s — %s",
+                self._C4_LABEL, self.endpoint.endpoint_id, what, e,
+            )
+            return False
+        return True
 
     async def _send_current_color(self):
         """Recompute RGB from the cached xy/level and send it."""
@@ -450,6 +502,7 @@ class C4TopLedColorCluster(C4LedColorCluster):
     """Top button LED color — CONFIRMED c4.dm.l0o wire command."""
 
     _C4_NAMESPACE = "c4.dm.l0o"
+    _C4_STATE_CMD = "c4.dm.l0l 1"
     _C4_LABEL = "top_led_color"
 
 
@@ -457,6 +510,7 @@ class C4BottomLedColorCluster(C4LedColorCluster):
     """Bottom button LED color — CONFIRMED c4.dm.l1o wire command."""
 
     _C4_NAMESPACE = "c4.dm.l1o"
+    _C4_STATE_CMD = "c4.dm.l1l 1"
     _C4_LABEL = "bottom_led_color"
 
 
@@ -464,6 +518,7 @@ class C4TopLedOffColorCluster(C4LedColorCluster):
     """Top button LED off-color — CONFIRMED c4.dm.l0f wire command."""
 
     _C4_NAMESPACE = "c4.dm.l0f"
+    _C4_STATE_CMD = "c4.dm.l0l 0"
     _C4_LABEL = "top_led_off_color"
 
 
@@ -471,6 +526,7 @@ class C4BottomLedOffColorCluster(C4LedColorCluster):
     """Bottom button LED off-color — CONFIRMED c4.dm.l1f wire command."""
 
     _C4_NAMESPACE = "c4.dm.l1f"
+    _C4_STATE_CMD = "c4.dm.l1l 0"
     _C4_LABEL = "bottom_led_off_color"
 
 
@@ -663,6 +719,7 @@ class C4DimmerAllLedCluster(CustomCluster):
         rgb = (int(red), int(green), int(blue))
         rgb_hex = "%02x%02x%02x" % rgb
         mask = int(leds)
+        sent = []
         for bit, ep_id in enumerate(DIMMER_ALL_LED_MASK_EPS):
             if not mask & (1 << bit):
                 continue
@@ -682,6 +739,11 @@ class C4DimmerAllLedCluster(CustomCluster):
                 continue
             if await color._send_color(rgb_hex):
                 sync_led_entity(ep, *rgb)
+                sent.append(color)
+        # with led_attached off, make the LEDs actually show the new color
+        for color in sent:
+            if color._C4_STATE_CMD.endswith(" 0"):
+                await color._send_state_if_unattached()
 
     def handle_cluster_request(self, hdr, args, *, dst_addressing=None):
         _LOGGER.debug(
