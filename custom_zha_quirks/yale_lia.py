@@ -139,6 +139,27 @@ class LiaAlarm(t.enum8):
     locals()["Porta aberta com a lingueta para fora"] = 0x06
 
 
+_UNLOCK = 0x02  # Unlock (keypad, RF, RFID, fingerprint)
+_MANUAL_UNLOCK = 0x0E  # inner thumbturn (the physical key reports it too)
+_OUTSIDE_SOURCES = (0x00, 0x03, 0x04)  # keypad, card, fingerprint
+_REMOTE_SOURCE = 0x01  # Zigbee: HA, app, voice assistants
+
+
+def _unlock_side(code: int, src: int) -> str | None:
+    """Which side an unlock came from (2026-11-06 house-mode redesign).
+
+    unlock_inside = thumbturn (or the rare physical key, same event);
+    unlock_remote = HA / app / voice; unlock_outside = PIN, card, finger.
+    """
+    if code == _MANUAL_UNLOCK:
+        return "unlock_inside"
+    if code == _UNLOCK and src == _REMOTE_SOURCE:
+        return "unlock_remote"
+    if code == _UNLOCK and src in _OUTSIDE_SOURCES:
+        return "unlock_outside"
+    return None
+
+
 class YaleLiaAlarms(CustomCluster, Alarms):
     """Alarms server the lock uses but does not declare.
 
@@ -257,6 +278,14 @@ class YaleLiaDoorLock(CustomCluster, DoorLock):
                     "source": LiaActionSource(src).name,
                 },
             )
+            # flat per-side events, so HA automations can trigger on the
+            # command alone (native event_data matching cannot match nested
+            # args partially, and the sensors do not change on repeats)
+            side = _unlock_side(code, src)
+            if side is not None:
+                self.listener_event(
+                    "zha_send_event", side, {"user_id": int(args.user_id)}
+                )
         super().handle_cluster_request(hdr, args, dst_addressing=dst_addressing)
 
     async def read_attributes(self, attributes, *args, **kwargs):
