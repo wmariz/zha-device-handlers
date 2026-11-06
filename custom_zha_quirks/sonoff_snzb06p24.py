@@ -15,11 +15,13 @@ Sonoff sends/accepts these without a manufacturer code.
 The zone switches and the learning state are virtual (local) attributes.
 """
 
+import asyncio
 import time
 from typing import Final
 
 from zigpy import types as t
 from zigpy.zcl import foundation
+from zigpy.zcl.clusters.measurement import IlluminanceMeasurement, OccupancySensing
 from zigpy.zcl.foundation import BaseAttributeDefs, ZCLAttributeDef, ZCLCommandDef
 
 from zhaquirks.builder import EntityPlatform, EntityType, QuirkBuilder
@@ -30,6 +32,15 @@ _ZONE_ENABLE = 0x2016
 _VIRT_ZONE_BASE = 0xEF00  # zone n -> 0xEF00 + n
 _LEARN_STATE = 0xEF10
 _LEARN_CMD = 0x04
+# Illuminance freshness (2026-11-06): with ZHA's default reporting (min 30 s)
+# the lux value lagged ~30 s behind the room. Right after the lights went off
+# the sensor still said 71 lx, so the presence automation (lux < 20) refused
+# to turn them back on. Read lux shortly after every occupancy change and ask
+# for reports at most every _LUX_MIN_INTERVAL s. The device is USB powered.
+_LUX_READ_DELAYS = (2, 4)  # s, cumulative 2 s and 6 s after the change
+_LUX_MIN_INTERVAL = 5
+_MEASURED_VALUE = IlluminanceMeasurement.AttributeDefs.measured_value.id
+_OCCUPANCY = OccupancySensing.AttributeDefs.occupancy.id
 
 
 class _RawBytes(bytes):
@@ -197,11 +208,66 @@ class SonoffSNZB06P24Cluster(CustomCluster):
         super().handle_cluster_request(hdr, args, dst_addressing=dst_addressing)
 
 
+class SNZB06P24Illuminance(CustomCluster, IlluminanceMeasurement):
+    """Illuminance with a short minimum reporting interval."""
+
+    async def configure_reporting(
+        self, attribute, min_interval, max_interval, reportable_change, manufacturer=None
+    ):
+        """Cap the minimum interval of measured_value reports."""
+        if self.find_attribute(attribute).id == _MEASURED_VALUE:
+            min_interval = min(int(min_interval), _LUX_MIN_INTERVAL)
+        return await super().configure_reporting(
+            attribute, min_interval, max_interval, reportable_change, manufacturer
+        )
+
+    async def configure_reporting_multiple(self, attributes, manufacturer=None):
+        """Cap the minimum interval of measured_value reports."""
+        attributes = dict(attributes)
+        for attr, (min_i, max_i, change) in list(attributes.items()):
+            if self.find_attribute(attr).id == _MEASURED_VALUE:
+                attributes[attr] = (min(int(min_i), _LUX_MIN_INTERVAL), max_i, change)
+        return await super().configure_reporting_multiple(attributes, manufacturer)
+
+
+class SNZB06P24Occupancy(CustomCluster, OccupancySensing):
+    """Occupancy that refreshes the illuminance right after each change."""
+
+    _lux_task = None
+
+    def _update_attribute(self, attrid, value):
+        old = self.get(attrid)
+        super()._update_attribute(attrid, value)
+        if attrid == _OCCUPANCY and value != old:
+            self._schedule_lux_refresh()
+
+    def _schedule_lux_refresh(self) -> None:
+        if self._lux_task is not None and not self._lux_task.done():
+            self._lux_task.cancel()
+        try:
+            self._lux_task = asyncio.get_running_loop().create_task(self._refresh_lux())
+        except RuntimeError:  # no loop (cache restore at import time)
+            self._lux_task = None
+
+    async def _refresh_lux(self) -> None:
+        lux = getattr(self.endpoint, "illuminance", None)
+        if lux is None:
+            return
+        for delay in _LUX_READ_DELAYS:
+            await asyncio.sleep(delay)
+            try:
+                await lux.read_attributes([_MEASURED_VALUE], allow_cache=False)
+            except Exception as exc:  # noqa: BLE001 - radio/timeout
+                self.debug("illuminance refresh failed: %r", exc)
+
+
 _ZONE_RANGES = ["0-1 m"] + [f"{n * 0.5:g}-{n * 0.5 + 0.5:g} m" for n in range(2, _ZONES + 1)]
 
 builder = (
     QuirkBuilder("SONOFF", "SNZB-06P24")
     .replaces(SonoffSNZB06P24Cluster)
+    .replaces(SNZB06P24Occupancy)
+    .replaces(SNZB06P24Illuminance)
     .number(
         SonoffSNZB06P24Cluster.AttributeDefs.radar_sensitivity.name,
         SonoffSNZB06P24Cluster.cluster_id,
