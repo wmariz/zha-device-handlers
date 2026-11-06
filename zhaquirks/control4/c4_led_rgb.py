@@ -735,6 +735,25 @@ class C4DimmerAllLedCluster(CustomCluster):
             },
             is_manufacturer_specific=True,
         )
+        # Reverse-engineering aid (2026-11-06): send any `c4.*` text as one
+        # `0s<seq> <text>` frame through the per-device LED queue, e.g.
+        # "c4.dmx.led 00 02 02". Call via zha.issue_zigbee_cluster_command
+        # (endpoint 197, cluster 0xFC48, command 1, params {"text": ...}).
+        send_raw = ZCLCommandDef(
+            id=0x01,
+            schema={"text": t.CharacterString},
+            is_manufacturer_specific=True,
+        )
+
+    async def send_raw(self, text, **kwargs):
+        text = str(text).strip()
+        if not text.startswith("c4."):
+            _LOGGER.warning("C4 send_raw: refusing %r (must start with 'c4.')", text)
+            return
+        cmd = await _send_c4_serialized(
+            self.endpoint.device, lambda seq: f"0s{seq:04x} {text}"
+        )
+        _LOGGER.info("C4 send_raw: %s", cmd)
 
     async def set_all_colors(self, red, green, blue, leds=0x0F):
         rgb = (int(red), int(green), int(blue))
