@@ -139,6 +139,46 @@ LED_OFF_COLOR_EP_MAP = {"top": 204, "bottom": 205}
 C4_ALL_LED_CLUSTER_ID = 0xFC48
 
 # Bit order of C4DimmerAllLedCluster.set_all_colors' `leds` mask.
+# CONFIRMED on the Hall LDZ-101 (2026-11-06): two LEDs changed together sent
+# their frames at the same instant (one debounced task per LED) and the
+# dimmer applied NONE of the four (two colors + two l<n>l states); spaced
+# frames work. All LED frames to one device go through this per-device
+# lock, at least _FRAME_GAP s apart. State lives on the device object (the
+# custom-quirk module can be imported twice).
+_FRAME_GAP = 0.3
+
+
+async def _send_c4_serialized(device, cmd_text_fn):
+    """Send one C4 frame per call, serialized per device with a min gap.
+
+    cmd_text_fn(seq) -> the ascii command; the seq is drawn inside the lock
+    so frames go out in sequence order.
+    """
+    lock = getattr(device, "_c4_led_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        device._c4_led_lock = lock
+    async with lock:
+        loop = asyncio.get_running_loop()
+        wait = getattr(device, "_c4_led_last", 0.0) + _FRAME_GAP - loop.time()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        seq = next_c4_seq(device)
+        cmd = cmd_text_fn(seq)
+        try:
+            await device.request(
+                profile=C4_PROFILE_BUTTON,
+                cluster=C4_CLUSTER_ID,
+                src_ep=1, dst_ep=1,
+                sequence=device.get_sequence(),
+                data=_build_c4_frame(seq, cmd),
+                expect_reply=False,
+            )
+        finally:
+            device._c4_led_last = loop.time()
+        return cmd
+
+
 _LED_ATTACHED_EP = 201  # c4_attached_switch.ATTACHED_SWITCH_EP_MAP['led_attached']
 DIMMER_ALL_LED_MASK_EPS = (
     LED_COLOR_EP_MAP["top"],         # bit 0 — top on-color
@@ -425,7 +465,6 @@ class C4LedColorCluster(_C4LocalOnlyReadMixin, CustomCluster, Color):
     async def _send_state_if_unattached(self) -> None:
         if not self._C4_STATE_CMD or self._led_attached():
             return
-        await asyncio.sleep(self._STATE_GAP)
         await self._send_text(self._C4_STATE_CMD, "led state")
 
     async def _debounced_send(self) -> None:
@@ -435,21 +474,9 @@ class C4LedColorCluster(_C4LocalOnlyReadMixin, CustomCluster, Color):
 
     async def _send_text(self, text: str, what: str) -> bool:
         """Send a `0s<seq> <text>` command (no color payload)."""
-        device = self.endpoint.device
-        seq = next_c4_seq(device)
-        cmd = f"0s{seq:04x} {text}"
-        _LOGGER.info(
-            "C4 %s (endpoint %d): %s — cmd: %s",
-            self._C4_LABEL, self.endpoint.endpoint_id, what, cmd,
-        )
         try:
-            await device.request(
-                profile=C4_PROFILE_BUTTON,
-                cluster=C4_CLUSTER_ID,
-                src_ep=1, dst_ep=1,
-                sequence=device.get_sequence(),
-                data=_build_c4_frame(seq, cmd),
-                expect_reply=False,
+            cmd = await _send_c4_serialized(
+                self.endpoint.device, lambda seq: f"0s{seq:04x} {text}"
             )
         except Exception as e:
             _LOGGER.warning(
@@ -457,6 +484,10 @@ class C4LedColorCluster(_C4LocalOnlyReadMixin, CustomCluster, Color):
                 self._C4_LABEL, self.endpoint.endpoint_id, what, e,
             )
             return False
+        _LOGGER.info(
+            "C4 %s (endpoint %d): %s — cmd: %s",
+            self._C4_LABEL, self.endpoint.endpoint_id, what, cmd,
+        )
         return True
 
     async def _send_current_color(self):
@@ -470,24 +501,10 @@ class C4LedColorCluster(_C4LocalOnlyReadMixin, CustomCluster, Color):
 
         Returns True if the frame was handed to the radio.
         """
-        device = self.endpoint.device
-        seq = next_c4_seq(device)
-        cmd = f"0s{seq:04x} {self._C4_NAMESPACE} {rgb_hex}"
-
-        _LOGGER.info(
-            "C4 %s (endpoint %d): setting color=%s — cmd: %s",
-            self._C4_LABEL, self.endpoint.endpoint_id, rgb_hex, cmd,
-        )
-
-        frame = _build_c4_frame(seq, cmd)
+        ns = self._C4_NAMESPACE
         try:
-            await device.request(
-                profile=C4_PROFILE_BUTTON,
-                cluster=C4_CLUSTER_ID,
-                src_ep=1, dst_ep=1,
-                sequence=device.get_sequence(),
-                data=frame,
-                expect_reply=False,
+            cmd = await _send_c4_serialized(
+                self.endpoint.device, lambda seq: f"0s{seq:04x} {ns} {rgb_hex}"
             )
         except Exception as e:
             _LOGGER.warning(
@@ -495,6 +512,10 @@ class C4LedColorCluster(_C4LocalOnlyReadMixin, CustomCluster, Color):
                 self._C4_LABEL, self.endpoint.endpoint_id, rgb_hex, e,
             )
             return False
+        _LOGGER.info(
+            "C4 %s (endpoint %d): setting color=%s — cmd: %s",
+            self._C4_LABEL, self.endpoint.endpoint_id, rgb_hex, cmd,
+        )
         return True
 
 
