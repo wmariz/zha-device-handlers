@@ -367,3 +367,35 @@ async def test_no_mapping_without_range(level):
         await level.move_to_level(level=3, transition_time=0)
     call = request.await_args
     assert 3 in call.args or call.kwargs.get("level") == 3
+
+
+async def test_on_off_read_served_from_commanded_state(level):
+    """on_off reads never hit the device (it always answers TRUE); the
+    cache follows the on/off commands."""
+    on_off = level.endpoint.on_off
+    ok = mock.Mock(status=foundation.Status.SUCCESS)
+    with mock.patch.object(on_off, "request", mock.AsyncMock(return_value=ok)):
+        await on_off.on()
+        assert on_off.get(0) is True or on_off.get(0) == 1
+        await on_off.off()
+    assert not on_off.get(0)
+
+    async def device_says_true(*a, **k):
+        raise AssertionError("on_off must not be read from the device")
+
+    with mock.patch.object(type(on_off).__mro__[2], "read_attributes", device_says_true):
+        success, failure = await on_off.read_attributes(["on_off"], allow_cache=False)
+    assert not success["on_off"] and not failure
+
+
+async def test_level_zero_off_updates_on_off_cache(level):
+    """light.turn_off with a transition (level 0) leaves on_off = False."""
+    on_off = level.endpoint.on_off
+    on_off._update_attribute(0, True)
+    ok = mock.Mock(status=foundation.Status.SUCCESS)
+    with (
+        mock.patch.object(level, "request", mock.AsyncMock()),
+        mock.patch.object(on_off, "request", mock.AsyncMock(return_value=ok)),
+    ):
+        await level.move_to_level_with_on_off(level=0, transition_time=0)
+    assert not on_off.get(0)

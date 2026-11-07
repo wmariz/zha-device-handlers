@@ -360,6 +360,51 @@ class TS110EOnOff(CustomCluster, OnOff):
 
         power_on_behavior: Final = ZCLAttributeDef(id=0x8002, type=PowerOnState)
 
+    async def command(self, command_id, *args, **kwargs):
+        """Remember the on/off state this quirk commanded."""
+        result = await super().command(command_id, *args, **kwargs)
+        cmd = int(command_id)
+        if cmd in (_OFF, _ON) and _succeeded(result):
+            self._update_attribute(_ON_OFF, t.Bool(cmd == _ON))
+        elif cmd == _TOGGLE and _succeeded(result):
+            self._update_attribute(_ON_OFF, t.Bool(not self.get(_ON_OFF)))
+        return result
+
+    async def read_attributes(self, attributes, *args, **kwargs):
+        """Serve on_off from the cache instead of asking the device.
+
+        A live read of on_off ALWAYS answers TRUE on this firmware, even
+        right after an OnOff.off() that really darkened the lamp (seen
+        2026-11-07: lux 0, read = true). ZHA's periodic light refresh
+        (45-75 min) then showed both lights ON all night. The cache holds
+        what was commanded (see command()) or reported.
+        """
+        cached, real = {}, []
+        for attr in attributes:
+            if self.find_attribute(attr).id == _ON_OFF and self.get(_ON_OFF) is not None:
+                cached[attr] = self.get(_ON_OFF)
+            else:
+                real.append(attr)
+        success, failure = (
+            await super().read_attributes(real, *args, **kwargs) if real else ({}, {})
+        )
+        success.update(cached)
+        return success, failure
+
+
+_ON_OFF = OnOff.AttributeDefs.on_off.id
+_OFF = OnOff.ServerCommandDefs.off.id
+_ON = OnOff.ServerCommandDefs.on.id
+_TOGGLE = OnOff.ServerCommandDefs.toggle.id
+
+
+def _succeeded(result) -> bool:
+    """True unless the default response carries an error status."""
+    status = getattr(result, "status", None)
+    if status is None and isinstance(result, (list, tuple)) and len(result) > 1:
+        status = result[1]
+    return status in (None, foundation.Status.SUCCESS)
+
 
 builder = QuirkBuilder("_TZ3210_3mpwqzuu", "TS110E")
 for _ep in (1, 2):
