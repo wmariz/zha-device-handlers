@@ -18,6 +18,7 @@ import asyncio
 from typing import Final
 
 from zigpy import types as t
+from zigpy.exceptions import DeliveryError
 from zigpy.quirks import CustomCluster
 from zigpy.zcl import foundation
 from zigpy.zcl.clusters.general import LevelControl, OnOff
@@ -68,6 +69,34 @@ _RESTORE_STEP = 2  # s between the max and the min write
 _RECHECK_DELAYS = (30, 90, 180)
 
 
+_RETRY_DELAY = 0.5  # s before the single retry of a failed request
+
+
+async def _serialized_request(cluster, send, *args, **kwargs):
+    """Send one request at a time per device, retrying once on a timeout.
+
+    Seen 2026-11-07: commands to this dimmer occasionally get no answer
+    ("device did not respond"): from the UI slider (15:30, 15:31) and from
+    the presence automation turning both channels on through the light
+    group (10:04, 10:52). The link is good (LQI 132), so frames that overlap
+    on the device are the likely cause. Both channels and both clusters share
+    one lock (kept on the device object, which is shared even when this
+    module is imported twice), and a lost request is sent once more.
+    """
+    device = cluster.endpoint.device
+    lock = getattr(device, "_ts110e_request_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        device._ts110e_request_lock = lock
+    async with lock:
+        try:
+            return await send(*args, **kwargs)
+        except (DeliveryError, asyncio.TimeoutError) as exc:
+            cluster.debug("request failed (%r), retrying once", exc)
+            await asyncio.sleep(_RETRY_DELAY)
+            return await send(*args, **kwargs)
+
+
 def _raw_to_pct(raw: int) -> int:
     return max(1, min(100, round(raw / 10)))
 
@@ -90,6 +119,10 @@ class TS110ELevelControl(CustomCluster, LevelControl):
         max_brightness: Final = ZCLAttributeDef(id=_VIRT_MAX, type=t.uint8_t)
         wanted_min_raw: Final = ZCLAttributeDef(id=_WANT_MIN, type=t.uint16_t)
         wanted_max_raw: Final = ZCLAttributeDef(id=_WANT_MAX, type=t.uint16_t)
+
+    async def request(self, *args, **kwargs):
+        """Serialize and retry requests (see _serialized_request)."""
+        return await _serialized_request(self, super().request, *args, **kwargs)
 
     _restore_task = None
     _recheck_task = None
@@ -369,6 +402,10 @@ class TS110EOnOff(CustomCluster, OnOff):
         """Attribute definitions."""
 
         power_on_behavior: Final = ZCLAttributeDef(id=0x8002, type=PowerOnState)
+
+    async def request(self, *args, **kwargs):
+        """Serialize and retry requests (see _serialized_request)."""
+        return await _serialized_request(self, super().request, *args, **kwargs)
 
     async def command(self, command_id, *args, **kwargs):
         """Remember the on/off state this quirk commanded."""

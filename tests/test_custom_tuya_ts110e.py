@@ -414,3 +414,50 @@ async def test_current_level_read_served_from_last_ha_level(level):
         success, _ = await level.read_attributes(["current_level"], allow_cache=False)
     assert success["current_level"] == 128
     live.assert_not_awaited()
+
+
+async def test_requests_are_serialized_per_device(level):
+    """Both clusters (and both channels) share one request lock."""
+    import asyncio
+
+    on_off = level.endpoint.on_off
+    active, peak = 0, 0
+
+    async def slow(*a, **k):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return mock.Mock(status=foundation.Status.SUCCESS)
+
+    with (
+        mock.patch.object(type(level).__mro__[1], "request", side_effect=slow, autospec=False),
+        mock.patch.object(type(on_off).__mro__[1], "request", side_effect=slow, autospec=False),
+    ):
+        await asyncio.gather(
+            level.move_to_level(level=100, transition_time=0),
+            on_off.on(),
+            level.move_to_level(level=50, transition_time=0),
+        )
+    assert peak == 1
+
+
+async def test_failed_request_is_retried_once(level):
+    """A request that gets no answer is sent once more."""
+    from zigpy.exceptions import DeliveryError
+
+    calls = []
+
+    async def flaky(*a, **k):
+        calls.append(a)
+        if len(calls) == 1:
+            raise DeliveryError("no ack")
+        return mock.Mock(status=foundation.Status.SUCCESS)
+
+    with (
+        mock.patch.object(ts110e, "_RETRY_DELAY", 0),
+        mock.patch.object(type(level).__mro__[1], "request", side_effect=flaky, autospec=False),
+    ):
+        await level.move_to_level(level=100, transition_time=0)
+    assert len(calls) == 2
