@@ -2,8 +2,9 @@
 
 Plain ZCL device on endpoints 1 and 2. Without a quirk ZHA only exposes the
 two lights; standard move_to_level_with_on_off works (verified 2026-10-29,
-level 150 -> reported 0x0000 = 150, 0xF000 = 589), so brightness is left
-untouched. zigbee2mqtt ("TS110E_2gang_2") also exposes, per channel:
+level 150 -> reported 0x0000 = 150, 0xF000 = 589). The firmware does not
+rescale levels into its min/max range, so the quirk maps HA 1-254 onto
+min..max (and back for reports). zigbee2mqtt ("TS110E_2gang_2") also exposes, per channel:
     0x0008 / 0xFC02 switch type        uint8 (0 momentary, 1 toggle, 2 state)
     0x0008 / 0xFC03 min brightness     uint16 0-1000
     0x0008 / 0xFC04 max brightness     uint16 0-1000
@@ -92,6 +93,7 @@ class TS110ELevelControl(CustomCluster, LevelControl):
     _restore_task = None
     _recheck_task = None
     _last_restore = 0.0
+    _last_ha_level = None
 
     def handle_cluster_general_request(self, hdr, args, *, dst_addressing=None):
         """Restore the wanted min/max when the device reports other values.
@@ -180,10 +182,14 @@ class TS110ELevelControl(CustomCluster, LevelControl):
         turn_on worked). 253 is 99.6 %, indistinguishable in practice.
         """
         if int(command_id) in _LEVEL_CMDS:
-            if args and args[0] is not None and int(args[0]) > _MAX_LEVEL:
-                args = (t.uint8_t(_MAX_LEVEL), *args[1:])
-            elif kwargs.get("level") is not None and int(kwargs["level"]) > _MAX_LEVEL:
-                kwargs["level"] = t.uint8_t(_MAX_LEVEL)
+            if args and args[0] is not None:
+                if int(args[0]) > 0:
+                    self._last_ha_level = int(args[0])
+                args = (t.uint8_t(self._to_device(int(args[0]))), *args[1:])
+            elif kwargs.get("level") is not None:
+                if int(kwargs["level"]) > 0:
+                    self._last_ha_level = int(kwargs["level"])
+                kwargs["level"] = t.uint8_t(self._to_device(int(kwargs["level"])))
         if int(command_id) == _WITH_ON_OFF:
             level = args[0] if args else kwargs.get("level")
             if level is not None and int(level) > 0:
@@ -198,7 +204,60 @@ class TS110ELevelControl(CustomCluster, LevelControl):
                 return result
         return await super().command(command_id, *args, **kwargs)
 
+    def _range(self) -> tuple[int, int] | None:
+        """Return the (min, max) output range in raw 0-1000, if known."""
+        lo = self.get(_MIN_RAW)
+        if lo is None:
+            lo = self.get(_WANT_MIN)
+        hi = self.get(_MAX_RAW)
+        if hi is None:
+            hi = self.get(_WANT_MAX)
+        if lo is None or hi is None:
+            return None
+        lo, hi = int(lo), int(hi)
+        if hi <= lo or (lo <= 0 and hi >= 1000):
+            return None
+        return lo, hi
+
+    def _to_device(self, level: int) -> int:
+        """Map an HA level (1-254) onto the device's min..max output.
+
+        The firmware does NOT rescale levels into its min/max range: with
+        min 20 % (0xFC03 = 200) an HA brightness of 1 % stays dark (seen
+        2026-11-06 on the Box PAR20). So 1 -> min and 254 -> max here, and
+        the result is capped at 253 (see command()).
+        """
+        if level <= 0:
+            return 0
+        rng = self._range()
+        if rng is not None:
+            lo, hi = rng
+            raw = lo + (hi - lo) * (min(level, 254) - 1) / 253
+            level = round(raw * 254 / 1000)
+        return max(1, min(_MAX_LEVEL, level))
+
+    def _from_device(self, level: int) -> int:
+        """Inverse of _to_device, for levels reported by the device."""
+        if level <= 0:
+            return level
+        rng = self._range()
+        if rng is None:
+            return min(level, 254)
+        lo, hi = rng
+        raw = level * 1000 / 254
+        return max(1, min(254, round(1 + (raw - lo) * 253 / (hi - lo))))
+
     def _update_attribute(self, attrid, value):
+        if attrid == LevelControl.AttributeDefs.current_level.id and value is not None:
+            if int(value) == 0xFF:
+                # The firmware reports current_level 255 (invalid) after every
+                # level change (seen 2026-11-06), which HA shows as 100 %:
+                # keep the last level HA asked for instead.
+                if self._last_ha_level is None:
+                    return
+                value = self._last_ha_level
+            else:
+                value = self._from_device(int(value))
         super()._update_attribute(attrid, value)
         if attrid in _REAL and value is not None:
             super()._update_attribute(_REAL[attrid], _raw_to_pct(value))

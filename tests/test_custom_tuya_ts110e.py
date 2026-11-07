@@ -320,3 +320,49 @@ async def test_silent_recalibration_after_power_up_is_undone(level):
 
     assert store == {MIN_RAW: 1000, MAX_RAW: 1000}
     assert level.get(MIN_PCT) == 100 and level.get(MAX_PCT) == 100
+
+
+@pytest.mark.parametrize(
+    ("ha_level", "device_level"),
+    [(1, 51), (254, 253), (128, 153), (0, 0)],
+)
+async def test_level_mapped_into_min_max(level, ha_level, device_level):
+    """With min 20 %/max 100 %, HA 1 -> device 20 % (51), 254 -> max (capped)."""
+    level._update_attribute(MIN_RAW, 200)
+    level._update_attribute(MAX_RAW, 1000)
+    with (
+        mock.patch.object(level, "request", mock.AsyncMock()) as request,
+        mock.patch.object(level.endpoint.on_off, "request", mock.AsyncMock()),
+    ):
+        await level.move_to_level(level=ha_level, transition_time=0)
+    call = request.await_args
+    assert device_level in call.args or call.kwargs.get("level") == device_level
+
+
+async def test_reported_level_mapped_back(level):
+    """Device levels are shown in the HA scale; 255 keeps the last HA level."""
+    level._update_attribute(MIN_RAW, 200)
+    level._update_attribute(MAX_RAW, 1000)
+    current = LevelControl.AttributeDefs.current_level.id
+    level._update_attribute(current, 51)
+    assert level.get(current) == 1
+    level._update_attribute(current, 254)
+    assert level.get(current) == 254
+    with (
+        mock.patch.object(level, "request", mock.AsyncMock()),
+        mock.patch.object(level.endpoint.on_off, "request", mock.AsyncMock()),
+    ):
+        await level.move_to_level_with_on_off(level=51, transition_time=0)
+    level._update_attribute(current, 255)
+    assert level.get(current) == 51
+
+
+async def test_no_mapping_without_range(level):
+    """Without known min/max the level passes through unchanged."""
+    with (
+        mock.patch.object(level, "request", mock.AsyncMock()) as request,
+        mock.patch.object(level.endpoint.on_off, "request", mock.AsyncMock()),
+    ):
+        await level.move_to_level(level=3, transition_time=0)
+    call = request.await_args
+    assert 3 in call.args or call.kwargs.get("level") == 3
