@@ -203,8 +203,9 @@ async def test_level_with_on_off_sends_plain_on(level, call_style):
     assert 253 in call.args or call.kwargs.get("level") == 253
 
 
-async def test_level_with_on_off_zero_is_unchanged(level):
-    """Level 0 (turn off) keeps the combined command and sends no on()."""
+async def test_level_with_on_off_zero_sends_plain_off(level):
+    """Level 0 (turn off) -> OnOff.off() only: the combined command darkens
+    the output but leaves on_off TRUE, so ZHA's refresh showed a ghost ON."""
     lvl_req = mock.AsyncMock()
     on_req = mock.AsyncMock()
     with (
@@ -213,8 +214,8 @@ async def test_level_with_on_off_zero_is_unchanged(level):
     ):
         await level.move_to_level_with_on_off(level=0, transition_time=0)
 
-    assert lvl_req.await_args.args[1] == LevelControl.ServerCommandDefs.move_to_level_with_on_off.id
-    on_req.assert_not_awaited()
+    lvl_req.assert_not_awaited()
+    assert on_req.await_args.args[1] == OnOff.ServerCommandDefs.off.id
 
 
 def _report(values: dict[int, int]):

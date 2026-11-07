@@ -202,6 +202,15 @@ class TS110ELevelControl(CustomCluster, LevelControl):
                 result = await super().command(_MOVE_TO_LEVEL, *args, **kwargs)
                 await self.endpoint.on_off.on()
                 return result
+            if level is not None and int(level) == 0:
+                # Turning off with move_to_level_with_on_off(0) (what ZHA
+                # sends for light.turn_off with a transition) darkens the
+                # output but leaves the OnOff attribute TRUE. ZHA's periodic
+                # light refresh (every 45-75 min) then reads on_off = true and
+                # shows the light ON while it is dark (seen night of
+                # 2026-11-07: ghost "on" at 00:58/01:12/03:15/03:39, lux 0).
+                # A plain OnOff.off() switches off and clears the attribute.
+                return await self.endpoint.on_off.off()
         return await super().command(command_id, *args, **kwargs)
 
     def _range(self) -> tuple[int, int] | None:
