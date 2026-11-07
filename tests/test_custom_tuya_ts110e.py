@@ -399,3 +399,18 @@ async def test_level_zero_off_updates_on_off_cache(level):
     ):
         await level.move_to_level_with_on_off(level=0, transition_time=0)
     assert not on_off.get(0)
+
+
+async def test_current_level_read_served_from_last_ha_level(level):
+    """A live current_level read answers 255/254; serve the last HA level."""
+    with (
+        mock.patch.object(level, "request", mock.AsyncMock()),
+        mock.patch.object(level.endpoint.on_off, "request", mock.AsyncMock()),
+    ):
+        await level.move_to_level_with_on_off(level=128, transition_time=0)
+    with mock.patch.object(
+        type(level).__mro__[1], "read_attributes", mock.AsyncMock(return_value=({}, {}))
+    ) as live:
+        success, _ = await level.read_attributes(["current_level"], allow_cache=False)
+    assert success["current_level"] == 128
+    live.assert_not_awaited()

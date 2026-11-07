@@ -50,6 +50,7 @@ _LEVEL_CMDS = {
 _MAX_LEVEL = 253
 _MOVE_TO_LEVEL = LevelControl.ServerCommandDefs.move_to_level.id
 _WITH_ON_OFF = LevelControl.ServerCommandDefs.move_to_level_with_on_off.id
+_CURRENT_LEVEL = LevelControl.AttributeDefs.current_level.id
 # Last values successfully written by the user (raw 0-1000), kept as virtual
 # attributes so zigpy persists them across HA restarts. The firmware does NOT
 # keep FC03/FC04 across a power loss: after the breaker is cycled both
@@ -325,10 +326,17 @@ class TS110ELevelControl(CustomCluster, LevelControl):
         the device, even when the caller asked for cached values: the cache
         held stale pairing-time values (11 / 1000) that overwrote the real
         ones a few minutes after a restart.
+
+        current_level is served from the last level HA asked for: a live
+        read answers 255/254 whatever the real level (seen 2026-11-07: a
+        light at 50 % showed 100 % after ZHA's periodic refresh).
         """
-        real, virt = [], []
+        real, virt, level_cached = [], [], []
         for attr in attributes:
             attr_id = self.find_attribute(attr).id
+            if attr_id == _CURRENT_LEVEL and self._last_ha_level is not None:
+                level_cached.append(attr)
+                continue
             (virt if attr_id in _VIRTUAL else real).append(attr)
         targets = []
         for attr in virt:
@@ -343,6 +351,8 @@ class TS110ELevelControl(CustomCluster, LevelControl):
         )
         if targets:
             await self._read_live(targets)
+        for attr in level_cached:
+            success[attr] = t.uint8_t(self._last_ha_level)
         for attr in also_live + virt:
             value = self.get(self.find_attribute(attr).id)
             if value is None:
