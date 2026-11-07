@@ -278,7 +278,8 @@ from zigpy.profiles import zha
 from zigpy.quirks import CustomCluster
 from zigpy.quirks.v2 import EntityType, QuirkBuilder
 from zigpy.zcl import foundation
-from zigpy.zcl.foundation import Status as ZCLStatus
+from zigpy import types as t
+from zigpy.zcl.foundation import Status as ZCLStatus, ZCLAttributeDef
 from zigpy.zcl.clusters.general import Basic, BinaryInput, Groups, LevelControl, OnOff, Scenes
 from zigpy.zcl.clusters.lighting import Color
 
@@ -424,11 +425,34 @@ class C4DimmerOnOff(CustomCluster, OnOff):
         return C4_DEFAULT_ON_LEVEL
 
 
+C4_MIN_BRIGHTNESS = 0xEF30
+C4_MAX_BRIGHTNESS = 0xEF31
+
+
 class C4DimmerLevelControl(CustomCluster, LevelControl):
-    """LevelControl that defaults expect_reply=False and caches local attrs."""
+    """LevelControl that defaults expect_reply=False and caches local attrs.
+
+    Also maps HA's brightness range onto a configurable min..max output
+    (local min/max brightness entities, in %): HA 1 -> min and 254 -> max
+    when sending, and the inverse for every current_level the device
+    reports back. LED lamps often stay dark below ~10-20 % and look no
+    brighter above ~40-70 %, so the full HA slider then covers only the
+    useful range (same idea as the TS110E/MS-DM-1C-ZB quirks, 2026-11-07).
+    With min <= 1 and max >= 100 (the default) levels pass through as is.
+    """
 
     cluster_id = LevelControl.cluster_id
     _SUCCESS   = (foundation.GeneralCommand.Default_Response, ZCLStatus.SUCCESS)
+
+    class AttributeDefs(LevelControl.AttributeDefs):
+        """LevelControl attributes plus the local min/max brightness."""
+
+        c4_min_brightness = ZCLAttributeDef(
+            id=C4_MIN_BRIGHTNESS, type=t.uint8_t, is_manufacturer_specific=True
+        )
+        c4_max_brightness = ZCLAttributeDef(
+            id=C4_MAX_BRIGHTNESS, type=t.uint8_t, is_manufacturer_specific=True
+        )
 
     _LOCAL_ATTRS = {
         LevelControl.AttributeDefs.on_level.id,
@@ -436,7 +460,48 @@ class C4DimmerLevelControl(CustomCluster, LevelControl):
         LevelControl.AttributeDefs.on_transition_time.id,
         LevelControl.AttributeDefs.off_transition_time.id,
         LevelControl.AttributeDefs.default_move_rate.id,
+        C4_MIN_BRIGHTNESS,
+        C4_MAX_BRIGHTNESS,
     }
+
+    def _c4_range(self):
+        """(min %, max %) when a real range is configured, else None."""
+        lo = self.get(C4_MIN_BRIGHTNESS)
+        hi = self.get(C4_MAX_BRIGHTNESS)
+        lo = 1 if lo is None else int(lo)
+        hi = 100 if hi is None else int(hi)
+        if hi <= lo or (lo <= 1 and hi >= 100):
+            return None
+        return lo, hi
+
+    def _c4_to_device(self, level_zcl):
+        """HA level (0-254) -> device level inside [min, max]."""
+        if level_zcl is None or int(level_zcl) <= 0:
+            return level_zcl
+        rng = self._c4_range()
+        if rng is None:
+            return level_zcl
+        lo, hi = rng
+        pct = lo + (hi - lo) * (min(int(level_zcl), 254) - 1) / 253
+        return max(1, min(254, round(pct * 254 / 100)))
+
+    def _c4_from_device(self, level_zcl):
+        """Device level (0-254) -> HA level, inverse of _c4_to_device."""
+        if level_zcl is None or int(level_zcl) <= 0:
+            return level_zcl
+        rng = self._c4_range()
+        if rng is None:
+            return level_zcl
+        lo, hi = rng
+        pct = int(level_zcl) * 100 / 254
+        return max(1, min(254, round(1 + (pct - lo) * 253 / (hi - lo))))
+
+    def _update_attribute(self, attrid, value):
+        # Every live level report (_sync_ep1_level, c4_helpers.py, and the
+        # outlet syncs) lands here: show it on HA's scale.
+        if attrid == LevelControl.AttributeDefs.current_level.id and value is not None:
+            value = self._c4_from_device(value)
+        super()._update_attribute(attrid, value)
 
     async def write_attributes(self, attributes, manufacturer=None):
         local_attrs  = {}
@@ -553,10 +618,20 @@ class C4DimmerLevelControl(CustomCluster, LevelControl):
                 LevelControl.ServerCommandDefs.move_to_level_with_on_off.id
                 else "",
             )
+        send_args, send_kwargs = args, kwargs
+        if command_id in (
+            LevelControl.ServerCommandDefs.move_to_level.id,
+            LevelControl.ServerCommandDefs.move_to_level_with_on_off.id,
+        ):
+            if args:
+                send_args = (self._c4_to_device(args[0]),) + tuple(args[1:])
+            elif kwargs.get("level") is not None:
+                send_kwargs = dict(kwargs)
+                send_kwargs["level"] = self._c4_to_device(kwargs["level"])
         result = await super().command(
-            command_id, *args,
+            command_id, *send_args,
             manufacturer=manufacturer, expect_reply=expect_reply,
-            tsn=tsn, **kwargs,
+            tsn=tsn, **send_kwargs,
         )
         if command_id in (
             LevelControl.ServerCommandDefs.move_to_level.id,
@@ -658,6 +733,30 @@ _c4_apd120_entry = (
         unique_id_suffix="off_transition_time_named",
         translation_key="c4_off_transition_time",
         fallback_name="Off Transition Time",
+    )
+    .number(
+        attribute_name="c4_min_brightness",
+        cluster_id=LevelControl.cluster_id,
+        endpoint_id=1,
+        min_value=1,
+        max_value=100,
+        step=1,
+        unit="%",
+        mode="box",
+        translation_key="c4_min_brightness",
+        fallback_name="Brilho mínimo",
+    )
+    .number(
+        attribute_name="c4_max_brightness",
+        cluster_id=LevelControl.cluster_id,
+        endpoint_id=1,
+        min_value=1,
+        max_value=100,
+        step=1,
+        unit="%",
+        mode="box",
+        translation_key="c4_max_brightness",
+        fallback_name="Brilho máximo",
     )
     # --- EP2: ZHA-side-only virtual config endpoint (not on the wire) ---
     .adds_endpoint(2, profile_id=zha.PROFILE_ID, device_type=0x0000)

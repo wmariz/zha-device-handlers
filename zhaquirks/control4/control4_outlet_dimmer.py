@@ -1053,6 +1053,12 @@ class C4Outlet2DimmerLevelControl(C4DimmerLevelControl):
         device = self.endpoint.device
         seq = next_c4_seq(device)
         level_pct = max(0, min(100, int(level_pct)))
+        if level_pct > 0 and self._c4_range() is not None:
+            # every caller passes HA's scale: map into [min, max] here,
+            # once, for both move_to_level and the on() restore path
+            level_pct = max(1, _zcl_level_to_c4_pct(
+                self._c4_to_device(_c4_pct_to_zcl_level(level_pct))
+            ))
         time_ms = max(0, min(0xFFFFFFFF, int(time_ms)))
         cmd = f"0i{seq:04x} c4.dm.rtl {self.OUTLET_IDX:02x} {level_pct:02x} {time_ms:08x}"
         data = _build_c4_frame(0, cmd)
@@ -1340,6 +1346,30 @@ _c4_loz5d1w_entry = (
         translation_key="c4_off_transition_time_1",
         fallback_name="1 Off Transition Time",
     )
+    .number(
+        attribute_name="c4_min_brightness",
+        cluster_id=LevelControl.cluster_id,
+        endpoint_id=1,
+        min_value=1,
+        max_value=100,
+        step=1,
+        unit="%",
+        mode="box",
+        translation_key="c4_min_brightness_1",
+        fallback_name="1 Brilho mínimo",
+    )
+    .number(
+        attribute_name="c4_max_brightness",
+        cluster_id=LevelControl.cluster_id,
+        endpoint_id=1,
+        min_value=1,
+        max_value=100,
+        step=1,
+        unit="%",
+        mode="box",
+        translation_key="c4_max_brightness_1",
+        fallback_name="1 Brilho máximo",
+    )
     # --- EP11: synthetic endpoint for the second outlet (not on the wire) ---
     .adds_endpoint(11, profile_id=zha.PROFILE_ID, device_type=0x0101)
     .adds(C4Outlet2OnOff, endpoint_id=11)
@@ -1379,6 +1409,30 @@ _c4_loz5d1w_entry = (
         unique_id_suffix="off_transition_time_named",
         translation_key="c4_off_transition_time_2",
         fallback_name="2 Off Transition Time",
+    )
+    .number(
+        attribute_name="c4_min_brightness",
+        cluster_id=LevelControl.cluster_id,
+        endpoint_id=11,
+        min_value=1,
+        max_value=100,
+        step=1,
+        unit="%",
+        mode="box",
+        translation_key="c4_min_brightness_2",
+        fallback_name="2 Brilho mínimo",
+    )
+    .number(
+        attribute_name="c4_max_brightness",
+        cluster_id=LevelControl.cluster_id,
+        endpoint_id=11,
+        min_value=1,
+        max_value=100,
+        step=1,
+        unit="%",
+        mode="box",
+        translation_key="c4_max_brightness_2",
+        fallback_name="2 Brilho máximo",
     )
     # --- EP198: real endpoint, the model discriminator (see docstring) ---
     .replaces_endpoint(198, profile_id=zha.PROFILE_ID, device_type=0x0000)
