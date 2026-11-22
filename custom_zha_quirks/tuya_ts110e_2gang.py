@@ -82,19 +82,35 @@ async def _serialized_request(cluster, send, *args, **kwargs):
     on the device are the likely cause. Both channels and both clusters share
     one lock (kept on the device object, which is shared even when this
     module is imported twice), and a lost request is sent once more.
+
+    2026-11-18 TEST: _SERIALIZE = False. The 11-07 losses happened while the
+    bathroom radar flooded the network with distance reports (129 frames in
+    3 min, distance tracking now OFF). With the lock, one lost answer (5-7 s
+    until the stack resends) held the other channel's command, so the Sanca
+    lagged behind the Box. Without it both channels are sent at once; the
+    single retry stays. Set back to True if overlapping losses return.
     """
+    if not _SERIALIZE:
+        return await _send_with_retry(cluster, send, *args, **kwargs)
     device = cluster.endpoint.device
     lock = getattr(device, "_ts110e_request_lock", None)
     if lock is None:
         lock = asyncio.Lock()
         device._ts110e_request_lock = lock
     async with lock:
-        try:
-            return await send(*args, **kwargs)
-        except (DeliveryError, asyncio.TimeoutError) as exc:
-            cluster.debug("request failed (%r), retrying once", exc)
-            await asyncio.sleep(_RETRY_DELAY)
-            return await send(*args, **kwargs)
+        return await _send_with_retry(cluster, send, *args, **kwargs)
+
+
+_SERIALIZE = True  # see _serialized_request (back on 2026-11-22: no-queue test was worse)
+
+
+async def _send_with_retry(cluster, send, *args, **kwargs):
+    try:
+        return await send(*args, **kwargs)
+    except (DeliveryError, asyncio.TimeoutError) as exc:
+        cluster.debug("request failed (%r), retrying once", exc)
+        await asyncio.sleep(_RETRY_DELAY)
+        return await send(*args, **kwargs)
 
 
 def _raw_to_pct(raw: int) -> int:
@@ -215,6 +231,8 @@ class TS110ELevelControl(CustomCluster, LevelControl):
         Interruptor Banheiro automation at 100 % failed, 99 % and a plain
         turn_on worked). 253 is 99.6 %, indistinguishable in practice.
         """
+        # HA level the channel is already at (cache keeps the HA scale)
+        previous_level = self.get(_CURRENT_LEVEL)
         if int(command_id) in _LEVEL_CMDS:
             if args and args[0] is not None:
                 if int(args[0]) > 0:
@@ -233,6 +251,22 @@ class TS110ELevelControl(CustomCluster, LevelControl):
                 # seen 2026-11-06 00:02 with level 253 on both channels).
                 # A plain OnOff.on() always works, so send the level without
                 # the on/off part and then switch on.
+                #
+                # Skip the level part when the channel is already at the
+                # requested level (the usual case: presence turning the
+                # bathroom on at 100 % again). Seen 2026-11-18: with all
+                # requests serialized, one lost answer (5-7 s until the stack
+                # resends) holds every following command, so 2 frames per
+                # turn-on instead of 4 halve the chance of a long delay.
+                if (
+                    previous_level is not None
+                    and self._last_ha_level is not None
+                    # compare on the device scale (HA 253 and 254 both end
+                    # up as device 253 because of the cap)
+                    and self._to_device(int(previous_level))
+                    == self._to_device(self._last_ha_level)
+                ):
+                    return await self.endpoint.on_off.on()
                 result = await super().command(_MOVE_TO_LEVEL, *args, **kwargs)
                 await self.endpoint.on_off.on()
                 return result
