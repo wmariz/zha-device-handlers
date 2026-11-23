@@ -89,6 +89,13 @@ async def _serialized_request(cluster, send, *args, **kwargs):
     until the stack resends) held the other channel's command, so the Sanca
     lagged behind the Box. Without it both channels are sent at once; the
     single retry stays. Set back to True if overlapping losses return.
+
+    2026-11-23: the lock is now held for at most _LOCK_HOLD. Debug log of
+    23/11 01:08: off() to the Sanca was carried out at once (report after
+    0.1 s) but its default response only arrived after the stack resent the
+    command 5 s later, so the Box's off() waited 5.4 s in the queue. Normal
+    answers take ~0.1 s; after _LOCK_HOLD the next request goes out while the
+    slow one keeps waiting for its answer in the background.
     """
     if not _SERIALIZE:
         return await _send_with_retry(cluster, send, *args, **kwargs)
@@ -97,11 +104,17 @@ async def _serialized_request(cluster, send, *args, **kwargs):
     if lock is None:
         lock = asyncio.Lock()
         device._ts110e_request_lock = lock
-    async with lock:
-        return await _send_with_retry(cluster, send, *args, **kwargs)
+    await lock.acquire()
+    try:
+        task = asyncio.ensure_future(_send_with_retry(cluster, send, *args, **kwargs))
+        await asyncio.wait({task}, timeout=_LOCK_HOLD)
+    finally:
+        lock.release()
+    return await task
 
 
 _SERIALIZE = True  # see _serialized_request (back on 2026-11-22: no-queue test was worse)
+_LOCK_HOLD = 1.0  # s, longest a slow request may hold the other channel back
 
 
 async def _send_with_retry(cluster, send, *args, **kwargs):

@@ -461,3 +461,27 @@ async def test_failed_request_is_retried_once(level):
     ):
         await level.move_to_level(level=100, transition_time=0)
     assert len(calls) == 2
+
+
+async def test_slow_answer_holds_the_lock_only_briefly(level):
+    """A request whose answer is late frees the other channel after _LOCK_HOLD."""
+    import asyncio
+    import time
+
+    on_off = level.endpoint.on_off
+    starts = []
+
+    async def first_is_slow(*a, **k):
+        starts.append(time.monotonic())
+        if len(starts) == 1:
+            await asyncio.sleep(0.5)  # answer lost; the stack resends later
+        return mock.Mock(status=foundation.Status.SUCCESS)
+
+    with (
+        mock.patch.object(ts110e, "_LOCK_HOLD", 0.05),
+        mock.patch.object(type(level).__mro__[1], "request", side_effect=first_is_slow, autospec=False),
+        mock.patch.object(type(on_off).__mro__[1], "request", side_effect=first_is_slow, autospec=False),
+    ):
+        await asyncio.gather(on_off.off(), on_off.on())
+    assert len(starts) == 2
+    assert starts[1] - starts[0] < 0.3
