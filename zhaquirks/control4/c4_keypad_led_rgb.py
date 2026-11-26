@@ -105,7 +105,8 @@ from zigpy.zcl.foundation import BaseCommandDefs, ZCLCommandDef
 
 from c4_helpers import (
     C4_CLUSTER_ID, C4_PROFILE_BUTTON, KPZ6B1_BUTTON_MAP, KPZ6B1_LED_EP_MAP,
-    _build_c4_frame, next_c4_seq,
+    _build_c4_frame, _c4_send_controller_identity,
+    _send_many_to_one_route_request, next_c4_seq,
 )
 from c4_led_rgb import C4_ALL_LED_CLUSTER_ID, C4LedColorCluster, sync_led_entity
 
@@ -236,6 +237,17 @@ class C4KeypadAllLedCluster(CustomCluster):
             is_manufacturer_specific=True,
         )
 
+        # Re-send the pairing handshake on demand (Arthouse, 2026-11-26).
+        # Normally the coordinator identity goes out only in reply to the
+        # keypad's own model announcement (_c4_sniff_model); a keypad that
+        # went silent after losing its controller never announces, so the
+        # handshake never happens. This sends it from the HA side.
+        resend_pairing = ZCLCommandDef(
+            id=0x02,
+            schema={},
+            is_manufacturer_specific=True,
+        )
+
     def _sync_button_entity(self, btn_id: int, red: int, green: int, blue: int):
         """Keep button `btn_id`'s LED light entity cache matching what was sent.
 
@@ -312,6 +324,22 @@ class C4KeypadAllLedCluster(CustomCluster):
             )
         ]
         await self._send_all(rgb_values)
+
+    async def resend_pairing(self):
+        """Send the controller identity + a Many-to-One Route Request,
+        exactly what the quirk sends after a model announcement (pairing),
+        but triggered from HA. The MTORR here ignores the network-wide rate
+        limit on purpose: it is a manual, one-off action."""
+        device = self.endpoint.device
+        _LOGGER.info("C4 keypad %s: resend_pairing requested", device.ieee)
+        await _c4_send_controller_identity(
+            device, "resend_pairing", zcl_seq=device.get_sequence(), report=True,
+        )
+        sent = await _send_many_to_one_route_request(device.application)
+        _LOGGER.info(
+            "C4 keypad %s: resend_pairing done (identity sent, MTORR %s)",
+            device.ieee, "sent" if sent else "FAILED",
+        )
 
     def handle_cluster_request(self, hdr, args, *, dst_addressing=None):
         """Log any unexpected inbound cluster requests."""
