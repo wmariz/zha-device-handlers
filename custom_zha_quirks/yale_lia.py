@@ -254,6 +254,40 @@ class YaleLiaDoorLock(CustomCluster, DoorLock):
             },
         )
 
+    class ServerCommandDefs(DoorLock.ServerCommandDefs):
+        """Server command definitions."""
+
+        # Arthouse 2026-11-26: on-demand recovery after a lost message (e.g.
+        # the door opened while HA still showed the lock locked). Handled
+        # locally in refresh_routes(); nothing is sent to the lock with this
+        # id. Kept separate from the Control4 keypad's resend_pairing on
+        # purpose (user: the two must not depend on each other).
+        refresh_routes: Final = ZCLCommandDef(
+            id=0xF0, schema={}, is_manufacturer_specific=True
+        )
+
+    async def refresh_routes(self):
+        """Ask the network to rebuild its routes to the coordinator (a
+        Many-to-One Route Request from the coordinator), then re-read the
+        lock state straight from the lock."""
+        app = self.endpoint.device.application
+        ezsp = getattr(app, "_ezsp", None)
+        if ezsp is not None:
+            try:
+                await ezsp.sendManyToOneRouteRequest(
+                    concentratorType=0xFFF9, radius=5
+                )
+                self.info("refresh_routes: Many-to-One Route Request sent")
+            except Exception as exc:  # noqa: BLE001
+                self.warning("refresh_routes: MTORR failed: %s", exc)
+        else:
+            self.warning("refresh_routes: radio is not EZSP, no MTORR sent")
+        try:
+            await self.read_attributes(["lock_state"], allow_cache=False)
+            self.info("refresh_routes: lock_state re-read")
+        except Exception as exc:  # noqa: BLE001
+            self.warning("refresh_routes: lock_state read failed: %s", exc)
+
     def handle_cluster_request(self, hdr, args, *, dst_addressing=None):
         """Keep the last operation event as local attributes."""
         if hdr.command_id == 0x20 and not hdr.frame_control.is_general:
